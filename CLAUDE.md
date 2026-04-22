@@ -25,9 +25,16 @@ Pieverse (el facilitator recomendado por Kite) tuvo un outage crítico de `/v2/v
 Lee siempre:
 1. `.nexus/project-context.md` — contexto técnico completo, stack, reglas, patterns
 2. `.nexus/product-context.md` — contexto de negocio, personas, flows, revenue
-3. `BACKLOG.md` — épicas y prioridades
-4. `doc/architecture/X402-CONFORMANCE.md` — qué parte del spec implementamos
-5. `doc/architecture/SECURITY.md` — threat model y mitigaciones
+3. `BACKLOG.md` — épicas, prioridades y Tech Debt (`TD-NN-NN`)
+4. `OWNERS.md` — boundaries de módulos (core/chains/methods/routes/infra)
+5. `doc/architecture/X402-CONFORMANCE.md` — qué parte del spec implementamos
+6. `doc/architecture/SECURITY.md` — threat model y mitigaciones
+
+**Antes de tocar libs fast-moving** (viem v2, Fastify v5, `@noble/*`, `x402` SDK): leer
+`node_modules/<lib>/dist/` + README de la versión instalada **antes** de codear. Hay cambios
+post-cutoff del modelo — nunca asumir firma/import desde memoria, siempre validar contra el
+source real del `node_modules/`. Aplica también al spec x402 — consultar `docs.x402.org`
+directo cuando haya dudas.
 
 ---
 
@@ -72,6 +79,8 @@ Gates — texto exacto:
 - **Method-adaptive** — EIP-3009, Permit2, ERC-7710 son plug-ins en `src/methods/`
 - **Logs estructurados JSON** (Pino) — prohibido `console.log` salvo en scripts
 - **Tests obligatorios** — cada endpoint ≥1 test; cada method adapter ≥1 test de conformance
+- **Service layer = discriminated union, nunca throw** — `src/core/*` y `src/methods/*` retornan `{ ok: true, ... } | { ok: false, error: { code, message, http } }`. Ver `.nexus/project-context.md` → "Service Layer — Response Contract"
+- **Module boundaries** — ver `OWNERS.md`. Cross-layer imports prohibidos (routes no importa methods directo, chains no importa core, etc.). AR revisa en cada PR que toca 2+ módulos
 - **Security scanning en CI** — Snyk + Dependabot + eslint-plugin-security
 - **Push siempre:** `git push origin main` (después de PR merge)
 

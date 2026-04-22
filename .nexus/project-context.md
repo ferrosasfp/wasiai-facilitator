@@ -145,6 +145,67 @@ Servicio HTTP production-grade que implementa el contrato de [facilitator del pr
 10. **Logs JSON estructurados** — prohibido `console.log` salvo scripts
 11. **Tests obligatorios** — cada route, cada method adapter, cada chain adapter
 12. **AR obligatorio para money-moving changes** — `src/core/settle.ts`, `src/methods/*`, `src/chains/*`
+13. **Service layer returns discriminated union, nunca throw** — ver seccion siguiente
+14. **Module boundaries respetados** — ver `OWNERS.md` (cross-layer imports prohibidos)
+
+---
+
+## Service Layer — Response Contract
+
+**Regla**: `src/core/*.ts` y `src/methods/**/*.ts` NUNCA lanzan excepciones por errores
+previstos. Siempre retornan un discriminated union tipado:
+
+```ts
+// src/core/types.ts (stub — lo implementa Dev en WFAC-2)
+export type Ok<T> = { ok: true } & T;
+export type Err = {
+  ok: false;
+  error: {
+    code: X402ErrorCode;    // uno de los 10 codigos del spec
+    message: string;         // human-readable, SIN PII (no addresses en clear si es sensible)
+    http: number;            // HTTP status code que debe mapear el route layer
+  };
+};
+export type Result<T> = Ok<T> | Err;
+```
+
+**Ejemplo correcto:**
+
+```ts
+// core/verify.ts
+export async function verify(params: VerifyParams): Promise<Result<VerifyOk>> {
+  const recovered = await recoverTypedDataAddress({ ... });
+  if (recovered !== params.authorization.from) {
+    return {
+      ok: false,
+      error: { code: 'INVALID_SIGNATURE', message: 'Signature does not match sender', http: 401 }
+    };
+  }
+  return { ok: true, client: recovered, amount: ..., asset: ..., network: ..., payTo: ..., expiresAt: ... };
+}
+```
+
+**Anti-patron (PROHIBIDO):**
+
+```ts
+// NO hacer esto en core/ ni methods/
+throw new Error('Invalid signature');  // rompe el tipado exhaustivo del caller
+```
+
+**Por que esta regla:**
+- `throw` pierde el tipo del error — el caller debe hacer try/catch + asumir `unknown`
+- x402 spec requiere mapping preciso a 10 codigos especificos — el union forza exhaustividad
+- `throws` quedan reservados para bugs inesperados (ej. invariante rota); los atrapa el
+  `error-handler` middleware en el boundary HTTP
+- En el route layer el mapping es trivial:
+  ```ts
+  const result = await core.verify(...);
+  if (!result.ok) return reply.code(result.error.http).send({ error: result.error });
+  return reply.send(result);
+  ```
+
+**Excepcion permitida**: middleware (rate-limit, CORS) puede throw porque el handler global
+los captura como parte del flujo HTTP estandar de Fastify. En `core/` y `methods/` no.
 
 ---
 
@@ -408,20 +469,13 @@ facilitator_idempotency (
 
 ---
 
-## Deuda tecnica conocida
+## Deuda tecnica
 
-| # | Item | Target |
-|---|------|--------|
-| 1 | Sentry APM integration | V1.1 (ticket WFAC-X) |
-| 2 | Multi-sig operator wallet (Safe) | V2 |
-| 3 | Wallet key rotation protocol | V2 |
-| 4 | Permit2 method adapter | V1.5 |
-| 5 | ERC-7710 method adapter | V2 |
-| 6 | Solana/non-EVM adapters | V2 |
-| 7 | API key management (public reg) | V1.5 |
-| 8 | Fee model (optional 0.1-1%) | V2 |
-| 9 | OFAC screening / geo-blocking | Enterprise V2 |
-| 10 | Admin dashboard (settlement monitoring) | V1.5 |
+Gestionada en formato `TD-NN-NN` en `BACKLOG.md` → seccion "Tech Debt — Tracking Formal".
+Cada TD tiene ticket Jira asignado antes del release V1. Revisada trimestralmente en retros.
+
+Regla: el PR que introduce nueva TD debe referenciarla en el commit message
+(`Tech Debt: TD-NN-NN`) y asegurar que exista la entrada en `BACKLOG.md` antes del merge.
 
 ---
 

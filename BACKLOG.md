@@ -128,6 +128,33 @@ Cada chain es un plug-in en `src/chains/`.
 
 ---
 
+## Tech Debt — Tracking Formal
+
+Formato `TD-NN-NN`: primer NN = épica afectada, segundo NN = secuencial dentro de la épica.
+
+| TD ID | Descripción | Target | Ticket Jira |
+|-------|-------------|--------|-------------|
+| TD-02-01 | Permit2 method adapter (cualquier ERC-20, no solo EIP-3009) | V1.5 | WFAC-TBD |
+| TD-02-02 | ERC-7710 delegation method adapter | V2 | WFAC-TBD |
+| TD-03-01 | API key management público (registration + revocation) | V1.5 | WFAC-TBD |
+| TD-04-01 | Sentry APM integration (error tracking + performance) | V1.1 | WFAC-TBD |
+| TD-05-01 | Multi-sig operator wallet (Safe) — elimina single-key SPOF | V2 | WFAC-TBD |
+| TD-05-02 | Wallet key rotation protocol (zero-downtime) | V2 | WFAC-TBD |
+| TD-06-01 | Solana / non-EVM chain adapters | V2 | WFAC-TBD |
+| TD-09-01 | wasiai-a2a migration from Pieverse → facilitator | Post-V1 | WFAC-80 |
+| TD-09-02 | wasiai-v2 migration from internal `usdcSettler.ts` → facilitator | Post-V1 | WFAC-81 |
+| TD-12-01 | Fee model opcional (0.1-1% protocol fee) | V2 | WFAC-TBD |
+| TD-12-02 | Admin dashboard (settlement monitoring, wallet balances) | V1.5 | WFAC-TBD |
+| TD-13-01 | OFAC screening + geo-blocking (enterprise) | V2 | WFAC-TBD |
+
+**Reglas de TD** (adopción patrón luma-ai):
+1. Todo TD debe tener ticket Jira creado antes del release V1 (aunque no esté ready)
+2. El PR que introduce el TD debe referenciarlo en el mensaje: `Tech Debt: TD-NN-NN`
+3. Revisión obligatoria en retros trimestrales (próxima: 2026-07)
+4. TD sin target definido se defaultea a V2 y entra en backlog de revisión
+
+---
+
 ## Dependencias externas conocidas
 
 | Dep | Qué necesita | Status |
