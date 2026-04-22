@@ -112,16 +112,17 @@ Cada chain es un plug-in en `src/chains/`.
 - E1 Core Infrastructure
 - E2 EIP-3009 Method
 - E3 HTTP API
-- E5 (parcial) — rate limit + circuit breaker
-- E6 — Kite Testnet como MVP
-- E8 — Railway deploy
+- E4 (parcial) — **settlement ledger + audit log** (WFAC-32, WFAC-33) ← promovido desde V1.1 por compliance + zero-trust observability desde día 1
+- E5 (parcial) — rate limit + circuit breaker (WFAC-40, WFAC-41)
+- E6 — Kite Testnet como MVP (WFAC-50)
+- E8 — Railway deploy (WFAC-70, WFAC-73)
 
 ### Should-have V1.1
-- E4 Observability full
-- E5 full (BullMQ queue, wallet monitoring)
-- E6 full (Avalanche + Kite Mainnet)
+- E4 full (metrics Prometheus + request-id correlation — WFAC-30, WFAC-31)
+- E5 full (BullMQ queue, wallet monitoring — WFAC-42, WFAC-43)
+- E6 full (Avalanche + Kite Mainnet — WFAC-51, WFAC-52, WFAC-53)
 - E7 Spec Conformance tests
-- E9 integrations (wasiai-a2a consumer)
+- E9 integrations (wasiai-a2a consumer — WFAC-80)
 
 ### Nice-to-have V2
 - E10, E11, E12, E13
