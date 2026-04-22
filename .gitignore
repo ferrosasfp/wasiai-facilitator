@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+*.tsbuildinfo
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.local
+.env.*.local
+.env.production
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Test
+coverage/
+.nyc_output/
+
+# Claude Code local settings (keep .claude/agents/ and .claude/commands/ tracked)
+.claude/settings.json
+.claude/settings.local.json
+
+# Railway CLI cache
+.railway/
+
+# Temporary
+tmp/
+scripts/tmp/
