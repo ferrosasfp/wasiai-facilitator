@@ -7,6 +7,7 @@
 | 003 | 2026-04-23 | Chain registry (WFAC-4) | architecture | QUALITY | DONE | feat/003-wfac-4-chain-registry |
 | 004 | 2026-04-22 | Redis client — idempotency cache foundation (WFAC-5) | infra | QUALITY | DONE | feat/004-wfac-5-redis-client |
 | 005 | 2026-04-22 | EIP-3009 verify logic (WFAC-6) | method | QUALITY | DONE | feat/005-wfac-6-eip3009-verify |
+| 006 | 2026-04-23 | EIP-3009 settle logic (WFAC-10) | method | QUALITY | in progress | feat/006-wfac-10-eip3009-settle |
 
 <!--
 Formato por entrada:
