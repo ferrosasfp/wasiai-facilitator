@@ -11,10 +11,7 @@ import type { FastifyPluginAsync } from 'fastify';
  *        rely on `resolveJsonModule` + a relative import. Instead we resolve
  *        the path at runtime via `fileURLToPath(import.meta.url)`.
  */
-const pkgPath = resolve(
-  dirname(fileURLToPath(import.meta.url)),
-  '../../package.json',
-);
+const pkgPath = resolve(dirname(fileURLToPath(import.meta.url)), '../../package.json');
 const { version } = JSON.parse(readFileSync(pkgPath, 'utf-8')) as {
   version: string;
 };

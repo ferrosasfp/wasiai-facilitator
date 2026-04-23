@@ -1,8 +1,4 @@
-import pino, {
-  type Logger,
-  type LoggerOptions,
-  type DestinationStream,
-} from 'pino';
+import pino, { type Logger, type LoggerOptions, type DestinationStream } from 'pino';
 import type { EnvConfig } from './env.js';
 
 /**
@@ -17,10 +13,7 @@ import type { EnvConfig } from './env.js';
  *
  * CD-11: the returned instance is what Fastify receives as `loggerInstance`.
  */
-export function createLogger(
-  env: EnvConfig,
-  destination?: DestinationStream,
-): Logger {
+export function createLogger(env: EnvConfig, destination?: DestinationStream): Logger {
   const baseOptions: LoggerOptions = { level: env.LOG_LEVEL };
 
   if (destination) {

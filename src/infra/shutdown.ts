@@ -27,9 +27,7 @@ export interface ShutdownOptions {
  * logs an info `'shutdown already in progress'` and returns without starting
  * a second shutdown.
  */
-export function createShutdownHandler(
-  opts: ShutdownOptions,
-): (signal: string) => Promise<void> {
+export function createShutdownHandler(opts: ShutdownOptions): (signal: string) => Promise<void> {
   const { app, graceMs } = opts;
   const exit = opts.exit ?? (process.exit as (code: number) => never);
   let shutdownInProgress = false;
@@ -46,10 +44,7 @@ export function createShutdownHandler(
     let timedOut = false;
     const forceExitTimer = setTimeout(() => {
       timedOut = true;
-      app.log.error(
-        { signal, graceMs },
-        'Graceful shutdown timed out, forcing exit',
-      );
+      app.log.error({ signal, graceMs }, 'Graceful shutdown timed out, forcing exit');
       exit(1);
     }, graceMs);
     forceExitTimer.unref();

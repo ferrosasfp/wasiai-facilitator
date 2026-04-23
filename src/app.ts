@@ -1,7 +1,4 @@
-import Fastify, {
-  type FastifyInstance,
-  type FastifyBaseLogger,
-} from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyBaseLogger } from 'fastify';
 import type { DestinationStream } from 'pino';
 import { parseEnv, type EnvConfig } from './infra/env.js';
 import { createLogger } from './infra/logger.js';
@@ -23,9 +20,7 @@ export interface BuildAppOptions {
  * CD-11: logger is pre-built via `createLogger()`; Fastify receives `loggerInstance`.
  * CD-12: `disableRequestLogging` stays `false` (explicit default) so AC-9 fires.
  */
-export async function buildApp(
-  options: BuildAppOptions = {},
-): Promise<FastifyInstance> {
+export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyInstance> {
   const rawEnv = options.env ?? process.env;
   const env: EnvConfig = parseEnv(rawEnv);
   // Widen Pino's Logger to FastifyBaseLogger so Fastify does not specialize
