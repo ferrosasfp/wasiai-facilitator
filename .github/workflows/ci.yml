@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   qa:
-    name: QA (typecheck + lint + tests + security)
+    name: QA (typecheck + lint + tests + build + security)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -35,24 +35,57 @@ jobs:
       - name: Prettier format check
         run: npm run format:check
 
+      - name: Build (tsc emit to dist/)
+        run: npm run build
+
       - name: Unit tests
         run: npm test
+
+      - name: Test coverage
+        run: npm run test:coverage
+
+      - name: Publish coverage summary
+        if: always()
+        run: |
+          {
+            echo "## Test coverage"
+            echo ""
+            echo "Coverage table (v8) is printed in the \`Test coverage\` step log."
+            echo "Full HTML report is available in the \`coverage\` artifact (retained 7 days)."
+            echo ""
+            if [ -f coverage/coverage-summary.json ]; then
+              echo "### coverage-summary.json"
+              echo '```json'
+              cat coverage/coverage-summary.json
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage/
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Security audit (high + critical)
         run: npm run security:audit
         continue-on-error: false
 
-  # Snyk scanning — requires SNYK_TOKEN secret
+  # Snyk scanning — runs on push to main AND pull_request (DT-F).
+  # snyk/actions/node@master is intentionally unpinned: Snyk maintains this
+  # action actively and does not publish SHA release tags (CD-7).
   snyk:
     name: Snyk vulnerability scan
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v4
       - name: Snyk open source scan
         uses: snyk/actions/node@master
-        continue-on-error: true
+        continue-on-error: false
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         with:
