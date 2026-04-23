@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance, type FastifyBaseLogger } from 'fastify';
 import type { DestinationStream } from 'pino';
 import { parseEnv, type EnvConfig } from './infra/env.js';
 import { createLogger } from './infra/logger.js';
+import { initRedis, getRedisClient } from './infra/redis.js';
 import { healthRoute } from './routes/health.js';
 
 export interface BuildAppOptions {
@@ -40,12 +41,30 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   // the generic (structural compatibility is intentional; R9 in the Story File).
   const logger: FastifyBaseLogger = createLogger(env, options.loggerDestination);
 
+  // WFAC-5: initialize Redis singleton with env + logger. Idempotent; creates
+  // no TCP connection (lazyConnect: true). The actual ioredis instance is
+  // created lazily on the first getRedisClient() call by consumers.
+  initRedis(env, logger);
+
   const app = Fastify({
     loggerInstance: logger,
     disableRequestLogging: false,
   });
 
   await app.register(healthRoute);
+
+  // WFAC-5 AC-10/AC-11: quit Redis client during graceful shutdown. Fastify
+  // v5 runs onClose hooks before app.close() resolves. Null-guard for test env
+  // (getRedisClient may return null when REDIS_URL is undefined).
+  app.addHook('onClose', async () => {
+    const client = getRedisClient();
+    if (!client) return;
+    try {
+      await client.quit();
+    } catch (err: unknown) {
+      logger.error({ err }, 'Redis quit failed during shutdown');
+    }
+  });
 
   return app;
 }
