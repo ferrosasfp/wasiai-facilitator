@@ -5,13 +5,31 @@ import { z } from 'zod';
  *
  * CD-2: PORT default 3002 is declared here (the only source-of-truth literal).
  * CD-8: validation fails FAST in `parseEnv` before anything else bootstraps.
+ *
+ * REDIS_URL: required in development/production. Optional when NODE_ENV === 'test'
+ *            (tests must not require a live Redis instance — see WFAC-5 AC-3).
+ * REDIS_DB:  optional Redis logical database index (0-15). Default 0.
  */
-export const EnvSchema = z.object({
-  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
-  PORT: z.coerce.number().int().min(1).max(65535).default(3002),
-  LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
-  SHUTDOWN_GRACE_MS: z.coerce.number().int().min(0).default(10000),
-});
+export const EnvSchema = z
+  .object({
+    NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+    PORT: z.coerce.number().int().min(1).max(65535).default(3002),
+    LOG_LEVEL: z
+      .enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'])
+      .default('info'),
+    SHUTDOWN_GRACE_MS: z.coerce.number().int().min(0).default(10000),
+    REDIS_URL: z.string().min(1).optional(),
+    REDIS_DB: z.coerce.number().int().min(0).max(15).default(0),
+  })
+  .superRefine((data, ctx) => {
+    if (!data.REDIS_URL && data.NODE_ENV !== 'test') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['REDIS_URL'],
+        message: 'REDIS_URL is required when NODE_ENV is not "test"',
+      });
+    }
+  });
 
 export type EnvConfig = z.infer<typeof EnvSchema>;
 
