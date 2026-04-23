@@ -2,6 +2,7 @@
 
 | # | Fecha | HU | Tipo | Mode | Status | Branch |
 |---|-------|----|------|------|--------|--------|
+| 001 | 2026-04-22 | Fastify bootstrap + /health + Pino (WFAC-2) | feature | QUALITY | DONE | feat/001-wfac-2-fastify-bootstrap |
 
 <!--
 Formato por entrada:

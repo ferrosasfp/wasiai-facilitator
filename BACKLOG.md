@@ -135,6 +135,11 @@ Formato `TD-NN-NN`: primer NN = épica afectada, segundo NN = secuencial dentro 
 
 | TD ID | Descripción | Target | Ticket Jira |
 |-------|-------------|--------|-------------|
+| TD-01-04 | Pino redact config para auth headers (sensitive data masking) | V1.1 — WFAC-31 | WFAC-31 |
+| TD-01-05 | shutdown.ts branch coverage: idempotency + reject paths (try/finally) | Next HU touching shutdown | WFAC-TBD |
+| TD-01-06 | AC-9/12 wording refinement (literal vs semantic, consult Architect) | Pending decision | WFAC-TBD |
+| TD-01-07 | try/finally wrapper en listening log suppression (refactor index.ts) | Next refactor opportunity | WFAC-TBD |
+| TD-01-08 | Extract listening log wrapper a src/infra/logger.ts helper | Nice-to-have | WFAC-TBD |
 | TD-02-01 | Permit2 method adapter (cualquier ERC-20, no solo EIP-3009) | V1.5 | WFAC-TBD |
 | TD-02-02 | ERC-7710 delegation method adapter | V2 | WFAC-TBD |
 | TD-03-01 | API key management público (registration + revocation) | V1.5 | WFAC-TBD |
