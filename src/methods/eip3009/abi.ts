@@ -23,3 +23,45 @@ export const EIP3009_TYPES = {
 } as const;
 
 export const EIP3009_PRIMARY_TYPE = 'TransferWithAuthorization' as const;
+
+/**
+ * Minimal ABI for EIP-3009 `transferWithAuthorization` — v/r/s overload.
+ *
+ * Source: Circle FiatTokenV2 (canonical USDC/PYUSD implementation).
+ * https://github.com/circlefin/stablecoin-evm/blob/master/contracts/v2/FiatTokenV2.sol
+ *
+ * Overload: v/r/s (NOT the EIP-2098 compact bytes overload).
+ * The compact bytes variant requires WFAC-13 pre-processing (out of scope).
+ *
+ * CRITICAL: `as const` is required so viem can narrow the function signature
+ * types for simulateContract/writeContract. Without it, the inferred type
+ * widens and viem rejects with an abi-encoding error at runtime.
+ */
+export const FIAT_TOKEN_ABI = [
+  {
+    type: 'function',
+    name: 'transferWithAuthorization',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'from', type: 'address' },
+      { name: 'to', type: 'address' },
+      { name: 'value', type: 'uint256' },
+      { name: 'validAfter', type: 'uint256' },
+      { name: 'validBefore', type: 'uint256' },
+      { name: 'nonce', type: 'bytes32' },
+      { name: 'v', type: 'uint8' },
+      { name: 'r', type: 'bytes32' },
+      { name: 's', type: 'bytes32' },
+    ],
+    outputs: [],
+  },
+] as const;
+
+/**
+ * Timeout for waiting on-chain tx receipt after submission.
+ *
+ * 60s chosen because supported chains (Kite, Avalanche) have ≤2s blocktimes.
+ * Longer waits indicate RPC issues or stuck txs — upper-layer retry (WFAC-42)
+ * handles those. viem default is 180_000 ms; we explicitly override.
+ */
+export const RECEIPT_TIMEOUT_MS = 60_000;
