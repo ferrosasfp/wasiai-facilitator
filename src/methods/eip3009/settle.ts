@@ -61,7 +61,18 @@ export async function settleEip3009(
   }
 
   // 2. Parse signature into v/r/s (reject EIP-2098 compact — CD-NEW-15).
-  const parsed = parseSignature(params.payload.signature);
+  // MNR-3 (AR F3.1): defense-in-depth — `parseSignature` can throw for malformed
+  // bytes or invalid v (e.g. v=29). Today this branch is unreachable because
+  // verify.ts catches the same cases first via `recoverTypedDataAddress`, but if
+  // the flow is ever reordered (e.g. settle reused without verify), a throw here
+  // would reject the Promise instead of returning an AdapterResult (violates
+  // AC-14 invariant "never throws for foreseeable conditions").
+  let parsed;
+  try {
+    parsed = parseSignature(params.payload.signature);
+  } catch (e) {
+    return err('INVALID_SIGNATURE', sanitize(e), 401);
+  }
   if (!('v' in parsed) || parsed.v === undefined) {
     return err(
       'INVALID_SIGNATURE',
