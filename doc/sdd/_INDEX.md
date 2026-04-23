@@ -4,6 +4,7 @@
 |---|-------|----|------|------|--------|--------|
 | 001 | 2026-04-22 | Fastify bootstrap + /health + Pino (WFAC-2) | feature | QUALITY | DONE | feat/001-wfac-2-fastify-bootstrap |
 | 002 | 2026-04-23 | CI workflow (WFAC-3) | infra | FAST+AR | DONE | feat/002-wfac-3-ci-workflow |
+| 003 | 2026-04-23 | Chain registry (WFAC-4) | architecture | QUALITY | DONE | feat/003-wfac-4-chain-registry |
 
 <!--
 Formato por entrada:
