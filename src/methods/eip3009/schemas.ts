@@ -24,13 +24,18 @@ export const AddressHexSchema = z
   .regex(/^0x[0-9a-fA-F]{40}$/u, 'must be 0x-prefixed 20-byte hex');
 
 /**
- * Decimal uint256 string.
- * - Regex: digits only, no leading + or -, no scientific notation.
+ * Decimal uint256 string — CANONICAL form.
+ * - Regex: either "0" OR [1-9][0-9]* — rejects leading zeros ("01000"),
+ *   negatives, "+", scientific notation ("1e2"), hex prefixes, whitespace.
  * - Refine: BigInt parseable AND within [0, 2^256-1].
+ *
+ * Rationale (BLQ-BAJO-1): leading-zero variants produce identical BigInt
+ * values but distinct string representations — canonical form keeps logs
+ * and equality checks unambiguous.
  */
 export const Uint256StringSchema = z
   .string()
-  .regex(/^\d+$/u, 'must be a decimal uint256 string')
+  .regex(/^(0|[1-9]\d*)$/u, 'must be a canonical decimal uint256 string')
   .refine((s) => {
     try {
       const n = BigInt(s);
@@ -51,3 +56,27 @@ export const Eip3009AuthorizationSchema = z.object({
 });
 
 export type Eip3009Authorization = z.infer<typeof Eip3009AuthorizationSchema>;
+
+/**
+ * `params.accepted` validator (BLQ-ALTO-2 / CD-2).
+ *
+ * Validates the hot-path fields consumed by verify.ts BEFORE any `BigInt(...)`
+ * or `isAddressEqual(...)` call so we never throw on attacker-controlled input:
+ *   - amount: canonical uint256 string (rejects "-1", "abc", "1e2", "01000").
+ *   - asset/payTo: 0x + 40 hex chars (rejects non-address strings).
+ *   - network: non-empty string (e.g. "eip155:2368").
+ *
+ * Optional fields (scheme, maxTimeoutSeconds, extra) pass through via
+ * `.passthrough()` to avoid rejecting upstream-valid payloads while we
+ * focus validation on the fields verify.ts actually consumes.
+ */
+export const AcceptedSchema = z
+  .object({
+    amount: Uint256StringSchema,
+    asset: AddressHexSchema,
+    payTo: AddressHexSchema,
+    network: z.string().min(1, 'network must be a non-empty string'),
+  })
+  .passthrough();
+
+export type AcceptedValidated = z.infer<typeof AcceptedSchema>;

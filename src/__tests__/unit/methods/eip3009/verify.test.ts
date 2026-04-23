@@ -454,5 +454,119 @@ describe('verifyEip3009', () => {
       if (r1.ok) expect(r1.amount).toBe('1000');
       if (r2.ok) expect(r2.amount).toBe('2000');
     });
+
+    // ── F3.1 Fix-pack (BLQ resolution) ──
+
+    it('T-H9 (BLQ-ALTO-1): accepted.amount = "-1" returns INVALID_AMOUNT without throwing', async () => {
+      const params = await makeValidParams({
+        acceptedOverrides: { amount: '-1' },
+      });
+      // Must resolve (never throw) — negatives rejected by canonical regex.
+      const result = await verifyEip3009(params, TEST_TOKEN, TEST_CHAIN_ID);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe('INVALID_AMOUNT');
+        expect(result.error.http).toBe(400);
+      }
+    });
+
+    it('T-H10 (BLQ-ALTO-2 / CD-2): accepted.amount = "abc" returns INVALID_AMOUNT without throwing', async () => {
+      const params = await makeValidParams({
+        acceptedOverrides: { amount: 'abc' },
+      });
+      // Pre-fix: BigInt('abc') threw unhandled.
+      // Post-fix: AcceptedSchema rejects before any BigInt() call.
+      const result = await verifyEip3009(params, TEST_TOKEN, TEST_CHAIN_ID);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe('INVALID_AMOUNT');
+        expect(result.error.http).toBe(400);
+      }
+    });
+
+    it('T-H11 (BLQ-ALTO-2): accepted.amount = "1e2" (scientific) returns INVALID_AMOUNT without throwing', async () => {
+      const params = await makeValidParams({
+        acceptedOverrides: { amount: '1e2' },
+      });
+      const result = await verifyEip3009(params, TEST_TOKEN, TEST_CHAIN_ID);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe('INVALID_AMOUNT');
+        expect(result.error.http).toBe(400);
+      }
+    });
+
+    it('T-H12 (BLQ-ALTO-2): accepted.asset = "not-an-address" rejected without throwing', async () => {
+      const params = await makeValidParams({
+        acceptedOverrides: { asset: 'not-an-address' },
+      });
+      // Pre-fix: isAddressEqual('not-an-address', ...) could throw.
+      // Post-fix: AcceptedSchema's AddressHexSchema rejects first.
+      const result = await verifyEip3009(params, TEST_TOKEN, TEST_CHAIN_ID);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        // Asset shape errors are routed to NETWORK_MISMATCH (same class as
+        // AC-11). Http must remain 400 regardless of code.
+        expect(result.error.http).toBe(400);
+        expect(['NETWORK_MISMATCH', 'INVALID_SIGNATURE']).toContain(result.error.code);
+      }
+    });
+
+    it('T-H13 (BLQ-BAJO-1): authorization.value = "01000" (leading zero) returns INVALID_SIGNATURE', async () => {
+      const valid = await makeValidParams();
+      const tampered: VerifyParams = {
+        ...valid,
+        payload: {
+          ...valid.payload,
+          authorization: {
+            ...valid.payload.authorization,
+            // Canonical form requires "1000"; "01000" now rejected by
+            // /^(0|[1-9]\d*)$/ — uniquifies log/equality representation.
+            value: '01000',
+          },
+        },
+      };
+      const result = await verifyEip3009(tampered, TEST_TOKEN, TEST_CHAIN_ID);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe('INVALID_SIGNATURE');
+        expect(result.error.http).toBe(401);
+      }
+    });
+
+    it('T-H14 (BLQ-MED-1): authorization.validBefore = "99999999999999999999" (>2^53) compares via BigInt', async () => {
+      // This value is a valid uint256 (<= 2^256-1) but exceeds MAX_SAFE_INTEGER.
+      // Pre-fix: Number("99999999999999999999") loses precision and could
+      //   flip expired/valid decisions. We assert the decision is made on
+      //   BigInt (so a far-future validBefore is NOT spuriously expired),
+      //   AND that overall verification still proceeds to signature recovery
+      //   without throwing on the numeric conversion.
+      // Sign a valid auth with a normal validBefore, then tamper post-sign
+      // with the huge string — recover will yield a different message hash
+      // (since validBefore is part of the EIP-712 struct) so INVALID_SIGNATURE
+      // is the expected terminal code. The ASSERTION is: no throw, no
+      // EXPIRED_AUTHORIZATION (which would indicate Number() precision-loss
+      // flipped the gate in reverse).
+      const valid = await makeValidParams();
+      const tampered: VerifyParams = {
+        ...valid,
+        payload: {
+          ...valid.payload,
+          authorization: {
+            ...valid.payload.authorization,
+            validBefore: '99999999999999999999',
+          },
+        },
+      };
+      const result = await verifyEip3009(tampered, TEST_TOKEN, TEST_CHAIN_ID);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        // Critical: must NOT be EXPIRED_AUTHORIZATION — BigInt comparison
+        // correctly identifies this as a future timestamp.
+        expect(result.error.code).not.toBe('EXPIRED_AUTHORIZATION');
+        // Terminal classification is INVALID_SIGNATURE (recovered mismatch).
+        expect(result.error.code).toBe('INVALID_SIGNATURE');
+      }
+    });
   });
 });
