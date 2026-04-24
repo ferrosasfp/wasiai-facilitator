@@ -3,6 +3,7 @@ import type { DestinationStream } from 'pino';
 import { parseEnv, type EnvConfig } from './infra/env.js';
 import { createLogger } from './infra/logger.js';
 import { initRedis, getRedisClient } from './infra/redis.js';
+import { initSupabase } from './infra/supabase.js';
 import { healthRoute } from './routes/health.js';
 import { verifyRoute } from './routes/verify.js';
 import { settleRoute } from './routes/settle.js';
@@ -49,6 +50,11 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   // no TCP connection (lazyConnect: true). The actual ioredis instance is
   // created lazily on the first getRedisClient() call by consumers.
   initRedis(env, logger);
+
+  // WFAC-32: initialize Supabase singleton (ledger). Synchronous — the HTTP
+  // client is created lazily on the first getSupabaseClient() call. CD-15:
+  // NO onClose hook — the Supabase client is HTTP-based (no persistent TCP).
+  initSupabase(env, logger);
 
   const app = Fastify({
     loggerInstance: logger,
