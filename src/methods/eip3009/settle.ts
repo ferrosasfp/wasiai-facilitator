@@ -3,7 +3,8 @@
  *
  * Flow:
  *   1. Re-verify payload (off-chain checks; NO RPC).
- *   2. Parse signature into v/r/s. Reject EIP-2098 compact (WFAC-13).
+ *   2. Normalize signature via `normalizeSignature` (WFAC-13) — accepts 65-byte
+ *      standard, 64-byte EIP-2098 compact, legacy v=0/1; rejects high-s.
  *   3. simulateContract — if throws → SIMULATION_FAILED.
  *   4. writeContract(sim.request) — if throws → TRANSACTION_FAILED.
  *   5. waitForTransactionReceipt — timeout or throw → TRANSACTION_FAILED.
@@ -25,7 +26,6 @@
  * as TD in WFAC-6 auto-blindaje BLQ-MED-1.
  */
 
-import { parseSignature } from 'viem';
 import type { PublicClient, WalletClient } from 'viem';
 import type {
   AdapterResult,
@@ -36,6 +36,7 @@ import type {
 import type { ChainId } from '../../core/types.js';
 import { buildX402Error } from '../../core/errors.js';
 import { FIAT_TOKEN_ABI, RECEIPT_TIMEOUT_MS } from './abi.js';
+import { normalizeSignature } from './signature.js';
 import { verifyEip3009 } from './verify.js';
 
 /** Extract a safe, bounded-length string from an unknown error. */
@@ -57,30 +58,16 @@ export async function settleEip3009(
     return { ok: false, error: v.error };
   }
 
-  // 2. Parse signature into v/r/s (reject EIP-2098 compact — CD-NEW-15).
-  // MNR-3 (AR F3.1): defense-in-depth — `parseSignature` can throw for malformed
-  // bytes or invalid v (e.g. v=29). Today this branch is unreachable because
-  // verify.ts catches the same cases first via `recoverTypedDataAddress`, but if
-  // the flow is ever reordered (e.g. settle reused without verify), a throw here
-  // would reject the Promise instead of returning an AdapterResult (violates
-  // AC-14 invariant "never throws for foreseeable conditions").
-  let parsed;
-  try {
-    parsed = parseSignature(params.payload.signature);
-  } catch (e) {
-    return { ok: false, error: buildX402Error('INVALID_SIGNATURE', sanitize(e)) };
-  }
-  if (!('v' in parsed) || parsed.v === undefined) {
-    return {
-      ok: false,
-      error: buildX402Error(
-        'INVALID_SIGNATURE',
-        'EIP-2098 compact signatures not supported in V1 (WFAC-13)',
-      ),
-    };
+  // 2. Normalize signature (WFAC-13 — CD-7). `normalizeSignature` is pure, total,
+  // and never throws — it accepts 65-byte standard, 64-byte EIP-2098 compact,
+  // legacy v ∈ {0,1}, and rejects high-s malleability. Returns an Err['error']
+  // on failure that we propagate unchanged (always INVALID_SIGNATURE, http 401).
+  const parsed = normalizeSignature(params.payload.signature);
+  if (!parsed.ok) {
+    return { ok: false, error: parsed.error };
   }
   const { r, s } = parsed;
-  const vNum = Number(parsed.v); // v ∈ {27, 28} — safe Number conversion
+  const vNum = Number(parsed.v); // v ∈ {27n, 28n} — safe Number conversion
 
   // 3. Simulate (AC-1, AC-2, CD-2). Must run BEFORE write.
   // Pass walletClient.account to simulateContract so the returned sim.request

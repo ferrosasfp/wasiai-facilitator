@@ -4,13 +4,19 @@
  * Pure async function. No RPC calls. No side effects. No logger.
  *
  * Validates (in order, fail-fast):
- *   1. Zod shape of payload.authorization (nonce bytes32, uint256 strings).
- *   2. Network match: accepted.network === 'eip155:<chainId>'.
- *   3. Asset match: accepted.asset isAddressEqual token.address.
- *   4. Amount: accepted.amount > 0 AND authorization.value >= accepted.amount.
- *   5. Receiver: authorization.to isAddressEqual accepted.payTo.
- *   6. Timestamp window: validAfter <= now < validBefore.
- *   7. EIP-712 recover: signature -> address; must equal authorization.from.
+ *   1a. Zod shape of payload.authorization (nonce bytes32, uint256 strings).
+ *   1b. Zod shape of params.accepted (amount/asset/payTo/network).
+ *   2.  Network match: accepted.network === 'eip155:<chainId>'.
+ *   3.  Asset match: accepted.asset isAddressEqual token.address.
+ *   4.  Amount: accepted.amount > 0 AND authorization.value >= accepted.amount.
+ *   5.  Receiver: authorization.to isAddressEqual accepted.payTo.
+ *   6.  Timestamp window: validAfter <= now < validBefore.
+ *   7.  Signature pre-validation (WFAC-13): normalize + reject malleable
+ *       (high-s), out-of-range, and zero scalars before recover; reconstruct
+ *       canonical 65-byte hex from r/s/v for viem compatibility.
+ *   8.  EIP-712 recover: canonical signature -> address.
+ *   9.  Recovered address equals authorization.from.
+ *   10. Success — build VerifyResult.
  *
  * The caller MUST ensure nonce uniqueness via the chain adapter before
  * settlement — this function does NOT check replay protection.
@@ -29,6 +35,7 @@ import { buildX402Error } from '../../core/errors.js';
 import { AcceptedSchema, Eip3009AuthorizationSchema } from './schemas.js';
 import { buildEip3009Domain } from './domain.js';
 import { EIP3009_TYPES, EIP3009_PRIMARY_TYPE } from './abi.js';
+import { normalizeSignature } from './signature.js';
 
 export async function verifyEip3009(
   params: VerifyParams,
@@ -124,7 +131,24 @@ export async function verifyEip3009(
     };
   }
 
-  // 7. Build domain + recover (AC-10)
+  // 7. Signature pre-validation + canonicalization (WFAC-13, DT-3).
+  // `normalizeSignature` rejects malleable (high-s), out-of-range, and zero
+  // scalars BEFORE we hand the hex to viem's recover — recoverTypedDataAddress
+  // by itself happily accepts high-s signatures, which would allow a second
+  // valid hex for the same signer (replay via alternative encoding).
+  // Additionally, viem's `recoverTypedDataAddress` does NOT accept 64-byte
+  // EIP-2098 compact signatures directly (it requires the 65-byte form), so
+  // we reconstruct the canonical 65-byte hex from the normalized r/s/v and
+  // pass that to recover — handles Core wallet / Backpack / Ethers-v5 interop.
+  const sigCheck = normalizeSignature(params.payload.signature);
+  if (!sigCheck.ok) {
+    return { ok: false, error: sigCheck.error };
+  }
+  const canonicalVHex = sigCheck.v === 27n ? '1b' : '1c';
+  const canonicalSignature =
+    `0x${sigCheck.r.slice(2)}${sigCheck.s.slice(2)}${canonicalVHex}` as `0x${string}`;
+
+  // 8. Build domain + recover (AC-10)
   const domain = buildEip3009Domain(token, chainId, params.accepted);
   // NOTE: buildEip3009Domain takes the original params.accepted because its
   // signature consumes the AssetTransferMethod-typed `extra`. The validated
@@ -143,7 +167,7 @@ export async function verifyEip3009(
         validBefore: BigInt(authorization.validBefore),
         nonce: authorization.nonce as `0x${string}`,
       },
-      signature: params.payload.signature,
+      signature: canonicalSignature,
     });
   } catch {
     // AC-3: malformed signature bytes / invalid v-value -> catch and return.
@@ -155,7 +179,7 @@ export async function verifyEip3009(
     };
   }
 
-  // 8. Recovered vs claimed (AC-2)
+  // 9. Recovered vs claimed (AC-2)
   if (!isAddressEqual(recovered, authorization.from as Address)) {
     return {
       ok: false,
@@ -163,7 +187,7 @@ export async function verifyEip3009(
     };
   }
 
-  // 9. Success (AC-1, AC-12).
+  // 10. Success (AC-1, AC-12).
   // BLQ-MED-1 note: VerifyResult.expiresAt is typed `number` (chains/types.ts).
   // validBefore is validated as uint256 <= 2^256-1, which CAN exceed
   // Number.MAX_SAFE_INTEGER (2^53-1). We preserve the `number` shape for
