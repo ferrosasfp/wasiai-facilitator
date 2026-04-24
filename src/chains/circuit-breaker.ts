@@ -8,11 +8,19 @@
  *     When the breaker is OPEN, throws `BreakerOpenError` (custom, with
  *     `chainId` + `remainingMs`). Cockatiel's internal `BrokenCircuitError`
  *     NEVER escapes this module (CD-NEW-CB-TRANSLATE).
- *   - `recordBusinessFailure(reason)`: feeds a synthetic failure into the
- *     breaker. Used by adapters to count x402 business errors
- *     (SIMULATION_FAILED, TRANSACTION_FAILED) toward the breaker threshold
- *     (AC-13), without having to throw inside the raw implementation.
- *   - `getState()`: 'CLOSED' | 'OPEN' | 'HALF_OPEN' (Isolated → 'OPEN').
+ *   - `BusinessFailureError`: sentinel thrown by adapters from inside
+ *     `_breaker.execute(...)` when `_verifyRaw`/`_settleRaw` produce a
+ *     business-level failure (SIMULATION_FAILED / TRANSACTION_FAILED).
+ *     The outer `verify()`/`settle()` catches it, unwraps the original
+ *     `AdapterResult`, and returns it to the caller. This pattern gives
+ *     the breaker clean 1:1 accounting (one business failure → one
+ *     breaker failure) — see AR-BLQ-ALTO-1 fix for AC-13.
+ *   - `recordBusinessFailure(reason)`: legacy helper kept for tests that
+ *     need to force-open a breaker without going through `execute`. NOT
+ *     used by the adapter runtime path anymore (AR-BLQ-ALTO-1 fix).
+ *   - `getState()`: 'CLOSED' | 'OPEN' | 'HALF_OPEN' (Isolated → 'OPEN')
+ *     when enabled; `undefined` when `enabled=false` (DT-7 — lets the
+ *     `/supported` route omit the `breakerState` field entirely via spread).
  *   - `getRemainingOpenMs()`: used by the adapter to populate the
  *     `retryAfterMs` field on `CHAIN_UNAVAILABLE` errors; route layer then
  *     emits the `Retry-After` HTTP header.
@@ -47,6 +55,7 @@ import {
   type Gauge as PromGauge,
 } from 'prom-client';
 import type { Logger } from 'pino';
+import type { Err } from '../core/types.js';
 
 export type BreakerStateName = 'CLOSED' | 'OPEN' | 'HALF_OPEN';
 
@@ -73,6 +82,33 @@ export class BreakerOpenError extends Error {
     this.name = 'BreakerOpenError';
     this.chainId = chainId;
     this.remainingMs = remainingMs;
+  }
+}
+
+/**
+ * Sentinel thrown by adapters from inside `_breaker.execute(...)` when the
+ * raw verify/settle implementation returns a business-level failure
+ * (SIMULATION_FAILED / TRANSACTION_FAILED — AC-13). The outer
+ * `verify()`/`settle()` catches this, unwraps `.result`, and returns it
+ * to the caller unchanged.
+ *
+ * WHY (AR-BLQ-ALTO-1 fix): the previous design called
+ * `recordBusinessFailure()` from inside `_verifyRaw`, which ran a second
+ * `policy.execute(() => throw)` while the outer `policy.execute(() =>
+ * _verifyRaw())` resolved successfully (because `_verifyRaw` returned an
+ * `AdapterResult` rather than throwing). Cockatiel's SamplingBreaker saw
+ * +1 failure AND +1 success per call — the ratio stayed at 50% and the
+ * breaker never tripped with the strict-greater-than threshold. Throwing
+ * from inside the outer execute gives clean 1:1 accounting.
+ */
+export class BusinessFailureError extends Error {
+  public readonly result: Err;
+  public readonly code: string;
+  constructor(result: Err, code: string) {
+    super(`Business failure: ${code}`);
+    this.name = 'BusinessFailureError';
+    this.result = result;
+    this.code = code;
   }
 }
 
@@ -315,10 +351,16 @@ export class ChainCircuitBreaker {
   }
 
   /**
-   * Current breaker state. Always 'CLOSED' when `enabled=false`.
+   * Current breaker state when enabled; `undefined` when `enabled=false`.
+   *
+   * DT-7 / AR-BLQ-BAJO-1: returning `undefined` in disabled mode lets
+   * the `/supported` route's spread-based serializer OMIT the
+   * `breakerState` field entirely (rather than reporting a misleading
+   * 'CLOSED' for a non-existent breaker). When `enabled=true` the return
+   * is always one of the three `BreakerStateName` literals.
    */
-  getState(): BreakerStateName {
-    if (!this._enabled || this._policy === null) return 'CLOSED';
+  getState(): BreakerStateName | undefined {
+    if (!this._enabled || this._policy === null) return undefined;
     return cockatielStateToName(this._policy.state);
   }
 

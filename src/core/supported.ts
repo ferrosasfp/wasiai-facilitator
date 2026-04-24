@@ -71,13 +71,18 @@ export function getSupportedResponse(): SupportedResponse {
     // AvalancheFujiAdapter) or MAY NOT (stubs / future adapters). Spread
     // keeps the field OMITTED when absent — cleaner JSON contract than
     // emitting `undefined`.
+    //
+    // AR-BLQ-BAJO-1 fix: the adapter's getBreakerState itself may now return
+    // `undefined` when CB_ENABLED=false (ChainCircuitBreaker.getState in
+    // passthrough mode). We treat that identically to the "no getter at all"
+    // case — field is omitted — so integrators never see a misleading
+    // 'CLOSED' for a chain whose breaker is disabled.
+    type BreakerGetter = () => 'CLOSED' | 'OPEN' | 'HALF_OPEN' | undefined;
     const lookup = chainRegistry.getAdapter(meta.chainId);
     const getter =
       lookup.ok &&
-      typeof (lookup.adapter as { getBreakerState?: () => 'CLOSED' | 'OPEN' | 'HALF_OPEN' })
-        .getBreakerState === 'function'
-        ? (lookup.adapter as { getBreakerState: () => 'CLOSED' | 'OPEN' | 'HALF_OPEN' })
-            .getBreakerState
+      typeof (lookup.adapter as { getBreakerState?: BreakerGetter }).getBreakerState === 'function'
+        ? (lookup.adapter as { getBreakerState: BreakerGetter }).getBreakerState
         : undefined;
     const state = getter ? getter.call(lookup.ok ? lookup.adapter : undefined) : undefined;
     return {

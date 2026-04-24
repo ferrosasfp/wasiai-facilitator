@@ -179,7 +179,10 @@ describe('ChainCircuitBreaker', () => {
       resetTimeoutMs: 5000,
       enabled: false,
     });
-    // Even after many failures, the breaker remains CLOSED.
+    // AR-BLQ-BAJO-1: in passthrough mode getState() returns `undefined` so
+    // the /supported route naturally omits the `breakerState` field.
+    // Even after many failures, the disabled breaker never "opens" and the
+    // state remains undefined (no policy exists).
     for (let i = 0; i < 100; i += 1) {
       await cb
         .execute(async () => {
@@ -187,13 +190,13 @@ describe('ChainCircuitBreaker', () => {
         })
         .catch(() => {});
     }
-    expect(cb.getState()).toBe('CLOSED');
+    expect(cb.getState()).toBeUndefined();
     // Passthrough: execute resolves the inner fn's return value.
     const result = await cb.execute(async () => 'ok');
     expect(result).toBe('ok');
     // recordBusinessFailure is a no-op in disabled mode.
     cb.recordBusinessFailure('SIMULATION_FAILED');
-    expect(cb.getState()).toBe('CLOSED');
+    expect(cb.getState()).toBeUndefined();
   });
 
   it('T-CB-8 (AC-7 cross-chain independence): opening one breaker does not affect another', async () => {

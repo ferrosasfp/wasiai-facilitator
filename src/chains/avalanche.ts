@@ -32,6 +32,7 @@ import { asChainId } from '../core/types.js';
 import {
   ChainCircuitBreaker,
   BreakerOpenError,
+  BusinessFailureError,
   readCbNumber,
   readCbBool,
   type BreakerStateName,
@@ -119,15 +120,33 @@ class AvalancheFujiAdapter implements ChainAdapter {
     this._breaker.setLogger(logger);
   }
 
-  getBreakerState(): BreakerStateName {
+  getBreakerState(): BreakerStateName | undefined {
     return this._breaker.getState();
   }
 
   // ── verify split — CD-1 (wrap both verify and settle) ─────────────────
+  //
+  // AR-BLQ-ALTO-1 fix: business failures (SIMULATION_FAILED /
+  // TRANSACTION_FAILED — AC-13) are THROWN from inside the breaker's
+  // `execute` lambda as `BusinessFailureError`. Cockatiel counts one
+  // failure (clean 1:1 accounting); the outer catch unwraps `err.result`
+  // back into an AdapterResult for the caller.
   async verify(params: VerifyParams): Promise<AdapterResult<VerifyResult>> {
     try {
-      return await this._breaker.execute(() => this._verifyRaw(params));
+      return await this._breaker.execute(async () => {
+        const result = await this._verifyRaw(params);
+        if (
+          !result.ok &&
+          (result.error.code === 'SIMULATION_FAILED' || result.error.code === 'TRANSACTION_FAILED')
+        ) {
+          throw new BusinessFailureError(result, result.error.code);
+        }
+        return result;
+      });
     } catch (err) {
+      if (err instanceof BusinessFailureError) {
+        return err.result as AdapterResult<VerifyResult>;
+      }
       if (err instanceof BreakerOpenError) {
         return {
           ok: false,
@@ -144,7 +163,10 @@ class AvalancheFujiAdapter implements ChainAdapter {
   }
 
   private async _verifyRaw(_params: VerifyParams): Promise<AdapterResult<VerifyResult>> {
-    const result: AdapterResult<VerifyResult> = {
+    // Stub body pre-WFAC-52. AC-13 accounting is handled by the outer
+    // verify() which throws BusinessFailureError for SIMULATION_FAILED /
+    // TRANSACTION_FAILED results (AR-BLQ-ALTO-1 fix).
+    return {
       ok: false,
       error: {
         code: 'NETWORK_MISMATCH',
@@ -152,21 +174,25 @@ class AvalancheFujiAdapter implements ChainAdapter {
         http: 400,
       },
     };
-    // AC-13 — count business-level failures toward breaker.
-    if (
-      !result.ok &&
-      (result.error.code === 'SIMULATION_FAILED' || result.error.code === 'TRANSACTION_FAILED')
-    ) {
-      this._breaker.recordBusinessFailure(result.error.code);
-    }
-    return result;
   }
 
   // ── settle split — mirror of verify ────────────────────────────────────
   async settle(params: SettleParams): Promise<AdapterResult<SettleResult>> {
     try {
-      return await this._breaker.execute(() => this._settleRaw(params));
+      return await this._breaker.execute(async () => {
+        const result = await this._settleRaw(params);
+        if (
+          !result.ok &&
+          (result.error.code === 'SIMULATION_FAILED' || result.error.code === 'TRANSACTION_FAILED')
+        ) {
+          throw new BusinessFailureError(result, result.error.code);
+        }
+        return result;
+      });
     } catch (err) {
+      if (err instanceof BusinessFailureError) {
+        return err.result as AdapterResult<SettleResult>;
+      }
       if (err instanceof BreakerOpenError) {
         return {
           ok: false,
@@ -183,7 +209,7 @@ class AvalancheFujiAdapter implements ChainAdapter {
   }
 
   private async _settleRaw(_params: SettleParams): Promise<AdapterResult<SettleResult>> {
-    const result: AdapterResult<SettleResult> = {
+    return {
       ok: false,
       error: {
         code: 'NETWORK_MISMATCH',
@@ -191,13 +217,6 @@ class AvalancheFujiAdapter implements ChainAdapter {
         http: 400,
       },
     };
-    if (
-      !result.ok &&
-      (result.error.code === 'SIMULATION_FAILED' || result.error.code === 'TRANSACTION_FAILED')
-    ) {
-      this._breaker.recordBusinessFailure(result.error.code);
-    }
-    return result;
   }
 }
 

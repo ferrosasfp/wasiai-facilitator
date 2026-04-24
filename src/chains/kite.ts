@@ -35,6 +35,7 @@ import { asChainId } from '../core/types.js';
 import {
   ChainCircuitBreaker,
   BreakerOpenError,
+  BusinessFailureError,
   readCbNumber,
   readCbBool,
   type BreakerStateName,
@@ -128,15 +129,36 @@ class KiteAdapter implements ChainAdapter {
     this._breaker.setLogger(logger);
   }
 
-  getBreakerState(): BreakerStateName {
+  getBreakerState(): BreakerStateName | undefined {
     return this._breaker.getState();
   }
 
   // ── verify split — CD-1 (wrap both verify and settle) ─────────────────
+  //
+  // AR-BLQ-ALTO-1 fix: _verifyRaw returns an AdapterResult normally; when
+  // that result is a business failure (SIMULATION_FAILED / TRANSACTION_FAILED
+  // — AC-13) we THROW a BusinessFailureError from INSIDE the breaker's
+  // `execute` lambda. Cockatiel's SamplingBreaker counts that as ONE failure
+  // (and nothing else). The outer try/catch unwraps `err.result` and returns
+  // it to the caller — so from the caller's perspective the function still
+  // returns an AdapterResult, but the breaker sees clean 1:1 accounting.
   async verify(params: VerifyParams): Promise<AdapterResult<VerifyResult>> {
     try {
-      return await this._breaker.execute(() => this._verifyRaw(params));
+      return await this._breaker.execute(async () => {
+        const result = await this._verifyRaw(params);
+        if (
+          !result.ok &&
+          (result.error.code === 'SIMULATION_FAILED' || result.error.code === 'TRANSACTION_FAILED')
+        ) {
+          throw new BusinessFailureError(result, result.error.code);
+        }
+        return result;
+      });
     } catch (err) {
+      if (err instanceof BusinessFailureError) {
+        // Unwrap — caller still sees an AdapterResult<VerifyResult>.
+        return err.result as AdapterResult<VerifyResult>;
+      }
       if (err instanceof BreakerOpenError) {
         return {
           ok: false,
@@ -148,17 +170,19 @@ class KiteAdapter implements ChainAdapter {
           },
         };
       }
-      // Non-breaker error — propagate (routes have a defensive try/catch
-      // around adapter calls; also breaker.execute has already counted
-      // this toward the sampling window via cockatiel).
+      // Non-breaker, non-business error — propagate (routes have a defensive
+      // try/catch around adapter calls; also breaker.execute has already
+      // counted this toward the sampling window via cockatiel).
       throw err;
     }
   }
 
   private async _verifyRaw(_params: VerifyParams): Promise<AdapterResult<VerifyResult>> {
-    // Stub body pre-WFAC-10. WFAC-41 only adds the wrapping + the AC-13
-    // business-failure accounting below; the returned error stays NETWORK_MISMATCH.
-    const result: AdapterResult<VerifyResult> = {
+    // Stub body pre-WFAC-10. The outer verify() handles AC-13 accounting by
+    // converting SIMULATION_FAILED / TRANSACTION_FAILED results into a
+    // BusinessFailureError throw — _verifyRaw itself just returns the
+    // AdapterResult, no breaker-side effects here (AR-BLQ-ALTO-1 fix).
+    return {
       ok: false,
       error: {
         code: 'NETWORK_MISMATCH',
@@ -166,24 +190,25 @@ class KiteAdapter implements ChainAdapter {
         http: 400,
       },
     };
-    // AC-13 — SIMULATION_FAILED / TRANSACTION_FAILED are business-level
-    // failures that must count toward the breaker. The current stub never
-    // emits these codes, but the guard is in place for WFAC-10+ when the
-    // real implementation lands.
-    if (
-      !result.ok &&
-      (result.error.code === 'SIMULATION_FAILED' || result.error.code === 'TRANSACTION_FAILED')
-    ) {
-      this._breaker.recordBusinessFailure(result.error.code);
-    }
-    return result;
   }
 
   // ── settle split — mirror of verify ────────────────────────────────────
   async settle(params: SettleParams): Promise<AdapterResult<SettleResult>> {
     try {
-      return await this._breaker.execute(() => this._settleRaw(params));
+      return await this._breaker.execute(async () => {
+        const result = await this._settleRaw(params);
+        if (
+          !result.ok &&
+          (result.error.code === 'SIMULATION_FAILED' || result.error.code === 'TRANSACTION_FAILED')
+        ) {
+          throw new BusinessFailureError(result, result.error.code);
+        }
+        return result;
+      });
     } catch (err) {
+      if (err instanceof BusinessFailureError) {
+        return err.result as AdapterResult<SettleResult>;
+      }
       if (err instanceof BreakerOpenError) {
         return {
           ok: false,
@@ -200,7 +225,7 @@ class KiteAdapter implements ChainAdapter {
   }
 
   private async _settleRaw(_params: SettleParams): Promise<AdapterResult<SettleResult>> {
-    const result: AdapterResult<SettleResult> = {
+    return {
       ok: false,
       error: {
         code: 'NETWORK_MISMATCH',
@@ -208,13 +233,6 @@ class KiteAdapter implements ChainAdapter {
         http: 400,
       },
     };
-    if (
-      !result.ok &&
-      (result.error.code === 'SIMULATION_FAILED' || result.error.code === 'TRANSACTION_FAILED')
-    ) {
-      this._breaker.recordBusinessFailure(result.error.code);
-    }
-    return result;
   }
 }
 

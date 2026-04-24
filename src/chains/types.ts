@@ -32,6 +32,16 @@ export interface EIP3009Token {
   readonly eip712Version?: string;
 }
 
+/**
+ * ChainMetadata — static readonly data for a chain.
+ *
+ * NOTE: breaker state is NOT stored here. WFAC-41 CR-BLQ-BAJO-2 (dead-field
+ * removal): the `/supported` route fetches the live CB state per-request
+ * via `adapter.getBreakerState?.()` (ducktype path in src/core/supported.ts).
+ * Embedding a stale `breakerState` on the metadata object would be either
+ * wrong (stale) or redundant (re-synced every call), so it is omitted from
+ * the type entirely to keep the single-source-of-truth clear.
+ */
 export interface ChainMetadata {
   readonly chainId: ChainId;
   readonly name: string;
@@ -45,13 +55,6 @@ export interface ChainMetadata {
     readonly decimals: number;
   };
   readonly tokens: readonly EIP3009Token[];
-  /**
-   * WFAC-41 (DT-7) — optional: current CB state exposed in /supported response.
-   * Omitted (NOT undefined) when `CB_ENABLED=false` or the adapter has no
-   * breaker. Populated lazily by `src/core/supported.ts` via
-   * `adapter.getBreakerState?.()`.
-   */
-  readonly breakerState?: 'CLOSED' | 'OPEN' | 'HALF_OPEN';
 }
 
 // --- x402 spec shapes (DT-2 of SDD: direct, no wrappers) ---
@@ -134,8 +137,14 @@ export interface ChainAdapter {
    * (KiteAdapter, AvalancheFujiAdapter) expose this; stubs without breakers
    * may omit. Consumer (core/supported.ts) uses `typeof adapter.getBreakerState
    * === 'function'` before calling.
+   *
+   * Return value:
+   *   - `'CLOSED' | 'OPEN' | 'HALF_OPEN'` when the breaker is enabled.
+   *   - `undefined` when `CB_ENABLED=false` (passthrough mode) — the
+   *     `/supported` serializer omits the `breakerState` field entirely
+   *     for that adapter (AR-BLQ-BAJO-1 fix / DT-7).
    */
-  getBreakerState?(): 'CLOSED' | 'OPEN' | 'HALF_OPEN';
+  getBreakerState?(): 'CLOSED' | 'OPEN' | 'HALF_OPEN' | undefined;
   /**
    * WFAC-41 — optional logger injection (ducktype at buildApp init via
    * src/chains/init-breakers.ts). Adapters that own a ChainCircuitBreaker
