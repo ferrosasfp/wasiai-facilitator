@@ -11,7 +11,7 @@
 | 007 | 2026-04-24 | Standard error codes — core/errors.ts (WFAC-11) | spec-conformance | FAST+AR | DONE | main (1fa4b21) |
 | 008 | 2026-04-24 | Signature normalization — EIP-2098 + Core wallet (WFAC-13) | security | FAST+AR | DONE | feat/008-wfac-13-signature-normalization |
 | 009 | 2026-04-24 | POST /verify route — x402 HTTP API (WFAC-20) | feature | QUALITY | DONE | main (5296b89) |
-| 010 | 2026-04-23 | POST /settle route — on-chain tx + idempotency (WFAC-21) | feature | QUALITY | in progress | feat/010-wfac-21-settle-route |
+| 010 | 2026-04-24 | POST /settle route — on-chain tx + idempotency (WFAC-21) | feature | QUALITY | DONE | main (08214b1) |
 
 <!--
 Formato por entrada:
