@@ -7,6 +7,7 @@ import { healthRoute } from './routes/health.js';
 import { verifyRoute } from './routes/verify.js';
 import { settleRoute } from './routes/settle.js';
 import { supportedRoute } from './routes/supported.js';
+import { openapiRoute } from './routes/openapi.js';
 
 export interface BuildAppOptions {
   /**
@@ -58,6 +59,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   await app.register(verifyRoute);
   await app.register(settleRoute);
   await app.register(supportedRoute);
+  await app.register(openapiRoute);
 
   // WFAC-5 AC-10/AC-11: quit Redis client during graceful shutdown. Fastify
   // v5 runs onClose hooks before app.close() resolves. Null-guard for test env
