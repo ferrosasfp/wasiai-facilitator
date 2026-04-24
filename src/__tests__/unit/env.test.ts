@@ -107,6 +107,43 @@ describe('parseEnv', () => {
     expect(allWrites).toContain('SUPABASE_URL');
   });
 
+  it('T2b: rejects SUPABASE_URL with non-http(s) scheme — ftp:// / mailto: (WFAC-32 AR MNR-1)', () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((_code?: number) => {
+      throw new Error('__exit__');
+    }) as never);
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    // ftp:// is an RFC 3986 URL that z.string().url() would accept without
+    // the defense-in-depth .refine(); must now be rejected.
+    expect(() =>
+      parseEnv({
+        NODE_ENV: 'production',
+        REDIS_URL: 'redis://host:6379/0',
+        SUPABASE_URL: 'ftp://foo.example.com',
+      }),
+    ).toThrow('__exit__');
+    expect(exitSpy).toHaveBeenCalledWith(1);
+
+    let allWrites = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(allWrites).toContain('SUPABASE_URL');
+    expect(allWrites).toContain('http');
+
+    // mailto: is an RFC 3986 URI and also slips past z.string().url()
+    // prior to the .refine() — must be rejected too.
+    stderrSpy.mockClear();
+    exitSpy.mockClear();
+    expect(() =>
+      parseEnv({
+        NODE_ENV: 'production',
+        REDIS_URL: 'redis://host:6379/0',
+        SUPABASE_URL: 'mailto:ops@example.com',
+      }),
+    ).toThrow('__exit__');
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    allWrites = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(allWrites).toContain('SUPABASE_URL');
+  });
+
   it('T3: does NOT exit in production when both SUPABASE vars are absent (WFAC-32 CD-4)', () => {
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((_code?: number) => {
       throw new Error('__exit__');

@@ -24,7 +24,15 @@ export const EnvSchema = z
     // CD-4: NO superRefine cross-field "both required in prod" — decision
     // lives in `initSupabase` / `getSupabaseClient` at runtime.
     // DT-1: canonical name is `SUPABASE_SERVICE_KEY` (NOT `SUPABASE_SERVICE_ROLE_KEY`).
-    SUPABASE_URL: z.string().url().optional(),
+    // Defense-in-depth (WFAC-32 AR MNR-1): `z.string().url()` accepts ANY
+    // RFC 3986 URL (ftp://, mailto:, file://, etc.). `createClient()` may
+    // throw synchronously on exotic schemes — reject them up-front at env
+    // validation so misconfig fails fast in `parseEnv`, not at request time.
+    SUPABASE_URL: z
+      .string()
+      .url()
+      .refine((u) => /^https?:\/\//i.test(u), { message: 'must be http:// or https://' })
+      .optional(),
     SUPABASE_SERVICE_KEY: z.string().min(1).optional(),
   })
   .superRefine((data, ctx) => {

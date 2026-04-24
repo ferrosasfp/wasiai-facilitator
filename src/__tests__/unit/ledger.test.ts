@@ -215,7 +215,9 @@ describe('persistLedgerEntry (W2)', () => {
 
     expect(logger.warn).toHaveBeenCalledTimes(1);
     const call = logger.warn.mock.calls[0] as [Record<string, unknown>, string];
-    expect(call[1]).toBe('ledger upsert failed');
+    // After AR BLQ-ALTO-1 fix, the unified catch block uses a shared message
+    // covering both getSupabaseClient() sync throw and upsert rejection.
+    expect(call[1]).toBe('ledger client or upsert failed');
     expect(call[0].idempotency_key).toBe(entry.idempotency_key);
     expect(call[0].network).toBe(entry.network);
     expect(call[0].err).toBeInstanceOf(Error);
@@ -257,5 +259,36 @@ describe('persistLedgerEntry (W2)', () => {
     const call = logger.debug.mock.calls[0] as [Record<string, unknown>, string];
     expect(call[1]).toBe('ledger upsert silenced duplicate');
     expect(call[0].idempotency_key).toBe(entry.idempotency_key);
+  });
+
+  it('T20b: swallows synchronous throw from getSupabaseClient (AR BLQ-ALTO-1 / CD-1 / AC-3)', async () => {
+    const { buildLedgerEntry, persistLedgerEntry } = await import('../../core/ledger.js');
+    const mod = (await import('../../infra/supabase.js')) as unknown as {
+      __upsertSpy: ReturnType<typeof vi.fn>;
+      __fromSpy: ReturnType<typeof vi.fn>;
+      __getSupabaseClient: ReturnType<typeof vi.fn>;
+    };
+    // Simulate `createClient()` throwing synchronously (e.g. invalid URL
+    // scheme slipping past env validation). Before the AR fix, this throw
+    // bubbled to the caller → 500 on an already-mined tx.
+    mod.__getSupabaseClient.mockImplementationOnce(() => {
+      throw new Error('createClient failed');
+    });
+
+    const logger = makeFakeLogger();
+    const entry = buildLedgerEntry(successInput());
+    await expect(persistLedgerEntry(entry, logger)).resolves.toBeUndefined();
+
+    // from/upsert never reached — throw happened before the Supabase call.
+    expect(mod.__fromSpy).not.toHaveBeenCalled();
+    expect(mod.__upsertSpy).not.toHaveBeenCalled();
+
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    const call = logger.warn.mock.calls[0] as [Record<string, unknown>, string];
+    expect(call[1]).toBe('ledger client or upsert failed');
+    expect(call[0].idempotency_key).toBe(entry.idempotency_key);
+    expect(call[0].network).toBe(entry.network);
+    expect(call[0].err).toBeInstanceOf(Error);
+    expect((call[0].err as Error).message).toBe('createClient failed');
   });
 });

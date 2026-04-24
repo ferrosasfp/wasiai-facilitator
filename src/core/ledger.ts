@@ -153,10 +153,13 @@ export function buildLedgerEntry(input: BuildLedgerEntryInput): LedgerEntry {
  * silently treated as a no-op (AC-5).
  */
 export async function persistLedgerEntry(entry: LedgerEntry, logger: LedgerLogger): Promise<void> {
-  const client = getSupabaseClient();
-  if (!client) return;
-
   try {
+    // CD-1 / AC-3: `getSupabaseClient()` itself may throw synchronously
+    // (e.g. `createClient()` rejecting an unusual URL scheme). Wrapping the
+    // call inside the try/catch guarantees fail-open even for bootstrap bugs.
+    const client = getSupabaseClient();
+    if (!client) return;
+
     const { data, error } = await client
       .from('facilitator_settlements')
       .upsert(entry, { onConflict: 'idempotency_key', ignoreDuplicates: true });
@@ -176,10 +179,11 @@ export async function persistLedgerEntry(entry: LedgerEntry, logger: LedgerLogge
       logger.debug({ idempotency_key: entry.idempotency_key }, 'ledger upsert silenced duplicate');
     }
   } catch (err) {
-    // CD-1: capture EVERY throw from the async chain. Never re-throw.
+    // CD-1: capture EVERY throw from the async chain — including synchronous
+    // throws from `getSupabaseClient()` / `createClient()`. Never re-throw.
     logger.warn(
       { err, idempotency_key: entry.idempotency_key, network: entry.network },
-      'ledger upsert failed',
+      'ledger client or upsert failed',
     );
   }
 }
