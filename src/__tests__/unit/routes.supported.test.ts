@@ -421,4 +421,48 @@ describe('GET /supported', () => {
     expect(input.errorCode).toBeUndefined();
     expect(input.idempotencyKey).toBeUndefined();
   });
+
+  // ─── WFAC-41 — breakerState field (T-RT-SUPPORTED-CB-*) ─────────────────
+
+  it('T-RT-SUPPORTED-CB-1 (AC-9): chains expose breakerState when adapter has getBreakerState', async () => {
+    // Make an adapter that exposes getBreakerState (mimicking KiteAdapter).
+    const adapterWithBreaker: ChainAdapter & { getBreakerState: () => 'CLOSED' } = {
+      metadata: {
+        chainId: asChainId(2368),
+        name: 'Kite Testnet',
+        network: 'testnet',
+        networkId: 'eip155:2368',
+        rpcUrl: 'http://localhost',
+        nativeCurrency: { name: 'Kite', symbol: 'KITE', decimals: 18 },
+        tokens: [],
+      },
+      verify: vi.fn() as unknown as ChainAdapter['verify'],
+      settle: vi.fn() as unknown as ChainAdapter['settle'],
+      getPublicClient: vi.fn() as unknown as ChainAdapter['getPublicClient'],
+      getWalletClient: vi.fn() as unknown as ChainAdapter['getWalletClient'],
+      getBreakerState: () => 'CLOSED',
+    };
+    app = await buildAppWithAdapters([adapterWithBreaker]);
+
+    const res = await app.inject({ method: 'GET', url: '/supported' });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body) as {
+      chains: Array<{ breakerState?: string }>;
+    };
+    expect(body.chains).toHaveLength(1);
+    expect(body.chains[0]!.breakerState).toBe('CLOSED');
+  });
+
+  it('T-RT-SUPPORTED-CB-2 (ducktype): chains WITHOUT getBreakerState OMIT the field (not null, not undefined)', async () => {
+    // Plain fake adapter — makeFakeAdapter does not expose getBreakerState.
+    const adapter = makeFakeAdapter(2368, 'Kite Testnet');
+    app = await buildAppWithAdapters([adapter]);
+
+    const res = await app.inject({ method: 'GET', url: '/supported' });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body) as { chains: Array<Record<string, unknown>> };
+    expect(body.chains).toHaveLength(1);
+    // The field must be ABSENT from the JSON (not serialized as undefined/null).
+    expect(Object.prototype.hasOwnProperty.call(body.chains[0], 'breakerState')).toBe(false);
+  });
 });

@@ -1,6 +1,6 @@
 import Fastify, { type FastifyInstance, type FastifyBaseLogger } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
-import type { DestinationStream } from 'pino';
+import type { DestinationStream, Logger } from 'pino';
 import { parseEnv, type EnvConfig } from './infra/env.js';
 import { createLogger } from './infra/logger.js';
 import { initRedis, getRedisClient } from './infra/redis.js';
@@ -12,6 +12,7 @@ import { verifyRoute } from './routes/verify.js';
 import { settleRoute } from './routes/settle.js';
 import { supportedRoute } from './routes/supported.js';
 import { openapiRoute } from './routes/openapi.js';
+import { initChainBreakers } from './chains/init-breakers.js';
 
 /**
  * WFAC-40 — expose the parsed EnvConfig to route plugins via decorator.
@@ -151,6 +152,15 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       },
     });
   }
+
+  // WFAC-41 — inject the app logger into per-chain circuit breakers so state
+  // transitions emit structured warn logs. Ducktype over adapter.setLogger;
+  // adapters without a breaker (stubs, future adapters) silently skip. MUST
+  // run AFTER adapter registration (registry populated via eager imports
+  // from src/core/supported.ts and friends) and BEFORE routes start serving.
+  // Cast: FastifyBaseLogger is structurally compatible with pino.Logger at
+  // runtime; the missing `msgPrefix` field is an unused pino internal.
+  initChainBreakers(app.log as unknown as Logger);
 
   await app.register(healthRoute);
   await app.register(verifyRoute);
