@@ -46,7 +46,10 @@ declare module 'fastify' {
 }
 
 export interface AuditMeta {
-  readonly errorCode?: X402ErrorCode | 'INVALID_PAYLOAD';
+  // Route-local literals allowed besides X402ErrorCode:
+  //   - 'INVALID_PAYLOAD' (Zod validation failures, WFAC-20 DT-7)
+  //   - 'RATE_LIMITED'    (per-IP or global daily cap hits, WFAC-40 + anti-abuse)
+  readonly errorCode?: X402ErrorCode | 'INVALID_PAYLOAD' | 'RATE_LIMITED';
   readonly idempotencyKey?: string;
 }
 

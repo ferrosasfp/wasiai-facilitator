@@ -34,8 +34,9 @@ import {
 // WFAC-32 — settlement ledger. Route consumes ONLY via core/ledger
 // (never imports @supabase/supabase-js nor ../infra/supabase.js). CD-3.
 import { buildLedgerEntry, persistLedgerEntry } from '../core/ledger.js';
+import { incrementAndCheckDailyCap } from '../core/settle-cap.js';
 
-/** Route-local union: X402ErrorCode + 'INVALID_PAYLOAD' literal. */
+/** Route-local union: X402ErrorCode + 'INVALID_PAYLOAD' + 'RATE_LIMITED' literals. */
 type SettleRouteErrorCode =
   | 'INVALID_SIGNATURE'
   | 'INSUFFICIENT_BALANCE'
@@ -48,7 +49,8 @@ type SettleRouteErrorCode =
   | 'TRANSACTION_FAILED'
   | 'DELEGATION_INVALID'
   | 'CHAIN_UNAVAILABLE' // WFAC-41
-  | 'INVALID_PAYLOAD';
+  | 'INVALID_PAYLOAD'
+  | 'RATE_LIMITED';
 
 interface ErrorBody {
   readonly error: {
@@ -125,10 +127,38 @@ export const settleRoute: FastifyPluginAsync = async (app) => {
         app.log.warn({ request_id: requestId }, 'idempotency cache miss — Redis unavailable');
       }
 
+      // Step 2.5 — global daily settle cap (anti-abuse). Fail-open if Redis is down.
+      const dailyCap = await incrementAndCheckDailyCap(env.SETTLE_DAILY_GLOBAL_CAP, app.log);
+      if (!dailyCap.ok) {
+        const body: ErrorBody = {
+          error: {
+            code: 'RATE_LIMITED',
+            message: `daily global settle cap reached (${dailyCap.cap}); try again tomorrow`,
+            http: 429,
+          },
+        };
+        app.log.warn(
+          {
+            request_id: requestId,
+            error_code: 'RATE_LIMITED',
+            http_status: 429,
+            daily_count: dailyCap.count,
+            daily_cap: dailyCap.cap,
+            retry_after_seconds: dailyCap.retryAfterSeconds,
+            duration_ms: Date.now() - startMs,
+          },
+          'settle failed',
+        );
+        request.auditMeta = { ...request.auditMeta, errorCode: 'RATE_LIMITED' };
+        return reply.code(429).header('Retry-After', String(dailyCap.retryAfterSeconds)).send(body);
+      }
+
       // Step 3 — dispatch to core
       let result;
       try {
-        result = await settleCore(parsed);
+        result = await settleCore(parsed, {
+          maxAmountAtomic: env.SETTLE_MAX_AMOUNT_ATOMIC,
+        });
       } catch (err: unknown) {
         // L4 — adapter threw. Defense-in-depth (CD-4 + SDD §DT-8).
         app.log.error(

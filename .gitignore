@@ -41,3 +41,7 @@ coverage/
 # Temporary
 tmp/
 scripts/tmp/
+
+# Local smoke/E2E test scripts (personal use, may reference secrets)
+e2e-*.mjs
+smoke-*.mjs

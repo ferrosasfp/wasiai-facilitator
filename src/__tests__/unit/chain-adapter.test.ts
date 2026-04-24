@@ -106,9 +106,11 @@ async function makeValidVerifyParams(overrides?: {
     nonce: `0x${'aa'.repeat(32)}` as `0x${string}`,
     ...overrides?.message,
   };
+  // PR #29: real Kite Testnet PYUSD contract uses name="PYUSD", version="1".
+  // Verified against live DOMAIN_SEPARATOR on-chain.
   const domain = {
-    name: 'USD Coin',
-    version: '2',
+    name: 'PYUSD',
+    version: '1',
     chainId: 2368,
     verifyingContract: TEST_USDC,
   };
@@ -186,11 +188,11 @@ describe('kite.ts adapters', () => {
     await expect(import('../../chains/kite.js')).rejects.toThrow(/KITE_TESTNET_RPC_URL/);
   });
 
-  it('AC-13: throws ChainAdapterInitError when KITE_MAINNET_RPC_URL missing', async () => {
+  it('kiteMainnetAdapter is null when KITE_MAINNET_RPC_URL missing (opt-in via IIFE, PR #28)', async () => {
     delete process.env['KITE_MAINNET_RPC_URL'];
     vi.resetModules();
-    await expect(import('../../chains/kite.js')).rejects.toThrow(/ChainAdapterInitError/);
-    await expect(import('../../chains/kite.js')).rejects.toThrow(/KITE_MAINNET_RPC_URL/);
+    const mod = await import('../../chains/kite.js');
+    expect(mod.kiteMainnetAdapter).toBeNull();
   });
 
   it('DT-4: getPublicClient returns an object with readContract method', async () => {
@@ -280,18 +282,20 @@ describe('kite.ts adapters', () => {
       }
     });
 
-    it('T-METADATA-TOKENS (AC-18): kiteTestnetAdapter.metadata.tokens has exactly 1 USDC entry with env address', async () => {
+    it('T-METADATA-TOKENS (AC-18): kiteTestnetAdapter.metadata.tokens has exactly 1 PYUSD entry with env address', async () => {
       const mod = await import('../../chains/kite.js');
       const tokens = mod.kiteTestnetAdapter.metadata.tokens;
       expect(tokens.length).toBe(1);
       const t = tokens[0];
       expect(t).toBeDefined();
       if (t) {
+        // PR #29: corrected metadata to match live PYUSD contract on Kite Testnet
+        // (name="PYUSD", version="1", decimals=18) — verified via DOMAIN_SEPARATOR.
         expect(t.address.toLowerCase()).toBe(TEST_USDC.toLowerCase());
-        expect(t.symbol).toBe('USDC');
-        expect(t.decimals).toBe(6);
-        expect(t.eip712Name).toBe('USD Coin');
-        expect(t.eip712Version).toBe('2');
+        expect(t.symbol).toBe('PYUSD');
+        expect(t.decimals).toBe(18);
+        expect(t.eip712Name).toBe('PYUSD');
+        expect(t.eip712Version).toBe('1');
       }
     });
   });
@@ -506,11 +510,11 @@ describe('avalanche.ts adapter', () => {
     expect(mod.avalancheFujiAdapter.metadata.networkId).toBe('eip155:43113');
   });
 
-  it('throws ChainAdapterInitError when AVALANCHE_FUJI_RPC_URL missing', async () => {
+  it('avalancheFujiAdapter is null when AVALANCHE_FUJI_RPC_URL missing (opt-in via IIFE, PR #28)', async () => {
     delete process.env['AVALANCHE_FUJI_RPC_URL'];
     vi.resetModules();
-    await expect(import('../../chains/avalanche.js')).rejects.toThrow(/ChainAdapterInitError/);
-    await expect(import('../../chains/avalanche.js')).rejects.toThrow(/AVALANCHE_FUJI_RPC_URL/);
+    const mod = await import('../../chains/avalanche.js');
+    expect(mod.avalancheFujiAdapter).toBeNull();
   });
 
   it('exposes USDC Fuji in tokens list with decimals 6', async () => {
