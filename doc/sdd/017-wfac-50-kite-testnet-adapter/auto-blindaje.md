@@ -12,3 +12,10 @@
 - **Fix**: Remove the directive (it was orphaned; `--max-warnings 0` rejects unused directives).
 - **Aplicar en**: solo agregar `eslint-disable-next-line security/detect-object-injection` cuando la key es una VARIABLE (dynamic index), no cuando es un LITERAL string. Verificar con `npm run lint` post-edit siempre.
 
+### [2026-04-23] Wave 1 — chain-registry.test.ts module-load breaks after kite.ts readUsdcAddress()
+- **Error**: `chain-registry.test.ts` AC-9 test (module-load integration) throws `ChainAdapterInitError: required environment variable "KITE_USDC_ADDRESS" is not set (needed for chainId 2368)` because the `src/chains/index.ts` dynamic import now triggers `readUsdcAddress(2368)` at module load.
+- **Causa raíz**: The Story's Scope IN constrains to a fixed test file list. But WFAC-50 adds a new required env var (KITE_USDC_ADDRESS) that kite.ts reads at module load via `readUsdcAddress`. Any pre-existing test that imports kite.ts (directly or transitively via chains/index.ts) without that env var set breaks. This is dependency drift from a legitimate Scope IN change — same pattern as env.test.ts WFAC-5 AC-1 fixture updates, which the Story itself allowed.
+- **Fix**: Update the single AC-9 test in chain-registry.test.ts to also set `OPERATOR_PRIVATE_KEY` and `KITE_USDC_ADDRESS` in the try/finally block. Original assertion (chain registered) unchanged. This is strictly fixture alignment, not scope expansion. The regression guard in §0.3 ("todos los tests WFAC-20/21/22/... siguen verdes") takes precedence over the Scope IN list when the only way to keep them green is a mechanical fixture update. Story §0.3 says "Si un test WFAC-41 falla post-W1 → STOP" — the failing test is not a WFAC-41 test and the fix is purely fixture-mechanical, so we proceed and document.
+- **Aplicar en**: cualquier nueva env var required-at-module-load debe auditar el impacto sobre todos los tests que importan ese módulo (grep `await import('../../chains/kite.js')` / `await import('../../chains/index.js')`).
+
+

@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
+import { privateKeyToAccount } from 'viem/accounts';
+import type { VerifyParams } from '../../chains/types.js';
 
 // NOTE: we intentionally do NOT import ChainAdapterInitError statically here.
 // `vi.resetModules()` (used in beforeEach) invalidates the module cache and
@@ -13,10 +15,12 @@ const ENV_KEYS = [
   'KITE_TESTNET_RPC_URL',
   'KITE_MAINNET_RPC_URL',
   'AVALANCHE_FUJI_RPC_URL',
+  'OPERATOR_PRIVATE_KEY',
+  'KITE_USDC_ADDRESS',
 ] as const;
 
 /* eslint-disable security/detect-object-injection -- `k` is constrained to the
- * const tuple ENV_KEYS literal (3 hardcoded env-var names). Not user input; the
+ * const tuple ENV_KEYS literal (5 hardcoded env-var names). Not user input; the
  * security/detect-object-injection heuristic cannot narrow tuple element types. */
 function snapshotEnv(): Record<string, string | undefined> {
   const out: Record<string, string | undefined> = {};
@@ -32,6 +36,91 @@ function restoreEnv(snapshot: Record<string, string | undefined>): void {
 }
 /* eslint-enable security/detect-object-injection */
 
+// Hardhat account #0 — reused for all real EIP-712 signature fixtures below.
+const TEST_PRIVATE_KEY =
+  '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80' as const;
+const TEST_SIGNER_ADDRESS = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266' as `0x${string}`;
+const TEST_USDC = '0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9' as `0x${string}`;
+const TEST_PAY_TO = '0x1111111111111111111111111111111111111111' as `0x${string}`;
+
+/**
+ * Build a VerifyParams object with a REAL EIP-712 signature signed by Hardhat
+ * account #0 against the canonical Kite Testnet USDC (PYUSD) domain. Exposed
+ * to the describe blocks below via closure.
+ *
+ * Overrides:
+ *   - message: partial override to mutate validBefore / from / etc.
+ *   - signature: pre-signed hex (bypasses the signing call) — used by
+ *     T-V-NORMALIZE-FAIL to inject a malleable signature.
+ *   - acceptedAmount: string override for AC-5 (high-accepted-amount case).
+ */
+async function makeValidVerifyParams(overrides?: {
+  message?: Partial<{
+    from: `0x${string}`;
+    to: `0x${string}`;
+    value: bigint;
+    validAfter: bigint;
+    validBefore: bigint;
+    nonce: `0x${string}`;
+  }>;
+  signature?: `0x${string}`;
+  acceptedAmount?: string;
+}): Promise<VerifyParams> {
+  // Import EIP-712 constants from the chains/abi duplicate (fresh per test —
+  // vi.resetModules() in beforeEach re-evaluates the module graph).
+  const { EIP3009_TYPES, EIP3009_PRIMARY_TYPE } = await import('../../chains/abi/fiat-token.js');
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  const baseMessage = {
+    from: TEST_SIGNER_ADDRESS,
+    to: TEST_PAY_TO,
+    value: 1000n,
+    validAfter: BigInt(nowSec - 10),
+    validBefore: BigInt(nowSec + 3600),
+    nonce: `0x${'aa'.repeat(32)}` as `0x${string}`,
+    ...overrides?.message,
+  };
+  const domain = {
+    name: 'USD Coin',
+    version: '2',
+    chainId: 2368,
+    verifyingContract: TEST_USDC,
+  };
+  const account = privateKeyToAccount(TEST_PRIVATE_KEY);
+  const signature =
+    overrides?.signature ??
+    (await account.signTypedData({
+      domain,
+      types: EIP3009_TYPES,
+      primaryType: EIP3009_PRIMARY_TYPE,
+      message: baseMessage,
+    }));
+  return {
+    x402Version: 2,
+    resource: { url: 'https://example.com' },
+    accepted: {
+      scheme: 'exact',
+      network: 'eip155:2368',
+      amount: overrides?.acceptedAmount ?? '1000',
+      asset: TEST_USDC,
+      payTo: TEST_PAY_TO,
+      maxTimeoutSeconds: 300,
+      extra: { assetTransferMethod: 'eip3009' },
+    },
+    payload: {
+      signature,
+      authorization: {
+        from: baseMessage.from,
+        to: baseMessage.to,
+        value: baseMessage.value.toString(),
+        validAfter: baseMessage.validAfter.toString(),
+        validBefore: baseMessage.validBefore.toString(),
+        nonce: baseMessage.nonce,
+      },
+    },
+  };
+}
+
 describe('kite.ts adapters', () => {
   let snapshot: Record<string, string | undefined>;
 
@@ -39,6 +128,9 @@ describe('kite.ts adapters', () => {
     snapshot = snapshotEnv();
     process.env['KITE_TESTNET_RPC_URL'] = 'https://rpc-testnet.gokite.ai';
     process.env['KITE_MAINNET_RPC_URL'] = 'https://rpc-mainnet.gokite.ai';
+    // WFAC-50 — wallet singleton + token address env vars.
+    process.env['OPERATOR_PRIVATE_KEY'] = TEST_PRIVATE_KEY;
+    process.env['KITE_USDC_ADDRESS'] = TEST_USDC;
     vi.resetModules();
   });
 
@@ -82,31 +174,100 @@ describe('kite.ts adapters', () => {
     expect(typeof client.readContract).toBe('function');
   });
 
-  it('DT-4: getWalletClient returns an object with writeContract method (no account — cannot sign)', async () => {
+  it('DT-4: getWalletClient returns an object with writeContract method (WFAC-50 — now account-injected)', async () => {
     const mod = await import('../../chains/kite.js');
     const client = mod.kiteTestnetAdapter.getWalletClient();
     expect(client).toBeDefined();
     expect(typeof client.writeContract).toBe('function');
+    // WFAC-50 AC-8: account is injected by getOperatorAccount() singleton.
+    expect(client.account).toBeDefined();
+    expect(client.account?.address.toLowerCase()).toBe(TEST_SIGNER_ADDRESS.toLowerCase());
   });
 
-  it('verify returns NETWORK_MISMATCH with pending WFAC-10 message', async () => {
-    const mod = await import('../../chains/kite.js');
-    const result = await mod.kiteTestnetAdapter.verify({} as never);
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.code).toBe('NETWORK_MISMATCH');
-      expect(result.error.message).toMatch(/WFAC-10/);
-    }
-  });
+  // ─── WFAC-50 — real EIP-712 verify (AC-1..AC-6 + AC-18) ─────────────────
+  describe('WFAC-50 _verifyRaw', () => {
+    it('T-V-HAPPY (AC-1): valid signature -> ok:true with recovered client', async () => {
+      const mod = await import('../../chains/kite.js');
+      const params = await makeValidVerifyParams();
+      const result = await mod.kiteTestnetAdapter.verify(params);
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.client.toLowerCase()).toBe(TEST_SIGNER_ADDRESS.toLowerCase());
+        expect(result.amount).toBe('1000');
+        expect(result.asset.toLowerCase()).toBe(TEST_USDC.toLowerCase());
+        expect(result.network).toBe('eip155:2368');
+      }
+    });
 
-  it('settle returns NETWORK_MISMATCH with pending WFAC-11 message', async () => {
-    const mod = await import('../../chains/kite.js');
-    const result = await mod.kiteTestnetAdapter.settle({} as never);
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.code).toBe('NETWORK_MISMATCH');
-      expect(result.error.message).toMatch(/WFAC-11/);
-    }
+    it('T-V-SIG-MISMATCH (AC-3): signer != authorization.from -> INVALID_SIGNATURE 401', async () => {
+      const mod = await import('../../chains/kite.js');
+      // Sign with account #0 but claim `from` is account #1 address.
+      const params = await makeValidVerifyParams({
+        message: { from: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8' as `0x${string}` },
+      });
+      const result = await mod.kiteTestnetAdapter.verify(params);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe('INVALID_SIGNATURE');
+        expect(result.error.http).toBe(401);
+      }
+    });
+
+    it('T-V-EXPIRED (AC-4): validBefore in the past -> EXPIRED_AUTHORIZATION 400', async () => {
+      const mod = await import('../../chains/kite.js');
+      const nowSec = Math.floor(Date.now() / 1000);
+      const params = await makeValidVerifyParams({
+        message: { validBefore: BigInt(nowSec - 1) },
+      });
+      const result = await mod.kiteTestnetAdapter.verify(params);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe('EXPIRED_AUTHORIZATION');
+        expect(result.error.http).toBe(400);
+      }
+    });
+
+    it('T-V-AMOUNT (AC-5): auth.value < accepted.amount -> INVALID_AMOUNT 400', async () => {
+      const mod = await import('../../chains/kite.js');
+      // Fixture signs with value=1000, then we bump accepted.amount to 5000.
+      const params = await makeValidVerifyParams({ acceptedAmount: '5000' });
+      const result = await mod.kiteTestnetAdapter.verify(params);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe('INVALID_AMOUNT');
+        expect(result.error.http).toBe(400);
+      }
+    });
+
+    it('T-V-NORMALIZE-FAIL (AC-6): high-s signature -> INVALID_SIGNATURE (recover NOT called)', async () => {
+      const mod = await import('../../chains/kite.js');
+      // High-s: s occupies the upper half of n. Using all-0xff for s is > n/2
+      // (and also out of range, but normalizeSignature rejects it before the
+      // range check hits). The v byte 1b (27) is valid — the failure is s.
+      const highS = `0x${'11'.repeat(32)}${'ff'.repeat(32)}1b` as `0x${string}`;
+      const params = await makeValidVerifyParams({ signature: highS });
+      const result = await mod.kiteTestnetAdapter.verify(params);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe('INVALID_SIGNATURE');
+        expect(result.error.http).toBe(401);
+      }
+    });
+
+    it('T-METADATA-TOKENS (AC-18): kiteTestnetAdapter.metadata.tokens has exactly 1 USDC entry with env address', async () => {
+      const mod = await import('../../chains/kite.js');
+      const tokens = mod.kiteTestnetAdapter.metadata.tokens;
+      expect(tokens.length).toBe(1);
+      const t = tokens[0];
+      expect(t).toBeDefined();
+      if (t) {
+        expect(t.address.toLowerCase()).toBe(TEST_USDC.toLowerCase());
+        expect(t.symbol).toBe('USDC');
+        expect(t.decimals).toBe(6);
+        expect(t.eip712Name).toBe('USD Coin');
+        expect(t.eip712Version).toBe('2');
+      }
+    });
   });
 });
 
@@ -203,6 +364,9 @@ describe('WFAC-41 — circuit breaker integration on ChainAdapters', () => {
     process.env['KITE_TESTNET_RPC_URL'] = 'https://rpc-testnet.gokite.ai';
     process.env['KITE_MAINNET_RPC_URL'] = 'https://rpc-mainnet.gokite.ai';
     process.env['AVALANCHE_FUJI_RPC_URL'] = 'https://api.avax-test.network/ext/bc/C/rpc';
+    // WFAC-50 — required for kite.ts module load (readUsdcAddress) + wallet singleton.
+    process.env['OPERATOR_PRIVATE_KEY'] = TEST_PRIVATE_KEY;
+    process.env['KITE_USDC_ADDRESS'] = TEST_USDC;
     vi.resetModules();
   });
 
@@ -302,7 +466,7 @@ describe('WFAC-41 — circuit breaker integration on ChainAdapters', () => {
     const mod = await import('../../chains/kite.js');
     const adapter = mod.kiteTestnetAdapter as unknown as {
       _breaker: { recordBusinessFailure: (r: string) => void; getState: () => string | undefined };
-      verify: (p: unknown) => Promise<{ ok: boolean; error: { code: string } }>;
+      verify: (p: VerifyParams) => Promise<{ ok: boolean; error?: { code: string } }>;
     };
     // Feed plenty of failures — with CB disabled they are no-ops.
     for (let i = 0; i < 200; i += 1) adapter._breaker.recordBusinessFailure('SIMULATION_FAILED');
@@ -311,9 +475,12 @@ describe('WFAC-41 — circuit breaker integration on ChainAdapters', () => {
     // AR-BLQ-BAJO-1: disabled breaker reports `undefined` (not 'CLOSED') so
     // the /supported route omits the breakerState field for this chain.
     expect(mod.kiteTestnetAdapter.getBreakerState!()).toBeUndefined();
-    // verify returns the stub NETWORK_MISMATCH, NOT CHAIN_UNAVAILABLE.
-    const result = await adapter.verify({} as never);
-    expect(result.error.code).toBe('NETWORK_MISMATCH');
+    // WFAC-50: with a valid signed VerifyParams, verify returns a normal result
+    // (not CHAIN_UNAVAILABLE). The happy path proves passthrough — CB is not
+    // intercepting, and the real EIP-712 recovery flow runs to completion.
+    const params = await makeValidVerifyParams();
+    const result = await adapter.verify(params);
+    expect(result.ok).toBe(true);
   });
 
   it('T-ADAPT-CB-6 (AC-13 real flow — AR-BLQ-ALTO-1): N consecutive SIMULATION_FAILED via verify() flow trips the breaker', async () => {
