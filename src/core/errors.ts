@@ -40,6 +40,7 @@ import type { Err, X402ErrorCode } from './types.js';
  *   - INVALID_RECEIVER           → 400 (bad request)
  *   - TRANSACTION_FAILED         → 500 (on-chain execution failure)
  *   - DELEGATION_INVALID         → 401 (auth failure; ERC-7710 only)
+ *   - CHAIN_UNAVAILABLE          → 503 (circuit breaker open, RPC not reachable; WFAC-41)
  */
 export const HTTP_BY_CODE: Record<X402ErrorCode, number> = {
   INVALID_SIGNATURE: 401,
@@ -52,6 +53,8 @@ export const HTTP_BY_CODE: Record<X402ErrorCode, number> = {
   INVALID_RECEIVER: 400,
   TRANSACTION_FAILED: 500,
   DELEGATION_INVALID: 401,
+  // WFAC-41 — circuit breaker open: HTTP 503 Service Unavailable.
+  CHAIN_UNAVAILABLE: 503,
 };
 
 /**
@@ -76,6 +79,8 @@ export const DEFAULT_MESSAGE_BY_CODE: Record<X402ErrorCode, string> = {
   INVALID_RECEIVER: 'Invalid receiver',
   TRANSACTION_FAILED: 'Transaction failed',
   DELEGATION_INVALID: 'Delegation invalid',
+  // WFAC-41 — circuit breaker open: transient RPC unreachability.
+  CHAIN_UNAVAILABLE: 'Chain RPC temporarily unavailable',
 };
 
 /**

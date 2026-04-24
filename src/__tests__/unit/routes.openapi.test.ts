@@ -162,7 +162,7 @@ describe('GET /openapi.json', () => {
 
   // ─── AC-5 ────────────────────────────────────────────────────────────────
 
-  it('T-O5 / AC-5: X402ErrorCode enum has all 10 codes and HTTP mapping matches HTTP_BY_CODE', () => {
+  it('T-O5 / AC-5: X402ErrorCode enum has all 11 codes and HTTP mapping matches HTTP_BY_CODE', () => {
     const codeSchema = spec.components.schemas.X402ErrorCode;
     expect(codeSchema).toBeDefined();
 
@@ -178,6 +178,7 @@ describe('GET /openapi.json', () => {
       'INVALID_RECEIVER',
       'TRANSACTION_FAILED',
       'DELEGATION_INVALID',
+      'CHAIN_UNAVAILABLE',
     ];
     expect([...enumValues].sort()).toEqual([...expected].sort());
 

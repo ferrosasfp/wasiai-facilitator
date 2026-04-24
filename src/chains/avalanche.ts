@@ -16,6 +16,7 @@
 import { createPublicClient, createWalletClient, http } from 'viem';
 import type { PublicClient, WalletClient } from 'viem';
 import { avalancheFuji } from 'viem/chains';
+import type { Logger } from 'pino';
 import {
   ChainAdapterInitError,
   type AdapterResult,
@@ -28,6 +29,14 @@ import {
   type VerifyResult,
 } from './types.js';
 import { asChainId } from '../core/types.js';
+import {
+  ChainCircuitBreaker,
+  BreakerOpenError,
+  BusinessFailureError,
+  readCbNumber,
+  readCbBool,
+  type BreakerStateName,
+} from './circuit-breaker.js';
 
 const FUJI_CHAIN_ID = 43113;
 
@@ -56,6 +65,7 @@ class AvalancheFujiAdapter implements ChainAdapter {
   private readonly _rpcUrl: string;
   private _publicClient: PublicClient | null = null;
   private _walletClient: WalletClient | null = null;
+  private readonly _breaker: ChainCircuitBreaker;
 
   constructor() {
     this._rpcUrl = readRpcUrl();
@@ -69,6 +79,19 @@ class AvalancheFujiAdapter implements ChainAdapter {
       nativeCurrency: { name: 'Avalanche', symbol: 'AVAX', decimals: 18 },
       tokens: [USDC_FUJI],
     };
+
+    // WFAC-41 — per-chain circuit breaker. Defaults mirror the Zod schema
+    // in src/infra/env.ts (CD-NEW-CB-HELPER-DEFAULTS). Adapters cannot
+    // import env.ts (OWNERS); readCbNumber/readCbBool reuse the exact
+    // same fallbacks.
+    this._breaker = new ChainCircuitBreaker({
+      chainId: FUJI_CHAIN_ID,
+      chainName: 'Avalanche Fuji',
+      failureThreshold: readCbNumber('CB_FAILURE_THRESHOLD', 5),
+      rollingWindowMs: readCbNumber('CB_ROLLING_WINDOW_MS', 30000),
+      resetTimeoutMs: readCbNumber('CB_RESET_TIMEOUT_MS', 10000),
+      enabled: readCbBool('CB_ENABLED', true),
+    });
   }
 
   getPublicClient(): PublicClient {
@@ -93,7 +116,56 @@ class AvalancheFujiAdapter implements ChainAdapter {
     return this._walletClient;
   }
 
-  async verify(_params: VerifyParams): Promise<AdapterResult<VerifyResult>> {
+  setLogger(logger: Logger): void {
+    this._breaker.setLogger(logger);
+  }
+
+  getBreakerState(): BreakerStateName | undefined {
+    return this._breaker.getState();
+  }
+
+  // ── verify split — CD-1 (wrap both verify and settle) ─────────────────
+  //
+  // AR-BLQ-ALTO-1 fix: business failures (SIMULATION_FAILED /
+  // TRANSACTION_FAILED — AC-13) are THROWN from inside the breaker's
+  // `execute` lambda as `BusinessFailureError`. Cockatiel counts one
+  // failure (clean 1:1 accounting); the outer catch unwraps `err.result`
+  // back into an AdapterResult for the caller.
+  async verify(params: VerifyParams): Promise<AdapterResult<VerifyResult>> {
+    try {
+      return await this._breaker.execute(async () => {
+        const result = await this._verifyRaw(params);
+        if (
+          !result.ok &&
+          (result.error.code === 'SIMULATION_FAILED' || result.error.code === 'TRANSACTION_FAILED')
+        ) {
+          throw new BusinessFailureError(result, result.error.code);
+        }
+        return result;
+      });
+    } catch (err) {
+      if (err instanceof BusinessFailureError) {
+        return err.result as AdapterResult<VerifyResult>;
+      }
+      if (err instanceof BreakerOpenError) {
+        return {
+          ok: false,
+          error: {
+            code: 'CHAIN_UNAVAILABLE',
+            message: 'Chain RPC temporarily unavailable',
+            http: 503,
+            retryAfterMs: err.remainingMs,
+          },
+        };
+      }
+      throw err;
+    }
+  }
+
+  private async _verifyRaw(_params: VerifyParams): Promise<AdapterResult<VerifyResult>> {
+    // Stub body pre-WFAC-52. AC-13 accounting is handled by the outer
+    // verify() which throws BusinessFailureError for SIMULATION_FAILED /
+    // TRANSACTION_FAILED results (AR-BLQ-ALTO-1 fix).
     return {
       ok: false,
       error: {
@@ -104,7 +176,39 @@ class AvalancheFujiAdapter implements ChainAdapter {
     };
   }
 
-  async settle(_params: SettleParams): Promise<AdapterResult<SettleResult>> {
+  // ── settle split — mirror of verify ────────────────────────────────────
+  async settle(params: SettleParams): Promise<AdapterResult<SettleResult>> {
+    try {
+      return await this._breaker.execute(async () => {
+        const result = await this._settleRaw(params);
+        if (
+          !result.ok &&
+          (result.error.code === 'SIMULATION_FAILED' || result.error.code === 'TRANSACTION_FAILED')
+        ) {
+          throw new BusinessFailureError(result, result.error.code);
+        }
+        return result;
+      });
+    } catch (err) {
+      if (err instanceof BusinessFailureError) {
+        return err.result as AdapterResult<SettleResult>;
+      }
+      if (err instanceof BreakerOpenError) {
+        return {
+          ok: false,
+          error: {
+            code: 'CHAIN_UNAVAILABLE',
+            message: 'Chain RPC temporarily unavailable',
+            http: 503,
+            retryAfterMs: err.remainingMs,
+          },
+        };
+      }
+      throw err;
+    }
+  }
+
+  private async _settleRaw(_params: SettleParams): Promise<AdapterResult<SettleResult>> {
     return {
       ok: false,
       error: {

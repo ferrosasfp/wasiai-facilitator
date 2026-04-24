@@ -897,4 +897,55 @@ describe('POST /verify', () => {
     expect(input.idempotencyKey).toBeUndefined();
     // buildAuditEntry coerces undefined → null; validated in audit.test.ts T-A1.
   });
+
+  // ─── WFAC-41 — circuit breaker Retry-After header (T-RT-VERIFY-CB-*) ────
+
+  it('T-RT-VERIFY-CB-1 (AC-2, AC-11): CHAIN_UNAVAILABLE returns 503 + Retry-After header', async () => {
+    const adapter = makeFakeAdapter(2368, async () => ({
+      ok: false as const,
+      error: {
+        code: 'CHAIN_UNAVAILABLE' as const,
+        message: 'Chain RPC temporarily unavailable',
+        http: 503,
+        retryAfterMs: 7500,
+      },
+    }));
+    app = await buildAppWithAdapter(adapter);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/verify',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify(VALID_BODY),
+    });
+    expect(res.statusCode).toBe(503);
+    // ceil(7500/1000) = 8 seconds
+    expect(res.headers['retry-after']).toBe('8');
+    const body = JSON.parse(res.body) as { error: Record<string, unknown> };
+    expect(body.error.code).toBe('CHAIN_UNAVAILABLE');
+    expect(body.error.http).toBe(503);
+  });
+
+  it('T-RT-VERIFY-CB-2 (CD-NEW-CB-RETRY-AFTER-INTERNAL): 503 body has exactly {code, message, http} — retryAfterMs NOT serialized', async () => {
+    const adapter = makeFakeAdapter(2368, async () => ({
+      ok: false as const,
+      error: {
+        code: 'CHAIN_UNAVAILABLE' as const,
+        message: 'Chain RPC temporarily unavailable',
+        http: 503,
+        retryAfterMs: 2000,
+      },
+    }));
+    app = await buildAppWithAdapter(adapter);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/verify',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify(VALID_BODY),
+    });
+    const body = JSON.parse(res.body) as { error: Record<string, unknown> };
+    expect(Object.keys(body.error).sort()).toEqual(['code', 'http', 'message']);
+    expect((body.error as { retryAfterMs?: unknown }).retryAfterMs).toBeUndefined();
+  });
 });

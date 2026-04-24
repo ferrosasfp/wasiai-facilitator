@@ -20,6 +20,7 @@
  */
 
 import type { PublicClient, WalletClient } from 'viem';
+import type { Logger } from 'pino';
 import type { Result, Address, ChainId, X402ErrorCode } from '../core/types.js';
 
 export interface EIP3009Token {
@@ -31,6 +32,16 @@ export interface EIP3009Token {
   readonly eip712Version?: string;
 }
 
+/**
+ * ChainMetadata — static readonly data for a chain.
+ *
+ * NOTE: breaker state is NOT stored here. WFAC-41 CR-BLQ-BAJO-2 (dead-field
+ * removal): the `/supported` route fetches the live CB state per-request
+ * via `adapter.getBreakerState?.()` (ducktype path in src/core/supported.ts).
+ * Embedding a stale `breakerState` on the metadata object would be either
+ * wrong (stale) or redundant (re-synced every call), so it is omitted from
+ * the type entirely to keep the single-source-of-truth clear.
+ */
 export interface ChainMetadata {
   readonly chainId: ChainId;
   readonly name: string;
@@ -120,6 +131,26 @@ export interface ChainAdapter {
   settle(params: SettleParams): Promise<AdapterResult<SettleResult>>;
   getPublicClient(): PublicClient;
   getWalletClient(): WalletClient;
+  /**
+   * WFAC-41 — optional introspection: current circuit breaker state for
+   * this chain. Adapters that wrap verify/settle with ChainCircuitBreaker
+   * (KiteAdapter, AvalancheFujiAdapter) expose this; stubs without breakers
+   * may omit. Consumer (core/supported.ts) uses `typeof adapter.getBreakerState
+   * === 'function'` before calling.
+   *
+   * Return value:
+   *   - `'CLOSED' | 'OPEN' | 'HALF_OPEN'` when the breaker is enabled.
+   *   - `undefined` when `CB_ENABLED=false` (passthrough mode) — the
+   *     `/supported` serializer omits the `breakerState` field entirely
+   *     for that adapter (AR-BLQ-BAJO-1 fix / DT-7).
+   */
+  getBreakerState?(): 'CLOSED' | 'OPEN' | 'HALF_OPEN' | undefined;
+  /**
+   * WFAC-41 — optional logger injection (ducktype at buildApp init via
+   * src/chains/init-breakers.ts). Adapters that own a ChainCircuitBreaker
+   * forward the call to `breaker.setLogger(logger)`.
+   */
+  setLogger?(logger: Logger): void;
 }
 
 export type RegisterResult =

@@ -47,6 +47,18 @@ export const EnvSchema = z
     RATE_LIMIT_VERIFY_MAX: z.coerce.number().int().min(1).default(60),
     RATE_LIMIT_SETTLE_MAX: z.coerce.number().int().min(1).default(30),
     RATE_LIMIT_SUPPORTED_MAX: z.coerce.number().int().min(1).default(120),
+
+    // WFAC-41 — circuit breaker per chain RPC (SDD §4.1). NO magic numbers
+    // in adapters (CD-NEW-CB-NO-MAGIC). `CB_ENABLED` must use the enum
+    // transform pattern — `z.coerce.boolean()` is PROHIBITED (CD-NEW-CB-BOOL;
+    // same rationale as WFAC-40 CD-12 for RATE_LIMIT_ENABLED).
+    CB_ENABLED: z
+      .enum(['true', 'false'])
+      .default('true')
+      .transform((v) => v === 'true'),
+    CB_FAILURE_THRESHOLD: z.coerce.number().int().min(1).default(5),
+    CB_ROLLING_WINDOW_MS: z.coerce.number().int().min(1).default(30000),
+    CB_RESET_TIMEOUT_MS: z.coerce.number().int().min(1).default(10000),
   })
   .superRefine((data, ctx) => {
     if (!data.REDIS_URL && data.NODE_ENV !== 'test') {

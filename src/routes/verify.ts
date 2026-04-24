@@ -45,6 +45,7 @@ type VerifyRouteErrorCode =
   | 'INVALID_RECEIVER'
   | 'TRANSACTION_FAILED'
   | 'DELEGATION_INVALID'
+  | 'CHAIN_UNAVAILABLE' // WFAC-41
   | 'INVALID_PAYLOAD';
 
 interface ErrorBody {
@@ -172,7 +173,23 @@ export const verifyRoute: FastifyPluginAsync = async (app) => {
         );
         // WFAC-33 (CD-11): propagate adapter-returned x402 error code to audit row.
         request.auditMeta = { ...request.auditMeta, errorCode: result.error.code };
-        return reply.code(result.error.http).send({ error: result.error } satisfies ErrorBody);
+        // WFAC-41 (AC-11, CD-NEW-CB-RETRY-AFTER-INTERNAL) — Retry-After header
+        // for circuit-breaker 503. retryAfterMs lives ONLY on the server-side
+        // error object; it is NOT serialized in the JSON body.
+        if (
+          result.error.code === 'CHAIN_UNAVAILABLE' &&
+          typeof result.error.retryAfterMs === 'number'
+        ) {
+          const secs = Math.max(1, Math.ceil(result.error.retryAfterMs / 1000));
+          reply.header('Retry-After', String(secs));
+        }
+        // Body response: only {code, message, http}. Strip retryAfterMs.
+        const bodyError: { code: VerifyRouteErrorCode; message: string; http: number } = {
+          code: result.error.code,
+          message: result.error.message,
+          http: result.error.http,
+        };
+        return reply.code(result.error.http).send({ error: bodyError } satisfies ErrorBody);
       }
 
       // Success — L1 info.

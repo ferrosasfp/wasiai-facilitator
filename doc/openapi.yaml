@@ -86,6 +86,26 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
+        "503":
+          description: |
+            Chain RPC temporarily unavailable — the per-chain circuit breaker
+            is OPEN (WFAC-41). Response carries a `Retry-After` header (seconds)
+            hinting when clients should retry.
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+                minimum: 1
+              description: Seconds the client should wait before retrying.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+              example:
+                error:
+                  code: CHAIN_UNAVAILABLE
+                  message: Chain RPC temporarily unavailable
+                  http: 503
 
   /settle:
     post:
@@ -140,6 +160,26 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
+        "503":
+          description: |
+            Chain RPC temporarily unavailable — the per-chain circuit breaker
+            is OPEN (WFAC-41). Response carries a `Retry-After` header (seconds)
+            hinting when clients should retry.
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+                minimum: 1
+              description: Seconds the client should wait before retrying.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+              example:
+                error:
+                  code: CHAIN_UNAVAILABLE
+                  message: Chain RPC temporarily unavailable
+                  http: 503
 
   /supported:
     get:
@@ -396,6 +436,16 @@ components:
           items:
             type: string
           description: Asset-transfer methods supported by this chain (today always `["eip3009"]`).
+        breakerState:
+          type: string
+          enum: [CLOSED, OPEN, HALF_OPEN]
+          description: |
+            WFAC-41 — current per-chain circuit breaker state. OPTIONAL: emitted
+            only when the adapter exposes a live breaker (i.e., `CB_ENABLED=true`
+            and the adapter is Kite / Avalanche Fuji). Omitted entirely when
+            `CB_ENABLED=false` or the adapter has no breaker wrapper.
+            Integrators can branch on `breakerState === 'OPEN'` to try an
+            alternate chain before issuing `/verify` or `/settle`.
 
     SupportedResponse:
       type: object
@@ -442,8 +492,9 @@ components:
     X402ErrorCode:
       type: string
       description: |
-        Canonical x402 error code. Exactly the 10 values exported as the
-        `X402ErrorCode` union from `src/core/types.ts`.
+        Canonical x402 error code. Exactly the 11 values exported as the
+        `X402ErrorCode` union from `src/core/types.ts` (10 x402 spec codes +
+        CHAIN_UNAVAILABLE per WFAC-41 DT-3 Opción B).
       enum:
         - INVALID_SIGNATURE
         - INSUFFICIENT_BALANCE
@@ -455,14 +506,15 @@ components:
         - INVALID_RECEIVER
         - TRANSACTION_FAILED
         - DELEGATION_INVALID
+        - CHAIN_UNAVAILABLE
 
     X402ErrorHttp:
       type: integer
       description: |
         HTTP status associated with the error code. Matches `HTTP_BY_CODE`
         in `src/core/errors.ts`. Values are `400`, `401`, `402`, `412`,
-        or `500`.
-      enum: [400, 401, 402, 412, 500]
+        `500`, or `503` (CHAIN_UNAVAILABLE per WFAC-41).
+      enum: [400, 401, 402, 412, 500, 503]
 
     ErrorBody:
       type: object

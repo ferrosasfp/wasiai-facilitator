@@ -26,6 +26,7 @@
     "@fastify/rate-limit": "^10.3.0",
     "@supabase/supabase-js": "^2.104.1",
     "bullmq": "^5.28.0",
+    "cockatiel": "3.2.1",
     "fastify": "^5.8.4",
     "ioredis": "^5.4.1",
     "js-yaml": "^4.1.1",
