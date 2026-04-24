@@ -4,6 +4,7 @@ import { parseEnv, type EnvConfig } from './infra/env.js';
 import { createLogger } from './infra/logger.js';
 import { initRedis, getRedisClient } from './infra/redis.js';
 import { healthRoute } from './routes/health.js';
+import { verifyRoute } from './routes/verify.js';
 
 export interface BuildAppOptions {
   /**
@@ -52,6 +53,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   });
 
   await app.register(healthRoute);
+  await app.register(verifyRoute);
 
   // WFAC-5 AC-10/AC-11: quit Redis client during graceful shutdown. Fastify
   // v5 runs onClose hooks before app.close() resolves. Null-guard for test env
