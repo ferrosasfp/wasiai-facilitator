@@ -17,6 +17,7 @@
 | 013 | 2026-04-24 | Settlement ledger — Supabase facilitator_settlements (WFAC-32) | infra | QUALITY | DONE | feat/013-wfac-32-settlement-ledger |
 | 014 | 2026-04-23 | Audit log inmutable — facilitator_audit_log (WFAC-33) | infra | QUALITY | DONE | main (949c0d5) |
 | 015 | 2026-04-24 | Rate limiting Redis-backed (WFAC-40) | security | QUALITY | DONE | main (aa26ed8) |
+| 016 | 2026-04-23 | Circuit breaker per chain RPC (WFAC-41) | resiliency | QUALITY | in progress | feat/016-wfac-41-circuit-breaker |
 
 <!--
 Formato por entrada:
