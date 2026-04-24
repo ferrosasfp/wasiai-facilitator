@@ -220,4 +220,12 @@ class AvalancheFujiAdapter implements ChainAdapter {
   }
 }
 
-export const avalancheFujiAdapter: ChainAdapter = new AvalancheFujiAdapter();
+// Fuji adapter is opt-in: only instantiated if AVALANCHE_FUJI_RPC_URL is set.
+// WFAC-52 will deliver full mainnet + fuji real support.
+export const avalancheFujiAdapter: ChainAdapter | null = (() => {
+  try {
+    return new AvalancheFujiAdapter();
+  } catch {
+    return null;
+  }
+})();

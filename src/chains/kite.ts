@@ -568,11 +568,19 @@ export const kiteTestnetAdapter: ChainAdapter = new KiteAdapter({
   usdcAddress: readUsdcAddress(2368),
 });
 
-export const kiteMainnetAdapter: ChainAdapter = new KiteAdapter({
-  chainIdNum: 2366,
-  envVarName: 'KITE_MAINNET_RPC_URL',
-  name: 'Kite Mainnet',
-  network: 'mainnet',
-  // MVP: reuse same env var. Future HU may introduce KITE_MAINNET_USDC_ADDRESS.
-  usdcAddress: readUsdcAddress(2366),
-});
+// Mainnet adapter is opt-in: only registered if KITE_MAINNET_RPC_URL is set.
+// V1 MVP ships testnet-only. Consumers who configure mainnet env get it
+// auto-registered in chains/index.ts.
+export const kiteMainnetAdapter: ChainAdapter | null = (() => {
+  try {
+    return new KiteAdapter({
+      chainIdNum: 2366,
+      envVarName: 'KITE_MAINNET_RPC_URL',
+      name: 'Kite Mainnet',
+      network: 'mainnet',
+      usdcAddress: readUsdcAddress(2366),
+    });
+  } catch {
+    return null;
+  }
+})();

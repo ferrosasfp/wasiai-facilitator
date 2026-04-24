@@ -19,5 +19,8 @@ import { kiteTestnetAdapter, kiteMainnetAdapter } from './kite.js';
 import { avalancheFujiAdapter } from './avalanche.js';
 
 chainRegistry.register(kiteTestnetAdapter);
-chainRegistry.register(kiteMainnetAdapter);
-chainRegistry.register(avalancheFujiAdapter);
+// Optional adapters — registered only if their env vars are set.
+// Each adapter module returns `null` when its required env is missing,
+// letting the facilitator boot successfully with just testnet in V1 MVP.
+if (kiteMainnetAdapter !== null) chainRegistry.register(kiteMainnetAdapter);
+if (avalancheFujiAdapter !== null) chainRegistry.register(avalancheFujiAdapter);
