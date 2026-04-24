@@ -69,12 +69,9 @@ export function initSupabase(env: EnvConfig, logger: SupabaseLogger): void {
   const key = env.SUPABASE_SERVICE_KEY;
 
   if (url && key) {
-    let hostname = url;
-    try {
-      hostname = new URL(url).hostname || url;
-    } catch {
-      hostname = url;
-    }
+    // `url` is Zod-validated (`z.string().url()`) — `new URL(url)` cannot
+    // throw here, so no defensive fallback is needed.
+    const hostname = new URL(url).hostname || url;
     logger.info(
       { url: hostname, keyPreview: redactSupabaseKey(key) },
       'Supabase client configured',
@@ -120,12 +117,10 @@ export function getSupabaseClient(): SupabaseClient | null {
     },
   });
 
-  let hostname = url;
-  try {
-    hostname = new URL(url).hostname || url;
-  } catch {
-    hostname = url;
-  }
+  // `url` is Zod-validated (`z.string().url()`) at parseEnv — `new URL(url)`
+  // cannot throw here. Defensive hostname extraction is redundant; log the
+  // already-validated URL structure (same hostname-only payload as init).
+  const hostname = new URL(url).hostname || url;
   logger.info({ url: hostname }, 'Supabase client instantiated');
 
   return _client;
@@ -142,14 +137,10 @@ export function getSupabaseClient(): SupabaseClient | null {
  *   - Keys of length < 12 (or non-string): return literal `sb_***`.
  */
 export function redactSupabaseKey(raw: string): string {
-  try {
-    if (typeof raw !== 'string' || raw.length < 12) {
-      return 'sb_***';
-    }
-    return `${raw.slice(0, 8)}…${raw.slice(-4)}`;
-  } catch {
+  if (typeof raw !== 'string' || raw.length < 12) {
     return 'sb_***';
   }
+  return `${raw.slice(0, 8)}…${raw.slice(-4)}`;
 }
 
 /**
