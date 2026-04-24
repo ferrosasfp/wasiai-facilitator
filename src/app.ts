@@ -111,6 +111,19 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       // (RateLimit-*) not used — work-item AC-5 cites X- prefixed names.
       enableDraftSpec: false,
       // DT-7 + DT-11: spec-literal body + warn log without PII (CD-3, CD-4).
+      // @fastify/rate-limit `throw`s the returned object; Fastify's default
+      // error handler reads `statusCode` from the thrown error to set the
+      // HTTP code and then serializes the remaining enumerable fields as
+      // the JSON body (see fastify/lib/error-handler.js:163,100).
+      //
+      // We need:
+      //   - HTTP 429  → attach `statusCode: 429` as a NON-enumerable property
+      //                 so it's used by Fastify but NOT emitted in the body
+      //                 (CD-3: body must have exactly 3 keys — code/message/http).
+      //   - body      → `{ error: { code, message, http } }` verbatim (CD-10).
+      //
+      // Using Object.defineProperty to make `statusCode` non-enumerable keeps
+      // the JSON shape clean while still honouring the Fastify error contract.
       errorResponseBuilder: (req, context) => {
         req.log.warn(
           {
@@ -121,13 +134,20 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
           },
           'rate limit exceeded',
         );
-        return {
+        const body = {
           error: {
             code: 'RATE_LIMITED',
             message: 'Too many requests, please try again later',
             http: 429,
           },
         };
+        Object.defineProperty(body, 'statusCode', {
+          value: 429,
+          enumerable: false,
+          writable: false,
+          configurable: false,
+        });
+        return body;
       },
     });
   }
