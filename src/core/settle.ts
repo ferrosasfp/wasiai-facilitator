@@ -51,10 +51,7 @@ export async function settleCore(
   const digits = m[1];
 
   // CD-14 heredado: don't trust Number() for chainId beyond MAX_SAFE_INTEGER.
-  if (
-    digits.length > MAX_CHAINID_DIGITS ||
-    BigInt(digits) > BigInt(Number.MAX_SAFE_INTEGER)
-  ) {
+  if (digits.length > MAX_CHAINID_DIGITS || BigInt(digits) > BigInt(Number.MAX_SAFE_INTEGER)) {
     return {
       ok: false,
       error: buildX402Error('NETWORK_MISMATCH', 'chainId out of safe integer range'),
@@ -69,10 +66,7 @@ export async function settleCore(
   if (parsed.accepted.extra.assetTransferMethod !== 'eip3009') {
     return {
       ok: false,
-      error: buildX402Error(
-        'NETWORK_MISMATCH',
-        'Method not supported: only eip3009 in v1',
-      ),
+      error: buildX402Error('NETWORK_MISMATCH', 'Method not supported: only eip3009 in v1'),
     };
   }
 

@@ -100,10 +100,7 @@ export const settleRoute: FastifyPluginAsync = async (app) => {
       }
     } else {
       // AC-10 graceful degradation — L2 warn
-      app.log.warn(
-        { request_id: requestId },
-        'idempotency cache miss — Redis unavailable',
-      );
+      app.log.warn({ request_id: requestId }, 'idempotency cache miss — Redis unavailable');
     }
 
     // Step 3 — dispatch to core
@@ -152,9 +149,7 @@ export const settleRoute: FastifyPluginAsync = async (app) => {
         },
         'settle failed',
       );
-      return reply
-        .code(result.error.http)
-        .send({ error: result.error } satisfies ErrorBody);
+      return reply.code(result.error.http).send({ error: result.error } satisfies ErrorBody);
     }
 
     // Success — L1 info with tx_hash (CD-12 nuevo; tx_hash is public on-chain).

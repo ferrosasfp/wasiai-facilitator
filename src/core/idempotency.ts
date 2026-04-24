@@ -297,9 +297,7 @@ export function buildSettleIdempotencyKey(parsed: VerifyRequest): string {
  *               (CRITICAL: prevents double-spend when the original tx is
  *               in-flight mempool or already mined).
  */
-export async function getCachedSettleResponse(
-  key: string,
-): Promise<CachedSettleResponse | null> {
+export async function getCachedSettleResponse(key: string): Promise<CachedSettleResponse | null> {
   const client = getRedisClient();
   if (!client) return null;
   try {
@@ -340,9 +338,7 @@ export async function setCachedSettleResponse(
  * the 7 spec-literal fields (no rest-spread destructure). This is the
  * "explicit object build" lesson from WFAC-20 auto-blindaje W1.
  */
-export function toCacheableSettle(
-  result: ToCacheableSettleInput,
-): CachedSettleResponse | null {
+export function toCacheableSettle(result: ToCacheableSettleInput): CachedSettleResponse | null {
   if (result.ok) {
     return {
       ok: true,
