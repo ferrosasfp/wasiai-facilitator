@@ -16,7 +16,7 @@
 | 012 | 2026-04-24 | OpenAPI 3.1 spec — contrato publico del facilitator (WFAC-23) | docs | FAST+AR | DONE | main (3c2fb88) |
 | 013 | 2026-04-24 | Settlement ledger — Supabase facilitator_settlements (WFAC-32) | infra | QUALITY | DONE | feat/013-wfac-32-settlement-ledger |
 | 014 | 2026-04-23 | Audit log inmutable — facilitator_audit_log (WFAC-33) | infra | QUALITY | DONE | main (949c0d5) |
-| 015 | 2026-04-23 | Rate limiting Redis-backed (WFAC-40) | security | QUALITY | in progress | feat/015-wfac-40-rate-limiting |
+| 015 | 2026-04-24 | Rate limiting Redis-backed (WFAC-40) | security | QUALITY | DONE | main (aa26ed8) |
 
 <!--
 Formato por entrada:
