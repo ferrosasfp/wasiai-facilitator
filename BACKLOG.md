@@ -153,6 +153,7 @@ Formato `TD-NN-NN`: primer NN = épica afectada, segundo NN = secuencial dentro 
 | TD-12-02 | Admin dashboard (settlement monitoring, wallet balances) | V1.5 | WFAC-TBD |
 | TD-13-01 | OFAC screening + geo-blocking (enterprise) | V2 | WFAC-TBD |
 | TD-SEC-LEDGER-01 | RLS en `facilitator_settlements` (defensa hoy app-layer via service role key; ALTER TABLE … ENABLE ROW LEVEL SECURITY + CREATE POLICY por role post-auditoría) | V1.5 / WFAC-SEC-01 | WFAC-TBD |
+| TD-CHAINS-ABI-DUP | WFAC-50 introdujo duplicación de `FIAT_TOKEN_ABI` + `normalizeSignature` entre `src/methods/eip3009/` y `src/chains/abi/`. Refactor futuro: mover canónico a `src/chains/abi/` y re-exportar desde `src/methods/eip3009/` para unificar la fuente de verdad. Test de sync byte-for-byte (`T-SDD-1-ABI-SYNC`) protege hasta entonces. | V1.5 | WFAC-TBD |
 
 ### TD-SEC-LEDGER-01 — Habilitar RLS en `facilitator_settlements`
 

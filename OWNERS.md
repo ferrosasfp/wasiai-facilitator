@@ -22,7 +22,7 @@ en la abstracción, no una excepción válida.
 | Módulo                    | Puede importar                                          | PROHIBIDO importar                                                         |
 |---------------------------|---------------------------------------------------------|----------------------------------------------------------------------------|
 | `src/core/`               | `src/infra/*`, tipos compartidos, Zod                   | `src/chains/*` (salvo vía registry), `src/methods/*` (vía dispatch), `src/routes/*` |
-| `src/chains/<chain>.ts`   | `src/chains/types.ts`, viem                             | `src/core/*`, `src/methods/*`, `src/routes/*`, otras chains                |
+| `src/chains/<chain>.ts`   | `src/chains/types.ts`, `src/chains/abi/*.ts` (ver [3]), `src/infra/wallet.ts` (para Account operator — WFAC-50 DT-J), viem | `src/core/*` (runtime), `src/methods/*`, `src/routes/*`, otras chains      |
 | `src/chains/registry.ts`  | Todos los `src/chains/<chain>.ts` (explícitos)          | `src/core/*`, `src/methods/*`, `src/routes/*`                              |
 | `src/methods/<method>/`   | `src/chains/types.ts` (solo tipos), `src/core/types.ts` (solo tipos), `src/core/errors.ts` [1], viem, ABIs propias | `src/core/*` (salvo excepciones [1]), `src/chains/registry.ts`, otros methods |
 | `src/routes/`             | `src/core/*`, `src/infra/*`, Zod schemas                | `src/chains/*`, `src/methods/*` (se accede vía `core.verify/settle`)       |
@@ -78,6 +78,26 @@ en runtime desde `src/methods/<method>/`:
   user_agent) nunca se loguea en stdout, solo se persiste en DB (CD-4).
 
 Origen: **WFAC-33**.
+
+### [3] Nota: `src/chains/abi/*.ts` — duplicados spec-fijos (WFAC-50)
+
+`src/chains/abi/fiat-token.ts` y `src/chains/abi/signature.ts` son **duplicados
+controlados** de `src/methods/eip3009/abi.ts` y `src/methods/eip3009/signature.ts`
+respectivamente. Razón: el boundary `chains ↛ methods` es estricto, y estos
+archivos contienen spec-literal de EIP-3009 necesaria para que los chain
+adapters hagan EIP-712 recovery inline.
+
+- **Sincronía obligatoria**: cambios al source en `src/methods/eip3009/` DEBEN
+  replicarse en `src/chains/abi/` en el mismo PR (CD-NEW-SDD-1).
+- **Test de detección**: `T-SDD-1-ABI-SYNC` en
+  `src/__tests__/unit/chain-adapter.test.ts` compara byte-for-byte
+  `FIAT_TOKEN_ABI`, `EIP3009_TYPES`, `EIP3009_PRIMARY_TYPE`,
+  `RECEIPT_TIMEOUT_MS`, y la salida funcional de `normalizeSignature`.
+- **Refactor futuro**: `TD-CHAINS-ABI-DUP` en `BACKLOG.md` — mover canónico a
+  `src/chains/abi/` y re-exportar desde `src/methods/eip3009/` para unificar la
+  fuente de verdad.
+
+Origen: **WFAC-50** (DT-A + DT-K).
 
 ---
 
