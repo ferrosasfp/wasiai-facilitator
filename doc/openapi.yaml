@@ -1,0 +1,486 @@
+openapi: "3.1.0"
+info:
+  title: wasiai-facilitator
+  version: "0.1.0"
+  summary: Self-hosted x402 facilitator for EVM chains (Kite, Avalanche, extensible).
+  description: |
+    HTTP API for the x402 payment protocol. The facilitator validates
+    EIP-3009 signed authorizations (`POST /verify`) and submits them on-chain
+    (`POST /settle`). Discovery is exposed via `GET /supported`, and liveness
+    via `GET /health`.
+
+    This spec is the authoritative contract consumed by integrators
+    (wasiai-a2a, wasiai-v2, third parties). It is hand-written (no code
+    generation) and published verbatim at runtime via `GET /openapi.json`.
+
+    Conformance reference: `doc/architecture/X402-CONFORMANCE.md`.
+  license:
+    name: MIT
+    identifier: MIT
+
+servers:
+  - url: http://localhost:3002
+    description: Local development (default port from `src/infra/env.ts`)
+  - url: https://facilitator.wasiai.example
+    description: Production deployment (configure per environment)
+
+tags:
+  - name: x402
+    description: x402 protocol endpoints (verify + settle).
+  - name: discovery
+    description: Service discovery (supported chains + methods).
+  - name: ops
+    description: Liveness and diagnostics.
+
+paths:
+  /verify:
+    post:
+      tags: [x402]
+      summary: Verify an x402 payment authorization.
+      description: |
+        Validates an EIP-3009 `transferWithAuthorization` signed payload
+        without broadcasting a transaction. Idempotent when Redis is available
+        (keyed by SHA-256 of the canonical request body; see
+        `src/core/idempotency.ts`).
+      operationId: verifyPayment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VerifyRequest"
+      responses:
+        "200":
+          description: Authorization is valid and can be settled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VerifyResponse"
+        "400":
+          description: Malformed payload, expired authorization, network mismatch, invalid amount, or invalid receiver.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "401":
+          description: Invalid signature or invalid ERC-7710 delegation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "402":
+          description: Insufficient balance at the authorized `from` address.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "412":
+          description: Permit2 allowance required (Permit2 method only).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "500":
+          description: Simulation or transaction execution error (server-side).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+
+  /settle:
+    post:
+      tags: [x402]
+      summary: Submit a verified x402 payment authorization on-chain.
+      description: |
+        Broadcasts the `transferWithAuthorization` transaction via the
+        configured chain adapter. Idempotent: re-sending the same canonical
+        body while the transaction is in-flight or already mined returns the
+        cached response (double-spend prevention).
+      operationId: settlePayment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SettleRequest"
+      responses:
+        "200":
+          description: Transaction settled on-chain.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SettleResponse"
+        "400":
+          description: Malformed payload, expired authorization, network mismatch, invalid amount, or invalid receiver.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "401":
+          description: Invalid signature or invalid ERC-7710 delegation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "402":
+          description: Insufficient balance at the authorized `from` address.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "412":
+          description: Permit2 allowance required (Permit2 method only).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "500":
+          description: Simulation or on-chain transaction failure.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+
+  /supported:
+    get:
+      tags: [discovery]
+      summary: List supported chains and asset-transfer methods.
+      description: |
+        Read-only discovery endpoint. Consumers call this before `/verify` or
+        `/settle` to learn which chains are registered and which methods each
+        chain supports (currently `eip3009` for every chain in V1).
+      operationId: listSupported
+      responses:
+        "200":
+          description: Snapshot of the live chain registry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SupportedResponse"
+
+  /health:
+    get:
+      tags: [ops]
+      summary: Liveness probe.
+      description: |
+        Basic health check with version metadata. Exempted from the global
+        rate-limit plugin. Returns 200 as long as the Fastify instance is
+        alive — does NOT probe Redis, RPC, or downstream dependencies.
+      operationId: getHealth
+      responses:
+        "200":
+          description: Server is alive.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+components:
+  schemas:
+    # ─── Request shapes ───────────────────────────────────────────────────
+
+    ResourceDescriptor:
+      type: object
+      description: x402 resource descriptor — the asset/endpoint being paid for.
+      required: [url]
+      additionalProperties: false
+      properties:
+        url:
+          type: string
+          format: uri
+          description: Absolute URL identifying the resource.
+        description:
+          type: string
+        mimeType:
+          type: string
+
+    AcceptedExtra:
+      type: object
+      description: |
+        Method discriminator + optional EIP-712 domain hints. Matches the
+        Zod `AcceptedExtraSchema` in `src/core/schemas.ts`.
+      required: [assetTransferMethod]
+      additionalProperties: false
+      properties:
+        assetTransferMethod:
+          type: string
+          enum: [eip3009, permit2, erc7710]
+        name:
+          type: string
+          description: Optional EIP-712 `name` domain hint.
+        version:
+          type: string
+          description: Optional EIP-712 `version` domain hint.
+
+    Accepted:
+      type: object
+      description: |
+        Full x402 `accepted` object. Matches the Zod `AcceptedSchema`
+        in `src/core/schemas.ts`.
+      required: [scheme, network, amount, asset, payTo, maxTimeoutSeconds, extra]
+      additionalProperties: false
+      properties:
+        scheme:
+          const: exact
+        network:
+          type: string
+          minLength: 1
+          description: x402 chain alias (e.g. `kite-testnet`, `avalanche-fuji`).
+        amount:
+          type: string
+          description: Canonical uint256 decimal string (no leading zeros, no scientific notation).
+          pattern: "^(0|[1-9][0-9]*)$"
+        asset:
+          type: string
+          description: 0x-prefixed 20-byte EVM address of the ERC-20 token.
+          pattern: "^0x[0-9a-fA-F]{40}$"
+        payTo:
+          type: string
+          description: 0x-prefixed 20-byte recipient EVM address.
+          pattern: "^0x[0-9a-fA-F]{40}$"
+        maxTimeoutSeconds:
+          type: integer
+          minimum: 1
+          description: Maximum number of seconds this authorization remains valid.
+        extra:
+          $ref: "#/components/schemas/AcceptedExtra"
+
+    Eip3009Authorization:
+      type: object
+      description: EIP-3009 `transferWithAuthorization` signed authorization fields.
+      required: [from, to, value, validAfter, validBefore, nonce]
+      additionalProperties: false
+      properties:
+        from:
+          type: string
+          pattern: "^0x[0-9a-fA-F]{40}$"
+        to:
+          type: string
+          pattern: "^0x[0-9a-fA-F]{40}$"
+        value:
+          type: string
+          description: Authorized token amount (canonical uint256 decimal string).
+          pattern: "^(0|[1-9][0-9]*)$"
+        validAfter:
+          type: string
+          description: Unix timestamp (seconds) — authorization is valid after this instant.
+          pattern: "^(0|[1-9][0-9]*)$"
+        validBefore:
+          type: string
+          description: Unix timestamp (seconds) — authorization expires at this instant.
+          pattern: "^(0|[1-9][0-9]*)$"
+        nonce:
+          type: string
+          description: 32-byte 0x-prefixed hex nonce (EIP-3009 single-use).
+          pattern: "^0x[0-9a-fA-F]{64}$"
+
+    Payload:
+      type: object
+      description: x402 `payload` — signature + authorization.
+      required: [signature, authorization]
+      additionalProperties: false
+      properties:
+        signature:
+          type: string
+          description: 0x-prefixed hex signature (65-byte canonical or 64-byte EIP-2098 compact).
+          pattern: "^0x[0-9a-fA-F]+$"
+        authorization:
+          $ref: "#/components/schemas/Eip3009Authorization"
+
+    VerifyRequest:
+      type: object
+      description: |
+        Top-level x402 `POST /verify` request body. Mirrors
+        `VerifyRequestSchema` in `src/core/schemas.ts`.
+      required: [x402Version, resource, accepted, payload]
+      additionalProperties: false
+      properties:
+        x402Version:
+          const: 2
+          description: x402 protocol version literal (CD-8, CD-4 — JSON Schema 2020-12 const).
+        resource:
+          $ref: "#/components/schemas/ResourceDescriptor"
+        accepted:
+          $ref: "#/components/schemas/Accepted"
+        payload:
+          $ref: "#/components/schemas/Payload"
+
+    SettleRequest:
+      description: |
+        x402 `POST /settle` request body. The x402 spec declares this shape
+        identical to `VerifyRequest` (see `SettleRequestSchema =
+        VerifyRequestSchema` in `src/core/schemas.ts`). The `$ref` keeps the
+        two documented schemas structurally equal.
+      $ref: "#/components/schemas/VerifyRequest"
+
+    # ─── Response shapes ──────────────────────────────────────────────────
+
+    VerifyResponse:
+      type: object
+      description: |
+        Successful verification. Mirrors the `VerifyResult` interface in
+        `src/chains/types.ts` (sans the `ok` discriminant which is stripped
+        by the route layer before serialization).
+      required: [verified, client, amount, asset, network, payTo, expiresAt]
+      additionalProperties: false
+      properties:
+        verified:
+          const: true
+        client:
+          type: string
+          pattern: "^0x[0-9a-fA-F]{40}$"
+          description: The `from` address of the authorization (payer).
+        amount:
+          type: string
+          pattern: "^(0|[1-9][0-9]*)$"
+          description: Authorized amount in token base units (canonical uint256 decimal string).
+        asset:
+          type: string
+          pattern: "^0x[0-9a-fA-F]{40}$"
+        network:
+          type: string
+        payTo:
+          type: string
+          pattern: "^0x[0-9a-fA-F]{40}$"
+        expiresAt:
+          type: integer
+          description: Unix timestamp (seconds) when the authorization expires (`validBefore`).
+
+    SettleResponse:
+      type: object
+      description: |
+        Successful settlement. Mirrors the `SettleResult` interface in
+        `src/chains/types.ts` (sans the `ok` discriminant).
+      required: [settled, transactionHash, blockNumber, amount, from, to, asset]
+      additionalProperties: false
+      properties:
+        settled:
+          const: true
+        transactionHash:
+          type: string
+          description: 0x-prefixed 32-byte transaction hash.
+          pattern: "^0x[0-9a-fA-F]{64}$"
+        blockNumber:
+          type: integer
+          minimum: 0
+          description: Block number at which the transaction was mined.
+        amount:
+          type: string
+          pattern: "^(0|[1-9][0-9]*)$"
+        from:
+          type: string
+          pattern: "^0x[0-9a-fA-F]{40}$"
+        to:
+          type: string
+          pattern: "^0x[0-9a-fA-F]{40}$"
+        asset:
+          type: string
+          pattern: "^0x[0-9a-fA-F]{40}$"
+
+    ChainSupportedItem:
+      type: object
+      description: |
+        One entry per registered chain adapter. Matches
+        `ChainSupportedItem` in `src/core/supported.ts`.
+      required: [network, name, methods]
+      additionalProperties: false
+      properties:
+        network:
+          type: string
+          description: CAIP-2 network identifier, e.g. `eip155:2368`.
+        name:
+          type: string
+          description: Human-readable chain name, e.g. `Kite Testnet`.
+        methods:
+          type: array
+          items:
+            type: string
+          description: Asset-transfer methods supported by this chain (today always `["eip3009"]`).
+
+    SupportedResponse:
+      type: object
+      description: |
+        Discovery snapshot. Matches `SupportedResponse` in
+        `src/core/supported.ts`.
+      required: [chains, methods]
+      additionalProperties: false
+      properties:
+        chains:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChainSupportedItem"
+        methods:
+          type: array
+          items:
+            type: string
+          description: Deduped union of every chain's `methods` array.
+
+    HealthResponse:
+      type: object
+      description: |
+        Liveness response. Matches `HealthResponse` in
+        `src/routes/health.ts`.
+      required: [status, version, uptime, timestamp]
+      additionalProperties: false
+      properties:
+        status:
+          const: ok
+        version:
+          type: string
+          description: Server version (from `package.json#version`).
+        uptime:
+          type: number
+          minimum: 0
+          description: Process uptime in seconds (`process.uptime()`).
+        timestamp:
+          type: string
+          format: date-time
+          description: ISO-8601 timestamp of the response.
+
+    # ─── Error envelope ───────────────────────────────────────────────────
+
+    X402ErrorCode:
+      type: string
+      description: |
+        Canonical x402 error code. Exactly the 10 values exported as the
+        `X402ErrorCode` union from `src/core/types.ts`.
+      enum:
+        - INVALID_SIGNATURE
+        - INSUFFICIENT_BALANCE
+        - PERMIT2_ALLOWANCE_REQUIRED
+        - EXPIRED_AUTHORIZATION
+        - NETWORK_MISMATCH
+        - SIMULATION_FAILED
+        - INVALID_AMOUNT
+        - INVALID_RECEIVER
+        - TRANSACTION_FAILED
+        - DELEGATION_INVALID
+
+    X402ErrorHttp:
+      type: integer
+      description: |
+        HTTP status associated with the error code. Matches `HTTP_BY_CODE`
+        in `src/core/errors.ts`. Values are `400`, `401`, `402`, `412`,
+        or `500`.
+      enum: [400, 401, 402, 412, 500]
+
+    ErrorBody:
+      type: object
+      description: |
+        Canonical x402 error envelope. CD-5: exactly three fields under
+        `error` — `code`, `message`, `http` — no extras, no omissions.
+      required: [error]
+      additionalProperties: false
+      properties:
+        error:
+          type: object
+          required: [code, message, http]
+          additionalProperties: false
+          properties:
+            code:
+              $ref: "#/components/schemas/X402ErrorCode"
+            message:
+              type: string
+              description: Human-readable English message. No PII (no addresses, no values, no chain IDs).
+            http:
+              $ref: "#/components/schemas/X402ErrorHttp"
