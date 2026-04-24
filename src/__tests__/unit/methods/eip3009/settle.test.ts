@@ -463,30 +463,35 @@ describe('settleEip3009', () => {
     });
   });
 
-  describe('AC-15 CD-NEW-15 — rejects EIP-2098 yParity form (65-byte sig with v=0/1 last byte)', () => {
-    // MNR-1 (AR F3.1): the CD-NEW-15 branch (`!('v' in parsed) || parsed.v ===
-    // undefined`) was previously uncovered. A canonical EIP-3009 signature from
-    // viem's `signTypedData` ends with 0x1b (v=27) or 0x1c (v=28). If the last
-    // byte is tampered to 0x00 or 0x01 (yParity form — RFC 8032 style), viem's
-    // `parseSignature` interprets it as an EIP-2098 compact signature and yields
-    // `{ r, s, yParity, v: undefined }`. The signature is STILL cryptographically
-    // valid (`recoverTypedDataAddress` accepts yParity form), so it passes verify
-    // (AC-9) and reaches settle's parseSignature guard. This test pins that
-    // guard's behaviour end-to-end without mocking viem (CD-8 compliance).
-    it('returns INVALID_SIGNATURE when parseSignature yields v undefined', async () => {
+  describe('AC-15 (WFAC-13) — legacy v=0/1 normalized, EIP-2098 compact expanded', () => {
+    // WFAC-13 supersedes the pre-existing CD-NEW-15 reject-path: the guard
+    // `!('v' in parsed) || parsed.v === undefined` has been replaced by
+    // `normalizeSignature`, which NORMALIZES v ∈ {0,1} → {27,28} (AC-3 of
+    // WFAC-13) and EXPANDS 64-byte EIP-2098 compact → 65-byte standard
+    // (AC-2 of WFAC-13). These tests pin the new behaviour end-to-end (no
+    // mocking of viem — CD-8 compliance).
+    it('normalizes tampered v=0/1 last byte and proceeds to simulateContract', async () => {
       const validParams = await makeValidParams();
-      // Tamper last byte: canonical 0x1b (v=27) → 0x00 (yParity=0),
-      // or 0x1c (v=28) → 0x01 (yParity=1). The yParity MUST match the original
-      // parity so the signature remains cryptographically valid under yParity
-      // form (recoverTypedDataAddress accepts yParity-form and yields the same
-      // signer address → verify passes AC-9 → settle reaches parseSignature).
       const sigHex = validParams.payload.signature.slice(2);
       const sigBytes = Buffer.from(sigHex, 'hex');
       const originalV = sigBytes[64]; // 0x1b or 0x1c
+      // Pick matching yParity so the signature remains cryptographically valid
+      // (recover passes verify AC-9 via yParity form → reaches settle's
+      // normalizeSignature which lifts v=0/1 → 27/28).
       sigBytes[64] = originalV === 0x1c ? 0x01 : 0x00;
       const tamperedSig = `0x${sigBytes.toString('hex')}` as `0x${string}`;
 
       const { publicClient, walletClient } = makeMockClients();
+      vi.mocked(publicClient.simulateContract).mockResolvedValue({
+        request: {} as never,
+        result: undefined as never,
+      });
+      vi.mocked(walletClient.writeContract).mockResolvedValue(TEST_TX_HASH);
+      vi.mocked(publicClient.waitForTransactionReceipt).mockResolvedValue({
+        status: 'success',
+        blockNumber: 123n,
+      } as never);
+
       const result = await settleEip3009(
         {
           ...validParams,
@@ -498,15 +503,94 @@ describe('settleEip3009', () => {
         walletClient,
       );
 
+      expect(result.ok).toBe(true);
+      // simulateContract receives v ∈ {27, 28} (normalized from the 0x00/0x01
+      // last byte). Inspect the call to pin the normalization behaviour.
+      expect(publicClient.simulateContract).toHaveBeenCalledTimes(1);
+      const simArgs = vi.mocked(publicClient.simulateContract).mock.calls[0]?.[0];
+      // args tuple: [from, to, value, validAfter, validBefore, nonce, v, r, s]
+      const vPassed = (simArgs as { args: readonly unknown[] }).args[6];
+      expect([27, 28]).toContain(vPassed);
+    });
+
+    it('expands 64-byte EIP-2098 compact signature and proceeds to simulateContract', async () => {
+      const validParams = await makeValidParams();
+      // Compress the canonical 65-byte sig into EIP-2098 compact (64 bytes).
+      const sigHex = validParams.payload.signature.slice(2);
+      const rHex = sigHex.slice(0, 64);
+      const sHex = sigHex.slice(64, 128);
+      const vHex = sigHex.slice(128, 130);
+      const sBig = BigInt(`0x${sHex}`);
+      const vNum = Number.parseInt(vHex, 16);
+      const yParity = vNum === 27 ? 0n : 1n;
+      const yParityAndS = (yParity << 255n) | sBig;
+      const compactSig = `0x${rHex}${yParityAndS.toString(16).padStart(64, '0')}` as `0x${string}`;
+
+      const { publicClient, walletClient } = makeMockClients();
+      vi.mocked(publicClient.simulateContract).mockResolvedValue({
+        request: {} as never,
+        result: undefined as never,
+      });
+      vi.mocked(walletClient.writeContract).mockResolvedValue(TEST_TX_HASH);
+      vi.mocked(publicClient.waitForTransactionReceipt).mockResolvedValue({
+        status: 'success',
+        blockNumber: 123n,
+      } as never);
+
+      const result = await settleEip3009(
+        {
+          ...validParams,
+          payload: { ...validParams.payload, signature: compactSig },
+        },
+        TEST_TOKEN,
+        TEST_CHAIN_ID,
+        publicClient,
+        walletClient,
+      );
+
+      // verify.ts canonicalizes the 64-byte compact sig to a 65-byte standard
+      // hex (via normalizeSignature) before calling recoverTypedDataAddress —
+      // viem's recover does NOT accept compact form directly. settle.ts then
+      // runs its own normalizeSignature pass and passes v/r/s to simulateContract.
+      expect(result.ok).toBe(true);
+      expect(publicClient.simulateContract).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects high-s (malleable) signature with INVALID_SIGNATURE', async () => {
+      const validParams = await makeValidParams();
+      const sigHex = validParams.payload.signature.slice(2);
+      const rHex = sigHex.slice(0, 64);
+      const sHex = sigHex.slice(64, 128);
+      const vHex = sigHex.slice(128, 130);
+      const SECP256K1_N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
+      const sBig = BigInt(`0x${sHex}`);
+      const SECP256K1_N_HALF = SECP256K1_N / 2n;
+      // Flip s into the opposite half. If the original is low, n-s is high.
+      const flippedS = sBig <= SECP256K1_N_HALF ? SECP256K1_N - sBig : sBig;
+      // Flip v parity to keep the tampered sig well-formed if needed.
+      const malleableVHex = vHex === '1b' ? '1c' : '1b';
+      const malleableSig = `0x${rHex}${flippedS
+        .toString(16)
+        .padStart(64, '0')}${malleableVHex}` as `0x${string}`;
+
+      const { publicClient, walletClient } = makeMockClients();
+      const result = await settleEip3009(
+        {
+          ...validParams,
+          payload: { ...validParams.payload, signature: malleableSig },
+        },
+        TEST_TOKEN,
+        TEST_CHAIN_ID,
+        publicClient,
+        walletClient,
+      );
+
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(result.error.code).toBe('INVALID_SIGNATURE');
         expect(result.error.http).toBe(401);
-        // Guard message identifies the EIP-2098 reject branch (not the
-        // parseSignature try/catch or verify.ts).
-        expect(result.error.message).toContain('EIP-2098');
       }
-      // Settle must short-circuit BEFORE any RPC call.
+      // Settle short-circuits before any RPC call.
       expect(publicClient.simulateContract).not.toHaveBeenCalled();
       expect(walletClient.writeContract).not.toHaveBeenCalled();
     });

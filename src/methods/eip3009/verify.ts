@@ -29,6 +29,7 @@ import { buildX402Error } from '../../core/errors.js';
 import { AcceptedSchema, Eip3009AuthorizationSchema } from './schemas.js';
 import { buildEip3009Domain } from './domain.js';
 import { EIP3009_TYPES, EIP3009_PRIMARY_TYPE } from './abi.js';
+import { normalizeSignature } from './signature.js';
 
 export async function verifyEip3009(
   params: VerifyParams,
@@ -124,7 +125,24 @@ export async function verifyEip3009(
     };
   }
 
-  // 7. Build domain + recover (AC-10)
+  // 7. Signature pre-validation + canonicalization (WFAC-13, DT-3).
+  // `normalizeSignature` rejects malleable (high-s), out-of-range, and zero
+  // scalars BEFORE we hand the hex to viem's recover — recoverTypedDataAddress
+  // by itself happily accepts high-s signatures, which would allow a second
+  // valid hex for the same signer (replay via alternative encoding).
+  // Additionally, viem's `recoverTypedDataAddress` does NOT accept 64-byte
+  // EIP-2098 compact signatures directly (it requires the 65-byte form), so
+  // we reconstruct the canonical 65-byte hex from the normalized r/s/v and
+  // pass that to recover — handles Core wallet / Backpack / Ethers-v5 interop.
+  const sigCheck = normalizeSignature(params.payload.signature);
+  if (!sigCheck.ok) {
+    return { ok: false, error: sigCheck.error };
+  }
+  const canonicalVHex = sigCheck.v === 27n ? '1b' : '1c';
+  const canonicalSignature =
+    `0x${sigCheck.r.slice(2)}${sigCheck.s.slice(2)}${canonicalVHex}` as `0x${string}`;
+
+  // 8. Build domain + recover (AC-10)
   const domain = buildEip3009Domain(token, chainId, params.accepted);
   // NOTE: buildEip3009Domain takes the original params.accepted because its
   // signature consumes the AssetTransferMethod-typed `extra`. The validated
@@ -143,7 +161,7 @@ export async function verifyEip3009(
         validBefore: BigInt(authorization.validBefore),
         nonce: authorization.nonce as `0x${string}`,
       },
-      signature: params.payload.signature,
+      signature: canonicalSignature,
     });
   } catch {
     // AC-3: malformed signature bytes / invalid v-value -> catch and return.
