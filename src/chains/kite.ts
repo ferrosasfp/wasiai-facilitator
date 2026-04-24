@@ -46,9 +46,24 @@ import {
   readCbBool,
   type BreakerStateName,
 } from './circuit-breaker.js';
-import { EIP3009_TYPES, EIP3009_PRIMARY_TYPE } from './abi/fiat-token.js';
+import {
+  EIP3009_TYPES,
+  EIP3009_PRIMARY_TYPE,
+  FIAT_TOKEN_ABI,
+  RECEIPT_TIMEOUT_MS,
+} from './abi/fiat-token.js';
 import { normalizeSignature } from './abi/signature.js';
 import { getOperatorAccount } from '../infra/wallet.js';
+
+/**
+ * Extract a safe, bounded-length string from an unknown error. Defensive
+ * against viem errors that may embed request data in their `.message`.
+ * Mirrors `src/methods/eip3009/settle.ts:43-46` (sanitize helper).
+ */
+function sanitize(e: unknown): string {
+  const raw = e instanceof Error ? e.message : String(e);
+  return raw.slice(0, 200);
+}
 
 function readEnv(name: string, chainId: number): string {
   // eslint-disable-next-line security/detect-object-injection -- `name` is a caller-controlled literal (one of KITE_TESTNET_RPC_URL / KITE_MAINNET_RPC_URL), not user input.
@@ -372,14 +387,161 @@ class KiteAdapter implements ChainAdapter {
     }
   }
 
-  private async _settleRaw(_params: SettleParams): Promise<AdapterResult<SettleResult>> {
+  // WFAC-50 — real EIP-3009 transferWithAuthorization flow via viem. The outer
+  // settle() wrapper preserves the WFAC-41 circuit breaker accounting via
+  // BusinessFailureError throws (CD-NEW-SDD-3). This function returns a plain
+  // AdapterResult — SIMULATION_FAILED / TRANSACTION_FAILED surface to the
+  // wrap where they are converted to a thrown BusinessFailureError.
+  private async _settleRaw(params: SettleParams): Promise<AdapterResult<SettleResult>> {
+    const token = this.metadata.tokens[0];
+    if (!token) {
+      return {
+        ok: false,
+        error: {
+          code: 'NETWORK_MISMATCH',
+          message: 'Chain has no registered token',
+          http: 400,
+        },
+      };
+    }
+
+    // 1. Defense-in-depth re-verify (DT-H). Mirror the first 4 steps of
+    //    _verifyRaw so a mis-routed settle still rejects before RPC.
+    const authorization = params.payload.authorization;
+
+    if (params.accepted.network !== this.metadata.networkId) {
+      return {
+        ok: false,
+        error: {
+          code: 'NETWORK_MISMATCH',
+          message: 'Network does not match chain',
+          http: 400,
+        },
+      };
+    }
+    if (!isAddressEqual(params.accepted.asset as Address, token.address)) {
+      return {
+        ok: false,
+        error: {
+          code: 'NETWORK_MISMATCH',
+          message: 'Asset not found in chain token registry',
+          http: 400,
+        },
+      };
+    }
+    const acceptedAmount = BigInt(params.accepted.amount);
+    if (BigInt(authorization.value) < acceptedAmount) {
+      return {
+        ok: false,
+        error: {
+          code: 'INVALID_AMOUNT',
+          message: 'Authorized value is below accepted amount',
+          http: 400,
+        },
+      };
+    }
+    const nowSec = BigInt(Math.floor(Date.now() / 1000));
+    if (BigInt(authorization.validBefore) <= nowSec) {
+      return {
+        ok: false,
+        error: {
+          code: 'EXPIRED_AUTHORIZATION',
+          message: 'Authorization expired',
+          http: 400,
+        },
+      };
+    }
+
+    // 2. Normalize signature — gates malleable/zero scalars before spending
+    //    gas on a simulate. Shape matches _verifyRaw step 5.
+    const sig = normalizeSignature(params.payload.signature);
+    if (!sig.ok) {
+      return { ok: false, error: sig.error };
+    }
+    const { r, s } = sig;
+    const vNum = Number(sig.v); // 27 or 28
+
+    // 3. Simulate (AC-7, CD-4). MUST run BEFORE writeContract.
+    const publicClient = this.getPublicClient();
+    const walletClient = this.getWalletClient();
+    let simRequest: unknown;
+    try {
+      const sim = await publicClient.simulateContract({
+        account: walletClient.account,
+        address: token.address,
+        abi: FIAT_TOKEN_ABI,
+        functionName: 'transferWithAuthorization',
+        args: [
+          authorization.from as Address,
+          authorization.to as Address,
+          BigInt(authorization.value),
+          BigInt(authorization.validAfter),
+          BigInt(authorization.validBefore),
+          authorization.nonce as `0x${string}`,
+          vNum,
+          r,
+          s,
+        ],
+      });
+      simRequest = sim.request;
+    } catch (e) {
+      return {
+        ok: false,
+        error: { code: 'SIMULATION_FAILED', message: sanitize(e), http: 500 },
+      };
+    }
+
+    // 4. Write (AC-7, AC-11, CD-6). Use sim.request opaque — do NOT reconstruct.
+    let hash: `0x${string}`;
+    try {
+      hash = await walletClient.writeContract(simRequest as never);
+    } catch (e) {
+      return {
+        ok: false,
+        error: { code: 'TRANSACTION_FAILED', message: sanitize(e), http: 500 },
+      };
+    }
+
+    // 5. Wait receipt (AC-7, AC-12).
+    let receipt;
+    try {
+      receipt = await publicClient.waitForTransactionReceipt({
+        hash,
+        timeout: RECEIPT_TIMEOUT_MS,
+      });
+    } catch (e) {
+      const msg =
+        e instanceof Error && e.name === 'WaitForTransactionReceiptTimeoutError'
+          ? 'receipt timeout'
+          : sanitize(e);
+      return {
+        ok: false,
+        error: { code: 'TRANSACTION_FAILED', message: msg, http: 500 },
+      };
+    }
+
+    // 6. Status (AC-13).
+    if (receipt.status === 'reverted') {
+      return {
+        ok: false,
+        error: {
+          code: 'TRANSACTION_FAILED',
+          message: 'transaction reverted on-chain',
+          http: 500,
+        },
+      };
+    }
+
+    // 7. Success (AC-7, AC-9). Fields from input params, NOT re-read from chain.
     return {
-      ok: false,
-      error: {
-        code: 'NETWORK_MISMATCH',
-        message: 'Settle not implemented yet (WFAC-11)',
-        http: 400,
-      },
+      ok: true,
+      settled: true,
+      transactionHash: hash,
+      blockNumber: Number(receipt.blockNumber),
+      amount: params.accepted.amount,
+      from: authorization.from as Address,
+      to: authorization.to as Address,
+      asset: token.address,
     };
   }
 }

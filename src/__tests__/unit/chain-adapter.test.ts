@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { privateKeyToAccount } from 'viem/accounts';
+import type { PublicClient, WalletClient, Chain } from 'viem';
 import type { VerifyParams } from '../../chains/types.js';
 
 // NOTE: we intentionally do NOT import ChainAdapterInitError statically here.
@@ -42,6 +43,31 @@ const TEST_PRIVATE_KEY =
 const TEST_SIGNER_ADDRESS = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266' as `0x${string}`;
 const TEST_USDC = '0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9' as `0x${string}`;
 const TEST_PAY_TO = '0x1111111111111111111111111111111111111111' as `0x${string}`;
+const TEST_TX_HASH = `0x${'ab'.repeat(32)}` as `0x${string}`;
+
+/**
+ * Build a pair of (publicClient, walletClient) with viem-stubbed fns.
+ * Tests install these via vi.spyOn(adapter, 'getPublicClient').mockReturnValue(...).
+ * CD-3: NO real RPC calls to https://rpc-testnet.gokite.ai/ in CI — all viem
+ * methods are vi.fn() stubs.
+ */
+function makeMockClients(): {
+  publicClient: PublicClient;
+  walletClient: WalletClient;
+  operatorAccount: ReturnType<typeof privateKeyToAccount>;
+} {
+  const operatorAccount = privateKeyToAccount(TEST_PRIVATE_KEY);
+  const publicClient = {
+    simulateContract: vi.fn(),
+    waitForTransactionReceipt: vi.fn(),
+  } as unknown as PublicClient;
+  const walletClient = {
+    account: operatorAccount,
+    writeContract: vi.fn(),
+    chain: {} as Chain,
+  } as unknown as WalletClient;
+  return { publicClient, walletClient, operatorAccount };
+}
 
 /**
  * Build a VerifyParams object with a REAL EIP-712 signature signed by Hardhat
@@ -267,6 +293,194 @@ describe('kite.ts adapters', () => {
         expect(t.eip712Name).toBe('USD Coin');
         expect(t.eip712Version).toBe('2');
       }
+    });
+  });
+
+  // ─── WFAC-50 — real EIP-3009 settle (AC-7..AC-13 + AC-15) ────────────────
+  describe('WFAC-50 _settleRaw', () => {
+    it('T-S-HAPPY (AC-7, AC-9, CD-6): full flow returns 8-field SettleResult with direct hash', async () => {
+      const mod = await import('../../chains/kite.js');
+      const { publicClient, walletClient } = makeMockClients();
+      vi.spyOn(mod.kiteTestnetAdapter, 'getPublicClient').mockReturnValue(publicClient);
+      vi.spyOn(mod.kiteTestnetAdapter, 'getWalletClient').mockReturnValue(walletClient);
+      vi.mocked(publicClient.simulateContract).mockResolvedValue({
+        request: { __opaque: 1 } as never,
+        result: undefined as never,
+      });
+      vi.mocked(walletClient.writeContract).mockResolvedValue(TEST_TX_HASH);
+      vi.mocked(publicClient.waitForTransactionReceipt).mockResolvedValue({
+        status: 'success',
+        blockNumber: 42n,
+        transactionHash: TEST_TX_HASH,
+      } as never);
+
+      const params = await makeValidVerifyParams();
+      const result = await mod.kiteTestnetAdapter.settle(params);
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        // CD-6: transactionHash is the direct return of writeContract.
+        expect(result.transactionHash).toBe(TEST_TX_HASH);
+        expect(result.blockNumber).toBe(42);
+        expect(result.amount).toBe('1000');
+        expect(result.from.toLowerCase()).toBe(TEST_SIGNER_ADDRESS.toLowerCase());
+        expect(result.to.toLowerCase()).toBe(TEST_PAY_TO.toLowerCase());
+        expect(result.asset.toLowerCase()).toBe(TEST_USDC.toLowerCase());
+      }
+    });
+
+    it('T-S-ACCOUNT-INJECTED (AC-8): walletClient.account is defined + forwarded to simulateContract', async () => {
+      const mod = await import('../../chains/kite.js');
+      const { publicClient, walletClient, operatorAccount } = makeMockClients();
+      vi.spyOn(mod.kiteTestnetAdapter, 'getPublicClient').mockReturnValue(publicClient);
+      vi.spyOn(mod.kiteTestnetAdapter, 'getWalletClient').mockReturnValue(walletClient);
+      vi.mocked(publicClient.simulateContract).mockResolvedValue({
+        request: {} as never,
+        result: undefined as never,
+      });
+      vi.mocked(walletClient.writeContract).mockResolvedValue(TEST_TX_HASH);
+      vi.mocked(publicClient.waitForTransactionReceipt).mockResolvedValue({
+        status: 'success',
+        blockNumber: 1n,
+        transactionHash: TEST_TX_HASH,
+      } as never);
+
+      await mod.kiteTestnetAdapter.settle(await makeValidVerifyParams());
+      expect(walletClient.account).toBeDefined();
+      expect(walletClient.account?.address).toBe(operatorAccount.address);
+
+      // simulateContract received the account too (pass-through from walletClient).
+      const simCall = vi.mocked(publicClient.simulateContract).mock.calls[0]?.[0];
+      expect(simCall).toBeDefined();
+      expect((simCall as { account?: unknown }).account).toBeDefined();
+    });
+
+    it('T-S-SIM-FAIL (AC-10, CD-4): simulateContract throws -> SIMULATION_FAILED, writeContract NOT called', async () => {
+      const mod = await import('../../chains/kite.js');
+      const { publicClient, walletClient } = makeMockClients();
+      vi.spyOn(mod.kiteTestnetAdapter, 'getPublicClient').mockReturnValue(publicClient);
+      vi.spyOn(mod.kiteTestnetAdapter, 'getWalletClient').mockReturnValue(walletClient);
+      vi.mocked(publicClient.simulateContract).mockRejectedValueOnce(
+        new Error('execution reverted'),
+      );
+
+      const result = await mod.kiteTestnetAdapter.settle(await makeValidVerifyParams());
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe('SIMULATION_FAILED');
+        expect(result.error.http).toBe(500);
+        expect(result.error.message.length).toBeLessThanOrEqual(200);
+      }
+      // CD-4: sim-first contract — writeContract MUST NOT run after a sim failure.
+      expect(walletClient.writeContract).not.toHaveBeenCalled();
+    });
+
+    it('T-S-WRITE-FAIL (AC-11): writeContract throws post-simulate -> TRANSACTION_FAILED', async () => {
+      const mod = await import('../../chains/kite.js');
+      const { publicClient, walletClient } = makeMockClients();
+      vi.spyOn(mod.kiteTestnetAdapter, 'getPublicClient').mockReturnValue(publicClient);
+      vi.spyOn(mod.kiteTestnetAdapter, 'getWalletClient').mockReturnValue(walletClient);
+      vi.mocked(publicClient.simulateContract).mockResolvedValue({
+        request: {} as never,
+        result: undefined as never,
+      });
+      vi.mocked(walletClient.writeContract).mockRejectedValueOnce(new Error('rpc down'));
+
+      const result = await mod.kiteTestnetAdapter.settle(await makeValidVerifyParams());
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe('TRANSACTION_FAILED');
+        expect(result.error.http).toBe(500);
+      }
+    });
+
+    it('T-S-TIMEOUT (AC-12): WaitForTransactionReceiptTimeoutError -> TRANSACTION_FAILED msg "receipt timeout"', async () => {
+      const mod = await import('../../chains/kite.js');
+      const { publicClient, walletClient } = makeMockClients();
+      vi.spyOn(mod.kiteTestnetAdapter, 'getPublicClient').mockReturnValue(publicClient);
+      vi.spyOn(mod.kiteTestnetAdapter, 'getWalletClient').mockReturnValue(walletClient);
+      vi.mocked(publicClient.simulateContract).mockResolvedValue({
+        request: {} as never,
+        result: undefined as never,
+      });
+      vi.mocked(walletClient.writeContract).mockResolvedValue(TEST_TX_HASH);
+      const timeoutErr = Object.assign(new Error('timeout'), {
+        name: 'WaitForTransactionReceiptTimeoutError',
+      });
+      vi.mocked(publicClient.waitForTransactionReceipt).mockRejectedValueOnce(timeoutErr);
+
+      const result = await mod.kiteTestnetAdapter.settle(await makeValidVerifyParams());
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe('TRANSACTION_FAILED');
+        // Literal message per spec (AC-12).
+        expect(result.error.message).toBe('receipt timeout');
+      }
+    });
+
+    it('T-S-REVERTED (AC-13): receipt.status=reverted -> TRANSACTION_FAILED msg "transaction reverted on-chain"', async () => {
+      const mod = await import('../../chains/kite.js');
+      const { publicClient, walletClient } = makeMockClients();
+      vi.spyOn(mod.kiteTestnetAdapter, 'getPublicClient').mockReturnValue(publicClient);
+      vi.spyOn(mod.kiteTestnetAdapter, 'getWalletClient').mockReturnValue(walletClient);
+      vi.mocked(publicClient.simulateContract).mockResolvedValue({
+        request: {} as never,
+        result: undefined as never,
+      });
+      vi.mocked(walletClient.writeContract).mockResolvedValue(TEST_TX_HASH);
+      vi.mocked(publicClient.waitForTransactionReceipt).mockResolvedValue({
+        status: 'reverted',
+        blockNumber: 7n,
+        transactionHash: TEST_TX_HASH,
+      } as never);
+
+      const result = await mod.kiteTestnetAdapter.settle(await makeValidVerifyParams());
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe('TRANSACTION_FAILED');
+        expect(result.error.message).toBe('transaction reverted on-chain');
+      }
+    });
+
+    // AC-15 — breaker accounting: N consecutive SIMULATION_FAILED via the
+    // real settle() flow drives the SamplingBreaker into OPEN (same pattern
+    // as T-ADAPT-CB-6 for verify). If the AR-BLQ-ALTO-1 BusinessFailureError
+    // accounting regresses, this test catches it: without clean 1:1 failure
+    // counting the breaker never trips.
+    it('T-CB-ACCOUNTING (AC-15): consecutive SIMULATION_FAILED eventually trips breaker', async () => {
+      // Tight thresholds so the test runs fast deterministically.
+      process.env['CB_FAILURE_THRESHOLD'] = '2';
+      process.env['CB_ROLLING_WINDOW_MS'] = '1000';
+      process.env['CB_ENABLED'] = 'true';
+      vi.resetModules();
+
+      const mod = await import('../../chains/kite.js');
+      const { publicClient, walletClient } = makeMockClients();
+      vi.spyOn(mod.kiteTestnetAdapter, 'getPublicClient').mockReturnValue(publicClient);
+      vi.spyOn(mod.kiteTestnetAdapter, 'getWalletClient').mockReturnValue(walletClient);
+      // Every call fails at the sim step -> SIMULATION_FAILED -> BusinessFailureError throw.
+      vi.mocked(publicClient.simulateContract).mockRejectedValue(new Error('sim fail'));
+
+      const params = await makeValidVerifyParams();
+      let simFailCount = 0;
+      let chainUnavailableCount = 0;
+      for (let i = 0; i < 30; i++) {
+        const r = await mod.kiteTestnetAdapter.settle(params);
+        if (!r.ok) {
+          if (r.error.code === 'SIMULATION_FAILED') simFailCount++;
+          else if (r.error.code === 'CHAIN_UNAVAILABLE') chainUnavailableCount++;
+        }
+      }
+      // Both counters positive -> the first few calls returned the real
+      // business failure; after the breaker tripped, subsequent calls
+      // short-circuited with CHAIN_UNAVAILABLE. If either is 0, the
+      // accounting or CB state transition is broken.
+      expect(simFailCount).toBeGreaterThan(0);
+      expect(chainUnavailableCount).toBeGreaterThan(0);
+
+      // Cleanup — don't pollute subsequent tests' env.
+      delete process.env['CB_FAILURE_THRESHOLD'];
+      delete process.env['CB_ROLLING_WINDOW_MS'];
+      delete process.env['CB_ENABLED'];
     });
   });
 });
