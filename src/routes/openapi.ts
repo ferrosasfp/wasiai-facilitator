@@ -53,7 +53,10 @@ const OPENAPI_SPEC: Record<string, unknown> = yamlLoad(readFileSync(yamlPath, 'u
 >;
 
 export const openapiRoute: FastifyPluginAsync = async (app) => {
-  app.get('/openapi.json', async (_request, reply) => {
+  // WFAC-40 CD-6 — mirror the pattern from src/routes/health.ts line 37.
+  // /openapi.json is a static discovery doc; rate-limiting it would break
+  // legitimate tooling (Swagger UI, OpenAPI generators) that poll it.
+  app.get('/openapi.json', { config: { rateLimit: false } }, async (_request, reply) => {
     return reply.code(200).type('application/json').send(OPENAPI_SPEC);
   });
 };
