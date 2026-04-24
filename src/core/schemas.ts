@@ -98,3 +98,16 @@ export const VerifyRequestSchema = z
   .strict();
 
 export type VerifyRequest = z.infer<typeof VerifyRequestSchema>;
+
+// ─── WFAC-21 extension ──────────────────────────────────────────────────
+/**
+ * Alias of VerifyRequestSchema — x402 spec declares the settle body shape
+ * identical to verify (see src/chains/types.ts: `SettleParams = VerifyParams`).
+ * Export under a distinct name for route-layer clarity (SDD §DT-1).
+ *
+ * If the spec ever diverges (e.g. settle adds an optional `tip` field), this
+ * alias MUST be forked to its own Zod object in an explicit SDD — not drifted
+ * silently.
+ */
+export const SettleRequestSchema = VerifyRequestSchema;
+export type SettleRequest = VerifyRequest;

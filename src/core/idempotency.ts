@@ -206,3 +206,157 @@ export function toCacheable(result: ToCacheableInput): CachedVerifyResponse | nu
   if (result.error.http >= 500) return null; // CD-12
   return { ok: false, error: result.error };
 }
+
+// ─── WFAC-21 settle helpers ─────────────────────────────────────────────
+//
+// All settle-related exports live alongside the verify helpers so the
+// route layer imports from ONE façade (`src/core/idempotency.ts`). We do
+// NOT create a separate file (SDD §DT-2).
+//
+// Naming convention: every new symbol is prefixed with `Settle*` or
+// `SETTLE_*` so auditors can grep the two concepts apart.
+
+/** Spec x402: 120 s window for idempotency replay. */
+export const SETTLE_IDEMPOTENCY_TTL_SEC = 120;
+
+/** Distinct prefix from VERIFY_IDEMPOTENCY_KEY_PREFIX (CD-6, CD-11 SDD nuevo). */
+export const SETTLE_IDEMPOTENCY_KEY_PREFIX = 'settle:idempotency:';
+
+/**
+ * Cached settle success — 7 spec-literal fields of SettleResult.
+ * NOTE: structural (no `SettleResult` import from src/chains/types.ts) to
+ * keep the OWNERS boundary `core/idempotency.ts → infra + crypto + schemas`
+ * intact. Mirrors the pattern used by CachedVerifyResponse.
+ */
+export interface CachedSettleResponseOk {
+  readonly ok: true;
+  readonly response: {
+    readonly settled: true;
+    readonly transactionHash: `0x${string}`;
+    readonly blockNumber: number;
+    readonly amount: string;
+    readonly from: `0x${string}`;
+    readonly to: `0x${string}`;
+    readonly asset: `0x${string}`;
+  };
+}
+
+/** Cached settle error — always `http < 500` (CD-12 enforced by toCacheableSettle). */
+export interface CachedSettleResponseErr {
+  readonly ok: false;
+  readonly error: {
+    readonly code: string;
+    readonly message: string;
+    readonly http: number;
+  };
+}
+
+export type CachedSettleResponse = CachedSettleResponseOk | CachedSettleResponseErr;
+
+/**
+ * Structural input for toCacheableSettle — matches `Result<SettleResult>`
+ * without importing the concrete type (OWNERS: core/idempotency.ts does
+ * NOT import src/chains/*). Same pattern as ToCacheableInput.
+ */
+export type ToCacheableSettleInput =
+  | {
+      readonly ok: true;
+      readonly settled: true;
+      readonly transactionHash: `0x${string}`;
+      readonly blockNumber: number;
+      readonly amount: string;
+      readonly from: `0x${string}`;
+      readonly to: `0x${string}`;
+      readonly asset: `0x${string}`;
+    }
+  | {
+      readonly ok: false;
+      readonly error: {
+        readonly code: string;
+        readonly message: string;
+        readonly http: number;
+      };
+    };
+
+/**
+ * Builds the full Redis key `settle:idempotency:<sha256-hex>`.
+ * Reuses `canonicalStringify` — no duplication (CD-8 heredado).
+ */
+export function buildSettleIdempotencyKey(parsed: VerifyRequest): string {
+  const canonical = canonicalStringify(parsed);
+  const hash = createHash('sha256').update(canonical).digest('hex');
+  return `${SETTLE_IDEMPOTENCY_KEY_PREFIX}${hash}`;
+}
+
+/**
+ * Read the cached settle response.
+ *
+ * Returns:
+ *   - `null`  → cache miss (Redis unavailable or genuine miss) → caller proceeds.
+ *   - object  → cache hit → caller replays WITHOUT invoking the adapter
+ *               (CRITICAL: prevents double-spend when the original tx is
+ *               in-flight mempool or already mined).
+ */
+export async function getCachedSettleResponse(
+  key: string,
+): Promise<CachedSettleResponse | null> {
+  const client = getRedisClient();
+  if (!client) return null;
+  try {
+    const raw = await client.get(key);
+    if (!raw) return null;
+    return JSON.parse(raw) as CachedSettleResponse;
+  } catch {
+    // Swallow — graceful degradation (AC-10). Do NOT log here (logger is
+    // route-owned). Return null to pass-through.
+    return null;
+  }
+}
+
+/**
+ * Write settle cache entry with TTL.
+ * Swallows all errors (CD-4 applies: never throw on expected failure).
+ * CD-12: caller must pre-filter via toCacheableSettle().
+ */
+export async function setCachedSettleResponse(
+  key: string,
+  payload: CachedSettleResponse,
+): Promise<void> {
+  const client = getRedisClient();
+  if (!client) return;
+  try {
+    await client.set(key, JSON.stringify(payload), 'EX', SETTLE_IDEMPOTENCY_TTL_SEC);
+  } catch {
+    // Swallow — graceful degradation.
+  }
+}
+
+/**
+ * Convert a Result<SettleResult> into a CachedSettleResponse or null.
+ * Returns null when http >= 500 (not cacheable — transient/permanent 5xx
+ * must NOT block future retries — CD-12 heredado de WFAC-20).
+ *
+ * CD-11 (new): success branch builds the response object EXPLICITLY with
+ * the 7 spec-literal fields (no rest-spread destructure). This is the
+ * "explicit object build" lesson from WFAC-20 auto-blindaje W1.
+ */
+export function toCacheableSettle(
+  result: ToCacheableSettleInput,
+): CachedSettleResponse | null {
+  if (result.ok) {
+    return {
+      ok: true,
+      response: {
+        settled: result.settled,
+        transactionHash: result.transactionHash,
+        blockNumber: result.blockNumber,
+        amount: result.amount,
+        from: result.from,
+        to: result.to,
+        asset: result.asset,
+      },
+    };
+  }
+  if (result.error.http >= 500) return null; // CD-12
+  return { ok: false, error: result.error };
+}
