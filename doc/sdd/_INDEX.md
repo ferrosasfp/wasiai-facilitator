@@ -18,7 +18,7 @@
 | 014 | 2026-04-23 | Audit log inmutable — facilitator_audit_log (WFAC-33) | infra | QUALITY | DONE | main (949c0d5) |
 | 015 | 2026-04-24 | Rate limiting Redis-backed (WFAC-40) | security | QUALITY | DONE | main (aa26ed8) |
 | 016 | 2026-04-24 | Circuit breaker per chain RPC (WFAC-41) | resiliency | QUALITY | DONE | main (cdbeb34) |
-| 017 | 2026-04-23 | Kite Testnet adapter REAL — stub → on-chain (WFAC-50) | chain-impl | QUALITY | in progress | feat/017-wfac-50-kite-testnet-adapter |
+| 017 | 2026-04-24 | Kite Testnet adapter REAL — stub → on-chain (WFAC-50) | chain-impl | QUALITY | DONE | main (d32ad48) |
 
 <!--
 Formato por entrada:
