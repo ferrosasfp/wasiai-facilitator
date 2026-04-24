@@ -32,6 +32,19 @@ import { chainRegistry } from '../../chains/registry.js';
 import { asChainId } from '../../core/types.js';
 import type { ChainAdapter, VerifyParams } from '../../chains/types.js';
 
+// ─── core/audit.js mock (WFAC-33 W4) ───────────────────────────────────────
+vi.mock('../../core/audit.js', () => {
+  const persistAuditSpy = vi.fn(async () => undefined);
+  const buildAuditSpy = vi.fn((input: unknown) => ({ __auditInput: input }));
+  return {
+    __esModule: true,
+    buildAuditEntry: buildAuditSpy,
+    persistAuditEntry: persistAuditSpy,
+    __persistAuditSpy: persistAuditSpy,
+    __buildAuditSpy: buildAuditSpy,
+  };
+});
+
 // ─── ioredis mock (mirrors E12 + adds get/set backed by Map) ───────────────
 vi.mock('ioredis', () => {
   const constructorSpy = vi.fn();
@@ -209,6 +222,13 @@ describe('POST /verify', () => {
     (ioredis as unknown as { __getSpy: ReturnType<typeof vi.fn> }).__getSpy.mockClear();
     (ioredis as unknown as { __setSpy: ReturnType<typeof vi.fn> }).__setSpy.mockClear();
     (ioredis as unknown as { __store: Map<string, string> }).__store.clear();
+
+    const audit = (await import('../../core/audit.js')) as unknown as {
+      __persistAuditSpy: ReturnType<typeof vi.fn>;
+      __buildAuditSpy: ReturnType<typeof vi.fn>;
+    };
+    audit.__persistAuditSpy.mockClear();
+    audit.__buildAuditSpy.mockClear();
   });
 
   afterEach(async () => {
@@ -749,5 +769,132 @@ describe('POST /verify', () => {
     expect(r1.statusCode).toBe(500);
     expect(r2.statusCode).toBe(500);
     expect(verifySpy).toHaveBeenCalledTimes(2);
+  });
+
+  // ─── WFAC-33 W4 — audit hook integration ───────────────────────────────
+
+  it('T-AV-1 / AC-1: /verify success invokes persistAuditEntry once with no errorCode/idempotencyKey', async () => {
+    const adapter = makeFakeAdapter(2368, async () => VALID_ADAPTER_RESULT);
+    app = await buildAppWithAdapter(adapter);
+    const audit = (await import('../../core/audit.js')) as unknown as {
+      __persistAuditSpy: ReturnType<typeof vi.fn>;
+      __buildAuditSpy: ReturnType<typeof vi.fn>;
+    };
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/verify',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify(VALID_BODY),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(audit.__persistAuditSpy).toHaveBeenCalledTimes(1);
+
+    const input = audit.__buildAuditSpy.mock.calls[0]![0] as {
+      path: string;
+      statusCode: number;
+      errorCode?: string;
+      idempotencyKey?: string;
+    };
+    expect(input.path).toBe('/verify');
+    expect(input.statusCode).toBe(200);
+    expect(input.errorCode).toBeUndefined();
+    // /verify does NOT populate idempotencyKey in auditMeta (AC-12 applies to
+    // /settle only — the audit column is only linked for settlements).
+    expect(input.idempotencyKey).toBeUndefined();
+  });
+
+  it('T-AV-2 / AC-13: /verify 400 Zod path populates errorCode=INVALID_PAYLOAD', async () => {
+    const adapter = makeFakeAdapter(2368, async () => VALID_ADAPTER_RESULT);
+    app = await buildAppWithAdapter(adapter);
+    const audit = (await import('../../core/audit.js')) as unknown as {
+      __buildAuditSpy: ReturnType<typeof vi.fn>;
+    };
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/verify',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify({ invalid: 'body' }),
+    });
+    expect(res.statusCode).toBe(400);
+
+    const input = audit.__buildAuditSpy.mock.calls[0]![0] as {
+      statusCode: number;
+      errorCode?: string;
+    };
+    expect(input.statusCode).toBe(400);
+    expect(input.errorCode).toBe('INVALID_PAYLOAD');
+  });
+
+  it('T-AV-3 / AC-13: /verify adapter-throw populates errorCode=TRANSACTION_FAILED', async () => {
+    const adapter = makeFakeAdapter(2368, async () => {
+      throw new Error('adapter exploded');
+    });
+    app = await buildAppWithAdapter(adapter);
+    const audit = (await import('../../core/audit.js')) as unknown as {
+      __buildAuditSpy: ReturnType<typeof vi.fn>;
+    };
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/verify',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify(VALID_BODY),
+    });
+    expect(res.statusCode).toBe(500);
+
+    const input = audit.__buildAuditSpy.mock.calls[0]![0] as {
+      statusCode: number;
+      errorCode?: string;
+    };
+    expect(input.statusCode).toBe(500);
+    expect(input.errorCode).toBe('TRANSACTION_FAILED');
+  });
+
+  it('T-AV-4 / AC-13: /verify result.ok=false propagates code verbatim', async () => {
+    const adapter = makeFakeAdapter(2368, async () => ({
+      ok: false,
+      error: { code: 'INVALID_SIGNATURE', message: 'bad sig', http: 400 },
+    }));
+    app = await buildAppWithAdapter(adapter);
+    const audit = (await import('../../core/audit.js')) as unknown as {
+      __buildAuditSpy: ReturnType<typeof vi.fn>;
+    };
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/verify',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify(VALID_BODY),
+    });
+    expect(res.statusCode).toBe(400);
+
+    const input = audit.__buildAuditSpy.mock.calls[0]![0] as {
+      statusCode: number;
+      errorCode?: string;
+    };
+    expect(input.statusCode).toBe(400);
+    expect(input.errorCode).toBe('INVALID_SIGNATURE');
+  });
+
+  it('T-AV-5 / AC-12: /verify success leaves idempotencyKey undefined (builder will null it)', async () => {
+    const adapter = makeFakeAdapter(2368, async () => VALID_ADAPTER_RESULT);
+    app = await buildAppWithAdapter(adapter);
+    const audit = (await import('../../core/audit.js')) as unknown as {
+      __buildAuditSpy: ReturnType<typeof vi.fn>;
+    };
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/verify',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify(VALID_BODY),
+    });
+    expect(res.statusCode).toBe(200);
+
+    const input = audit.__buildAuditSpy.mock.calls[0]![0] as { idempotencyKey?: string };
+    expect(input.idempotencyKey).toBeUndefined();
+    // buildAuditEntry coerces undefined → null; validated in audit.test.ts T-A1.
   });
 });

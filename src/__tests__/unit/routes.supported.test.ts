@@ -31,6 +31,19 @@ import { chainRegistry } from '../../chains/registry.js';
 import { asChainId } from '../../core/types.js';
 import type { ChainAdapter } from '../../chains/types.js';
 
+// ─── core/audit.js mock (WFAC-33 W4) ───────────────────────────────────────
+vi.mock('../../core/audit.js', () => {
+  const persistAuditSpy = vi.fn(async () => undefined);
+  const buildAuditSpy = vi.fn((input: unknown) => ({ __auditInput: input }));
+  return {
+    __esModule: true,
+    buildAuditEntry: buildAuditSpy,
+    persistAuditEntry: persistAuditSpy,
+    __persistAuditSpy: persistAuditSpy,
+    __buildAuditSpy: buildAuditSpy,
+  };
+});
+
 // ─── ioredis mock (mirrors routes.verify.test.ts) ──────────────────────────
 vi.mock('ioredis', () => {
   const constructorSpy = vi.fn();
@@ -377,5 +390,35 @@ describe('GET /supported', () => {
     const contentType = res.headers['content-type'];
     expect(typeof contentType).toBe('string');
     expect(String(contentType).toLowerCase()).toContain('application/json');
+  });
+
+  // ─── WFAC-33 W4 — audit hook integration ───────────────────────────────
+
+  it('T-ASU-1 / AC-1: /supported IS audited (not in AUDIT_EXCLUDED_PATHS)', async () => {
+    const kite = makeFakeAdapter(2368, 'Kite Testnet');
+    app = await buildAppWithAdapters([kite]);
+    const audit = (await import('../../core/audit.js')) as unknown as {
+      __persistAuditSpy: ReturnType<typeof vi.fn>;
+      __buildAuditSpy: ReturnType<typeof vi.fn>;
+    };
+    audit.__persistAuditSpy.mockClear();
+    audit.__buildAuditSpy.mockClear();
+
+    const res = await app.inject({ method: 'GET', url: '/supported' });
+    expect(res.statusCode).toBe(200);
+
+    expect(audit.__persistAuditSpy).toHaveBeenCalledTimes(1);
+    const input = audit.__buildAuditSpy.mock.calls[0]![0] as {
+      path: string;
+      method: string;
+      statusCode: number;
+      errorCode?: string;
+      idempotencyKey?: string;
+    };
+    expect(input.path).toBe('/supported');
+    expect(input.method).toBe('GET');
+    expect(input.statusCode).toBe(200);
+    expect(input.errorCode).toBeUndefined();
+    expect(input.idempotencyKey).toBeUndefined();
   });
 });
