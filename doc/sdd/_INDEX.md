@@ -13,6 +13,7 @@
 | 009 | 2026-04-24 | POST /verify route — x402 HTTP API (WFAC-20) | feature | QUALITY | DONE | main (5296b89) |
 | 010 | 2026-04-24 | POST /settle route — on-chain tx + idempotency (WFAC-21) | feature | QUALITY | DONE | main (08214b1) |
 | 011 | 2026-04-24 | GET /supported — discovery endpoint (WFAC-22) | feature | FAST+AR | DONE | main (d702938) |
+| 012 | 2026-04-23 | OpenAPI 3.1 spec — contrato publico del facilitator (WFAC-23) | docs | FAST+AR | in progress | feat/012-wfac-23-openapi-spec |
 
 <!--
 Formato por entrada:
