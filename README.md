@@ -1,70 +1,45 @@
 # wasiai-facilitator
 
-> Production-grade self-hosted x402 facilitator for EVM chains. Part of the WasiAI ecosystem.
+> Self-hosted x402 facilitator for EVM chains. Part of the WasiAI ecosystem.
 
 ## What is this?
 
-A [HTTP 402 Payment Required](https://docs.x402.org) protocol facilitator — verifies payment signatures off-chain and settles ERC-3009 `transferWithAuthorization` transactions on-chain, enabling gasless stablecoin micropayments between autonomous agents.
+A [HTTP 402 Payment Required](https://docs.x402.org) protocol facilitator — verifies payment signatures off-chain and settles EIP-3009 `transferWithAuthorization` transactions on-chain, enabling gasless stablecoin micropayments between autonomous agents.
 
-**Currently supported chains (V1):**
-- Kite Testnet (chainId 2368) — PYUSD
-- Kite Mainnet (chainId 2366) — *planned*
-- Avalanche Fuji (chainId 43113) — USDC
-- Avalanche Mainnet (chainId 43114) — USDC
+**Live URL**: `https://wasiai-facilitator-production.up.railway.app`
 
-**Currently supported methods (V1):**
-- EIP-3009 (`transferWithAuthorization`)
+**👉 Integrating as a client?** See **[doc/HACKATHON.md](doc/HACKATHON.md)** for a full guide with code examples, error codes, and limits.
 
-**Coming soon:**
-- Permit2
-- ERC-7710 delegations
-- Solana / Aptos / Stellar adapters
+**Currently supported (V1):**
+| Chain              | chainId | Token | Status |
+|--------------------|---------|-------|--------|
+| Kite Testnet       | 2368    | PYUSD (18 dec) | ✅ Live + E2E tested |
+| Kite Mainnet       | 2366    | —     | Opt-in (env-gated) |
+| Avalanche Fuji     | 43113   | USDC  | Stub (WFAC-52 pending) |
+
+**Method:** EIP-3009 `TransferWithAuthorization`
+
+**Roadmap:** Permit2, ERC-7710 delegations, Solana/Aptos/Stellar, Avalanche real.
 
 ---
 
 ## API (x402 spec-compliant)
 
-### `POST /verify`
+| Method | Path              | Purpose                                              | On-chain |
+|--------|-------------------|------------------------------------------------------|:--------:|
+| GET    | `/health`         | Liveness + version                                   | No       |
+| GET    | `/supported`      | Supported chains + methods (reads live registry)     | No       |
+| GET    | `/openapi.json`   | Full OpenAPI 3.1 spec                                | No       |
+| POST   | `/verify`         | Validate EIP-3009 signed authorization (read-only)   | No       |
+| POST   | `/settle`         | Verify + execute `transferWithAuthorization`         | **Yes**  |
 
-Verify an EIP-712 signed payment authorization off-chain.
-
-```bash
-curl -X POST https://facilitator.wasiai.io/verify \
-  -H "Content-Type: application/json" \
-  -d @payment.json
-```
-
-### `POST /settle`
-
-Verify + execute on-chain. Facilitator operator wallet pays gas; user pays zero gas.
+Quick check:
 
 ```bash
-curl -X POST https://facilitator.wasiai.io/settle \
-  -H "Content-Type: application/json" \
-  -d @payment.json
+curl https://wasiai-facilitator-production.up.railway.app/supported
 ```
 
-### `GET /supported`
-
-List supported networks, schemes, and tokens.
-
-```bash
-curl https://facilitator.wasiai.io/supported
-```
-
-### `GET /health`
-
-Liveness + readiness check. Returns status of each configured chain.
-
-```bash
-curl https://facilitator.wasiai.io/health
-```
-
-### `GET /metrics`
-
-Prometheus-format metrics.
-
-See `openapi.yaml` for complete API reference.
+Full integration guide: **[doc/HACKATHON.md](doc/HACKATHON.md)**.
 
 ---
 
