@@ -82,6 +82,8 @@ export const verifyRoute: FastifyPluginAsync = async (app) => {
         },
         'verify failed',
       );
+      // WFAC-33 (CD-11): populate auditMeta.errorCode before reply.send.
+      request.auditMeta = { ...request.auditMeta, errorCode: 'INVALID_PAYLOAD' };
       return reply.code(400).send(body);
     }
     const parsed: VerifyRequest = parseResult.data;
@@ -128,6 +130,8 @@ export const verifyRoute: FastifyPluginAsync = async (app) => {
           http: 500,
         },
       };
+      // WFAC-33 (CD-11): populate auditMeta.errorCode before reply.send.
+      request.auditMeta = { ...request.auditMeta, errorCode: 'TRANSACTION_FAILED' };
       return reply.code(500).send(body);
     }
 
@@ -151,6 +155,8 @@ export const verifyRoute: FastifyPluginAsync = async (app) => {
         },
         'verify failed',
       );
+      // WFAC-33 (CD-11): propagate adapter-returned x402 error code to audit row.
+      request.auditMeta = { ...request.auditMeta, errorCode: result.error.code };
       return reply.code(result.error.http).send({ error: result.error } satisfies ErrorBody);
     }
 

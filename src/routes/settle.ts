@@ -84,12 +84,18 @@ export const settleRoute: FastifyPluginAsync = async (app) => {
         },
         'settle failed',
       );
+      // WFAC-33 (CD-11): populate auditMeta.errorCode before reply.send.
+      request.auditMeta = { ...request.auditMeta, errorCode: 'INVALID_PAYLOAD' };
       return reply.code(400).send(body);
     }
     const parsed: SettleRequest = parseResult.data;
 
     // Step 2 — idempotency lookup
     const idempotencyKey = buildSettleIdempotencyKey(parsed);
+    // WFAC-33 (CD-11, AC-12): propagate idempotencyKey to audit row. Set BEFORE
+    // the cache-lookup branch so cache-hit replays also get linked to the
+    // original settlement in facilitator_audit_log.
+    request.auditMeta = { ...request.auditMeta, idempotencyKey };
     const redisUp = isRedisAvailable();
     if (redisUp) {
       const cached = await getCachedSettleResponse(idempotencyKey);
@@ -149,6 +155,8 @@ export const settleRoute: FastifyPluginAsync = async (app) => {
           http: 500,
         },
       };
+      // WFAC-33 (CD-11): populate auditMeta.errorCode before reply.send.
+      request.auditMeta = { ...request.auditMeta, errorCode: 'TRANSACTION_FAILED' };
       return reply.code(500).send(body);
     }
 
@@ -192,6 +200,8 @@ export const settleRoute: FastifyPluginAsync = async (app) => {
         }),
         app.log,
       );
+      // WFAC-33 (CD-11): propagate adapter-returned x402 error code to audit row.
+      request.auditMeta = { ...request.auditMeta, errorCode: result.error.code };
       return reply.code(result.error.http).send({ error: result.error } satisfies ErrorBody);
     }
 
