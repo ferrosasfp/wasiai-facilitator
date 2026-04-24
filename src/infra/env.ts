@@ -75,6 +75,21 @@ export const EnvSchema = z
       .string()
       .regex(/^0x[0-9a-fA-F]{40}$/, { message: 'must be 0x + 40 hex chars' })
       .optional(),
+
+    // ---- Anti-abuse caps (public-sharing hardening) ------------------------
+    // Per-settle max authorized amount (atomic units; uint256 decimal string).
+    // Default 100 PYUSD at 18 decimals = 100 * 1e18.
+    // Requests with accepted.amount > this cap are rejected with INVALID_AMOUNT
+    // 400 BEFORE hitting the chain adapter. Protects against single-tx drain.
+    SETTLE_MAX_AMOUNT_ATOMIC: z
+      .string()
+      .regex(/^[1-9][0-9]*$/, { message: 'must be a positive uint256 decimal (no leading zero)' })
+      .default('100000000000000000000'),
+    // Global daily settle cap — hard ceiling across ALL IPs/wallets to protect
+    // the operator wallet gas budget. Key `settle:daily:<YYYY-MM-DD>` in Redis.
+    // Set to 0 to disable (useful for stress-testing or after re-fueling).
+    // Fail-open on Redis outage (never blocks due to infra).
+    SETTLE_DAILY_GLOBAL_CAP: z.coerce.number().int().min(0).default(1000),
   })
   .superRefine((data, ctx) => {
     if (!data.REDIS_URL && data.NODE_ENV !== 'test') {

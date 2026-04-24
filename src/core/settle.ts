@@ -24,6 +24,7 @@ import { buildX402Error } from './errors.js';
 import type { VerifyRequest } from './schemas.js';
 import { chainRegistry } from '../chains/registry.js';
 import type { SettleParams, SettleResult } from '../chains/types.js';
+import { checkSettleAmountCap } from './settle-cap.js';
 
 // CD-13 heredado. NOTE: this regex and the MAX_CHAINID_DIGITS constant are
 // duplicated from src/core/verify.ts ON PURPOSE for WFAC-21. Factoring them
@@ -34,7 +35,23 @@ const MAX_CHAINID_DIGITS = 16; // matches verify.ts
 
 export async function settleCore(
   parsed: VerifyRequest, // alias by value: SettleRequest (SDD §DT-1)
+  options?: { maxAmountAtomic?: string },
 ): Promise<Result<SettleResult>> {
+  // Step 0 — per-request amount cap (anti-abuse, public sharing hardening).
+  // Rejects settles above the configured maximum BEFORE hitting the chain.
+  if (options?.maxAmountAtomic !== undefined) {
+    const capCheck = checkSettleAmountCap(parsed.accepted.amount, options.maxAmountAtomic);
+    if (!capCheck.ok) {
+      return {
+        ok: false,
+        error: buildX402Error(
+          'INVALID_AMOUNT',
+          `amount exceeds per-settle cap (${capCheck.limit.toString()} atomic units)`,
+        ),
+      };
+    }
+  }
+
   // Step 1 — parse network
   const m = EIP155_RE.exec(parsed.accepted.network);
   // The regex is anchored and has a single capturing group that always
