@@ -15,6 +15,7 @@
 | 011 | 2026-04-24 | GET /supported — discovery endpoint (WFAC-22) | feature | FAST+AR | DONE | main (d702938) |
 | 012 | 2026-04-24 | OpenAPI 3.1 spec — contrato publico del facilitator (WFAC-23) | docs | FAST+AR | DONE | main (3c2fb88) |
 | 013 | 2026-04-24 | Settlement ledger — Supabase facilitator_settlements (WFAC-32) | infra | QUALITY | DONE | feat/013-wfac-32-settlement-ledger |
+| 014 | 2026-04-23 | Audit log inmutable — facilitator_audit_log (WFAC-33) | infra | QUALITY | in progress | feat/014-wfac-33-audit-log |
 
 <!--
 Formato por entrada:
