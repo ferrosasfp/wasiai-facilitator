@@ -20,6 +20,20 @@ export const EnvSchema = z
     SHUTDOWN_GRACE_MS: z.coerce.number().int().min(0).default(10000),
     REDIS_URL: z.string().min(1).optional(),
     REDIS_DB: z.coerce.number().int().min(0).max(15).default(0),
+    // Supabase (WFAC-32): optional — disabled when either var is missing.
+    // CD-4: NO superRefine cross-field "both required in prod" — decision
+    // lives in `initSupabase` / `getSupabaseClient` at runtime.
+    // DT-1: canonical name is `SUPABASE_SERVICE_KEY` (NOT `SUPABASE_SERVICE_ROLE_KEY`).
+    // Defense-in-depth (WFAC-32 AR MNR-1): `z.string().url()` accepts ANY
+    // RFC 3986 URL (ftp://, mailto:, file://, etc.). `createClient()` may
+    // throw synchronously on exotic schemes — reject them up-front at env
+    // validation so misconfig fails fast in `parseEnv`, not at request time.
+    SUPABASE_URL: z
+      .string()
+      .url()
+      .refine((u) => /^https?:\/\//i.test(u), { message: 'must be http:// or https://' })
+      .optional(),
+    SUPABASE_SERVICE_KEY: z.string().min(1).optional(),
   })
   .superRefine((data, ctx) => {
     if (!data.REDIS_URL && data.NODE_ENV !== 'test') {

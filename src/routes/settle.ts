@@ -31,6 +31,9 @@ import {
   toCacheableSettle,
   type CachedSettleResponse,
 } from '../core/idempotency.js';
+// WFAC-32 — settlement ledger. Route consumes ONLY via core/ledger
+// (never imports @supabase/supabase-js nor ../infra/supabase.js). CD-3.
+import { buildLedgerEntry, persistLedgerEntry } from '../core/ledger.js';
 
 /** Route-local union: X402ErrorCode + 'INVALID_PAYLOAD' literal. */
 type SettleRouteErrorCode =
@@ -119,6 +122,26 @@ export const settleRoute: FastifyPluginAsync = async (app) => {
         },
         'settle adapter threw',
       );
+      // WFAC-32 H3 — ledger entry for adapter-throw. Synthetic failure result
+      // with TRANSACTION_FAILED / 500. CD-14: await, no .catch() / void.
+      await persistLedgerEntry(
+        buildLedgerEntry({
+          idempotencyKey,
+          durationMs: Date.now() - startMs,
+          method: 'eip3009',
+          network: parsed.accepted.network,
+          parsed,
+          result: {
+            ok: false,
+            error: {
+              code: 'TRANSACTION_FAILED',
+              message: 'Internal adapter error',
+              http: 500,
+            },
+          },
+        }),
+        app.log,
+      );
       const body: ErrorBody = {
         error: {
           code: 'TRANSACTION_FAILED',
@@ -149,8 +172,53 @@ export const settleRoute: FastifyPluginAsync = async (app) => {
         },
         'settle failed',
       );
+      // WFAC-32 H2 — ledger entry for adapter-returned x402 error (4xx/5xx).
+      // CD-14: await; no .catch() / void. CD-3: via core/ledger only.
+      await persistLedgerEntry(
+        buildLedgerEntry({
+          idempotencyKey,
+          durationMs: Date.now() - startMs,
+          method: 'eip3009',
+          network: parsed.accepted.network,
+          parsed,
+          result: {
+            ok: false,
+            error: {
+              code: result.error.code,
+              message: result.error.message,
+              http: result.error.http,
+            },
+          },
+        }),
+        app.log,
+      );
       return reply.code(result.error.http).send({ error: result.error } satisfies ErrorBody);
     }
+
+    // WFAC-32 H1 — ledger entry for on-chain success. After the cache write,
+    // before the info log + reply.send. CD-14: await; no .catch() / void.
+    // Cache-hit path is handled by `sendCachedSettle` which intentionally
+    // does NOT persist (first request already did; would be a duplicate).
+    await persistLedgerEntry(
+      buildLedgerEntry({
+        idempotencyKey,
+        durationMs: Date.now() - startMs,
+        method: 'eip3009',
+        network: parsed.accepted.network,
+        parsed,
+        result: {
+          ok: true,
+          settled: result.settled,
+          transactionHash: result.transactionHash,
+          blockNumber: result.blockNumber,
+          amount: result.amount,
+          from: result.from,
+          to: result.to,
+          asset: result.asset,
+        },
+      }),
+      app.log,
+    );
 
     // Success — L1 info with tx_hash (CD-12 nuevo; tx_hash is public on-chain).
     app.log.info(

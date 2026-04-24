@@ -152,6 +152,16 @@ Formato `TD-NN-NN`: primer NN = épica afectada, segundo NN = secuencial dentro 
 | TD-12-01 | Fee model opcional (0.1-1% protocol fee) | V2 | WFAC-TBD |
 | TD-12-02 | Admin dashboard (settlement monitoring, wallet balances) | V1.5 | WFAC-TBD |
 | TD-13-01 | OFAC screening + geo-blocking (enterprise) | V2 | WFAC-TBD |
+| TD-SEC-LEDGER-01 | RLS en `facilitator_settlements` (defensa hoy app-layer via service role key; ALTER TABLE … ENABLE ROW LEVEL SECURITY + CREATE POLICY por role post-auditoría) | V1.5 / WFAC-SEC-01 | WFAC-TBD |
+
+### TD-SEC-LEDGER-01 — Habilitar RLS en `facilitator_settlements`
+
+Hoy la defensa sobre `facilitator_settlements` es solo **app-layer** (service role key escribe directo).
+Para V1.5 / post-auditoría: `ALTER TABLE facilitator_settlements ENABLE ROW LEVEL SECURITY` +
+`CREATE POLICY` por service role. Mismo trade-off que WKH-53 en wasiai-a2a.
+
+- Fuente: WFAC-32 SDD §7 Riesgos.
+- Gate: WFAC-SEC-01 (cuando se agende una iteración de hardening).
 
 **Reglas de TD** (adopción patrón luma-ai):
 1. Todo TD debe tener ticket Jira creado antes del release V1 (aunque no esté ready)
