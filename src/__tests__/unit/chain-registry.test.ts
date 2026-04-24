@@ -179,10 +179,18 @@ describe('ChainRegistry — module-load integration (AC-9)', () => {
       testnet: process.env['KITE_TESTNET_RPC_URL'],
       mainnet: process.env['KITE_MAINNET_RPC_URL'],
       fuji: process.env['AVALANCHE_FUJI_RPC_URL'],
+      // WFAC-50 — kite.ts module-load now calls readUsdcAddress + the
+      // singleton wallet init (via verify/settle later); the env vars must
+      // be present during import too. Snapshot + restore to avoid leakage.
+      operatorKey: process.env['OPERATOR_PRIVATE_KEY'],
+      usdc: process.env['KITE_USDC_ADDRESS'],
     };
     process.env['KITE_TESTNET_RPC_URL'] = 'https://rpc-testnet.gokite.ai';
     process.env['KITE_MAINNET_RPC_URL'] = 'https://rpc-mainnet.gokite.ai';
     process.env['AVALANCHE_FUJI_RPC_URL'] = 'https://api.avax-test.network/ext/bc/C/rpc';
+    process.env['OPERATOR_PRIVATE_KEY'] =
+      '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
+    process.env['KITE_USDC_ADDRESS'] = '0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9';
 
     try {
       await import('../../chains/index.js');
@@ -195,6 +203,10 @@ describe('ChainRegistry — module-load integration (AC-9)', () => {
       else process.env['KITE_MAINNET_RPC_URL'] = prev.mainnet;
       if (prev.fuji === undefined) delete process.env['AVALANCHE_FUJI_RPC_URL'];
       else process.env['AVALANCHE_FUJI_RPC_URL'] = prev.fuji;
+      if (prev.operatorKey === undefined) delete process.env['OPERATOR_PRIVATE_KEY'];
+      else process.env['OPERATOR_PRIVATE_KEY'] = prev.operatorKey;
+      if (prev.usdc === undefined) delete process.env['KITE_USDC_ADDRESS'];
+      else process.env['KITE_USDC_ADDRESS'] = prev.usdc;
     }
   });
 });

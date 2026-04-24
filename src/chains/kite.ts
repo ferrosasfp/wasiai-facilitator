@@ -5,21 +5,27 @@
  *   - kiteTestnetAdapter: ChainAdapter — chainId 2368, env KITE_TESTNET_RPC_URL.
  *   - kiteMainnetAdapter: ChainAdapter — chainId 2366, env KITE_MAINNET_RPC_URL.
  *
- * verify() and settle() are STUBS in this HU — they return NETWORK_MISMATCH
- * with a message pointing to WFAC-10/WFAC-11 (see DT-4 of SDD 003).
+ * WFAC-50: `_verifyRaw` / `_settleRaw` implement the full EIP-3009 flow against
+ * Kite RPC (real signature recovery + simulate/write/waitReceipt). The outer
+ * `verify()` / `settle()` wrappers preserve the WFAC-41 circuit breaker
+ * accounting (BusinessFailureError pattern).
  *
  * Boundaries:
- *   - imports ./types.js + viem only.
- *   - NO imports from src/core/* (runtime), src/methods/*, src/routes/*, src/infra/*.
- *
- * Future work:
- *   - WFAC-10: implement verify() (EIP-712 signature recovery).
- *   - WFAC-11: implement settle() (transferWithAuthorization on-chain).
- *   - WFAC-wallet-singleton: inject real account into getWalletClient().
+ *   - imports ./types.js, ./abi/*, ./circuit-breaker.js, ../infra/wallet.js, viem.
+ *   - type-only import from ../core/types.js (for asChainId branded factory).
+ *   - NO runtime imports from src/core/*, src/methods/*, src/routes/*.
  */
 
-import { defineChain, createPublicClient, createWalletClient, http } from 'viem';
-import type { PublicClient, WalletClient, Chain } from 'viem';
+import {
+  defineChain,
+  createPublicClient,
+  createWalletClient,
+  http,
+  isAddressEqual,
+  recoverTypedDataAddress,
+  getAddress,
+} from 'viem';
+import type { PublicClient, WalletClient, Chain, Address } from 'viem';
 import type { Logger } from 'pino';
 import {
   ChainAdapterInitError,
@@ -40,6 +46,24 @@ import {
   readCbBool,
   type BreakerStateName,
 } from './circuit-breaker.js';
+import {
+  EIP3009_TYPES,
+  EIP3009_PRIMARY_TYPE,
+  FIAT_TOKEN_ABI,
+  RECEIPT_TIMEOUT_MS,
+} from './abi/fiat-token.js';
+import { normalizeSignature } from './abi/signature.js';
+import { getOperatorAccount } from '../infra/wallet.js';
+
+/**
+ * Extract a safe, bounded-length string from an unknown error. Defensive
+ * against viem errors that may embed request data in their `.message`.
+ * Mirrors `src/methods/eip3009/settle.ts:43-46` (sanitize helper).
+ */
+function sanitize(e: unknown): string {
+  const raw = e instanceof Error ? e.message : String(e);
+  return raw.slice(0, 200);
+}
 
 function readEnv(name: string, chainId: number): string {
   // eslint-disable-next-line security/detect-object-injection -- `name` is a caller-controlled literal (one of KITE_TESTNET_RPC_URL / KITE_MAINNET_RPC_URL), not user input.
@@ -54,6 +78,7 @@ class KiteAdapter implements ChainAdapter {
   public readonly metadata: ChainMetadata;
   private readonly _viemChain: Chain;
   private readonly _rpcUrl: string;
+  private readonly _usdcAddress: Address;
   private _publicClient: PublicClient | null = null;
   private _walletClient: WalletClient | null = null;
   private readonly _breaker: ChainCircuitBreaker;
@@ -64,8 +89,10 @@ class KiteAdapter implements ChainAdapter {
     name: string;
     network: 'mainnet' | 'testnet';
     blockExplorer?: string;
+    usdcAddress: Address;
   }) {
     this._rpcUrl = readEnv(opts.envVarName, opts.chainIdNum);
+    this._usdcAddress = opts.usdcAddress;
 
     this._viemChain = defineChain({
       id: opts.chainIdNum,
@@ -86,7 +113,17 @@ class KiteAdapter implements ChainAdapter {
       rpcUrl: this._rpcUrl,
       ...(opts.blockExplorer ? { blockExplorer: opts.blockExplorer } : {}),
       nativeCurrency: { name: 'Kite', symbol: 'KITE', decimals: 18 },
-      tokens: [], // W1: token list starts empty; WFAC-10 populates PYUSD etc.
+      // WFAC-50 — populated from KITE_USDC_ADDRESS env (injected by caller).
+      tokens: [
+        {
+          address: opts.usdcAddress,
+          symbol: 'USDC',
+          decimals: 6,
+          name: 'USD Coin',
+          eip712Name: 'USD Coin',
+          eip712Version: '2',
+        },
+      ],
     };
 
     // WFAC-41 — per-chain circuit breaker. Thresholds from env with
@@ -115,9 +152,9 @@ class KiteAdapter implements ChainAdapter {
 
   getWalletClient(): WalletClient {
     if (!this._walletClient) {
-      // TODO: WFAC-wallet-singleton — wallet real (con OPERATOR_PRIVATE_KEY) se inyecta
-      // cuando exista src/infra/wallet.ts. Por ahora este client no puede firmar (account: undefined).
+      // WFAC-50 — inject operator account for signing.
       this._walletClient = createWalletClient({
+        account: getOperatorAccount(),
         chain: this._viemChain,
         transport: http(this._rpcUrl),
       }) as WalletClient;
@@ -177,18 +214,144 @@ class KiteAdapter implements ChainAdapter {
     }
   }
 
-  private async _verifyRaw(_params: VerifyParams): Promise<AdapterResult<VerifyResult>> {
-    // Stub body pre-WFAC-10. The outer verify() handles AC-13 accounting by
-    // converting SIMULATION_FAILED / TRANSACTION_FAILED results into a
-    // BusinessFailureError throw — _verifyRaw itself just returns the
-    // AdapterResult, no breaker-side effects here (AR-BLQ-ALTO-1 fix).
+  // WFAC-50 — real EIP-712 recovery + minimal chain-layer checks. The outer
+  // verify() wrapper preserves the WFAC-41 circuit breaker accounting via
+  // BusinessFailureError throws (AR-BLQ-ALTO-1 pattern). This function returns
+  // a plain AdapterResult; it NEVER calls the breaker directly.
+  private async _verifyRaw(params: VerifyParams): Promise<AdapterResult<VerifyResult>> {
+    const token = this.metadata.tokens[0];
+    if (!token) {
+      // Defensive — constructor guarantees 1 token, but TS narrows possible-undefined.
+      return {
+        ok: false,
+        error: {
+          code: 'NETWORK_MISMATCH',
+          message: 'Chain has no registered token',
+          http: 400,
+        },
+      };
+    }
+
+    // 1. Network match (spec-literal eip155:<chainId>).
+    if (params.accepted.network !== this.metadata.networkId) {
+      return {
+        ok: false,
+        error: {
+          code: 'NETWORK_MISMATCH',
+          message: 'Network does not match chain',
+          http: 400,
+        },
+      };
+    }
+
+    // 2. Asset match (case-insensitive).
+    if (!isAddressEqual(params.accepted.asset as Address, token.address)) {
+      return {
+        ok: false,
+        error: {
+          code: 'NETWORK_MISMATCH',
+          message: 'Asset not found in chain token registry',
+          http: 400,
+        },
+      };
+    }
+
+    // 3. Amount validation (AC-5). BigInt comparison — value/amount are uint256 strings.
+    const authorization = params.payload.authorization;
+    const acceptedAmount = BigInt(params.accepted.amount);
+    if (BigInt(authorization.value) < acceptedAmount) {
+      return {
+        ok: false,
+        error: {
+          code: 'INVALID_AMOUNT',
+          message: 'Authorized value is below accepted amount',
+          http: 400,
+        },
+      };
+    }
+
+    // 4. Timestamp window (AC-4).
+    const nowSec = BigInt(Math.floor(Date.now() / 1000));
+    if (BigInt(authorization.validBefore) <= nowSec) {
+      return {
+        ok: false,
+        error: {
+          code: 'EXPIRED_AUTHORIZATION',
+          message: 'Authorization expired',
+          http: 400,
+        },
+      };
+    }
+
+    // 5. Signature normalize (AC-2, AC-6). If fails → return INVALID_SIGNATURE
+    // WITHOUT calling recoverTypedDataAddress (AC-6).
+    const sig = normalizeSignature(params.payload.signature);
+    if (!sig.ok) {
+      return { ok: false, error: sig.error };
+    }
+    const canonicalVHex = sig.v === 27n ? '1b' : '1c';
+    const canonicalSignature =
+      `0x${sig.r.slice(2)}${sig.s.slice(2)}${canonicalVHex}` as `0x${string}`;
+
+    // 6. Build domain inline (DT-D — no import from methods).
+    const domain = {
+      name: token.eip712Name ?? token.name,
+      version: token.eip712Version ?? '1',
+      chainId: this.metadata.chainId as number,
+      verifyingContract: token.address,
+    };
+
+    // 7. Recover (AC-1, AC-3).
+    let recovered: Address;
+    try {
+      recovered = await recoverTypedDataAddress({
+        domain,
+        types: EIP3009_TYPES,
+        primaryType: EIP3009_PRIMARY_TYPE,
+        message: {
+          from: authorization.from as Address,
+          to: authorization.to as Address,
+          value: BigInt(authorization.value),
+          validAfter: BigInt(authorization.validAfter),
+          validBefore: BigInt(authorization.validBefore),
+          nonce: authorization.nonce as `0x${string}`,
+        },
+        signature: canonicalSignature,
+      });
+    } catch {
+      // Malformed signature bytes — viem error messages are implementation-defined.
+      return {
+        ok: false,
+        error: {
+          code: 'INVALID_SIGNATURE',
+          message: 'Failed to recover typed data address',
+          http: 401,
+        },
+      };
+    }
+
+    // 8. Recovered vs claimed (AC-3).
+    if (!isAddressEqual(recovered, authorization.from as Address)) {
+      return {
+        ok: false,
+        error: {
+          code: 'INVALID_SIGNATURE',
+          message: 'Recovered address does not match sender',
+          http: 401,
+        },
+      };
+    }
+
+    // 9. Success (AC-1).
     return {
-      ok: false,
-      error: {
-        code: 'NETWORK_MISMATCH',
-        message: 'Verify not implemented yet (WFAC-10)',
-        http: 400,
-      },
+      ok: true,
+      verified: true,
+      client: getAddress(recovered),
+      amount: params.accepted.amount,
+      asset: token.address,
+      network: params.accepted.network,
+      payTo: getAddress(params.accepted.payTo),
+      expiresAt: Number(authorization.validBefore),
     };
   }
 
@@ -224,16 +387,177 @@ class KiteAdapter implements ChainAdapter {
     }
   }
 
-  private async _settleRaw(_params: SettleParams): Promise<AdapterResult<SettleResult>> {
+  // WFAC-50 — real EIP-3009 transferWithAuthorization flow via viem. The outer
+  // settle() wrapper preserves the WFAC-41 circuit breaker accounting via
+  // BusinessFailureError throws (CD-NEW-SDD-3). This function returns a plain
+  // AdapterResult — SIMULATION_FAILED / TRANSACTION_FAILED surface to the
+  // wrap where they are converted to a thrown BusinessFailureError.
+  private async _settleRaw(params: SettleParams): Promise<AdapterResult<SettleResult>> {
+    const token = this.metadata.tokens[0];
+    if (!token) {
+      return {
+        ok: false,
+        error: {
+          code: 'NETWORK_MISMATCH',
+          message: 'Chain has no registered token',
+          http: 400,
+        },
+      };
+    }
+
+    // 1. Defense-in-depth re-verify (DT-H). Mirror the first 4 steps of
+    //    _verifyRaw so a mis-routed settle still rejects before RPC.
+    const authorization = params.payload.authorization;
+
+    if (params.accepted.network !== this.metadata.networkId) {
+      return {
+        ok: false,
+        error: {
+          code: 'NETWORK_MISMATCH',
+          message: 'Network does not match chain',
+          http: 400,
+        },
+      };
+    }
+    if (!isAddressEqual(params.accepted.asset as Address, token.address)) {
+      return {
+        ok: false,
+        error: {
+          code: 'NETWORK_MISMATCH',
+          message: 'Asset not found in chain token registry',
+          http: 400,
+        },
+      };
+    }
+    const acceptedAmount = BigInt(params.accepted.amount);
+    if (BigInt(authorization.value) < acceptedAmount) {
+      return {
+        ok: false,
+        error: {
+          code: 'INVALID_AMOUNT',
+          message: 'Authorized value is below accepted amount',
+          http: 400,
+        },
+      };
+    }
+    const nowSec = BigInt(Math.floor(Date.now() / 1000));
+    if (BigInt(authorization.validBefore) <= nowSec) {
+      return {
+        ok: false,
+        error: {
+          code: 'EXPIRED_AUTHORIZATION',
+          message: 'Authorization expired',
+          http: 400,
+        },
+      };
+    }
+
+    // 2. Normalize signature — gates malleable/zero scalars before spending
+    //    gas on a simulate. Shape matches _verifyRaw step 5.
+    const sig = normalizeSignature(params.payload.signature);
+    if (!sig.ok) {
+      return { ok: false, error: sig.error };
+    }
+    const { r, s } = sig;
+    const vNum = Number(sig.v); // 27 or 28
+
+    // 3. Simulate (AC-7, CD-4). MUST run BEFORE writeContract.
+    const publicClient = this.getPublicClient();
+    const walletClient = this.getWalletClient();
+    let simRequest: unknown;
+    try {
+      const sim = await publicClient.simulateContract({
+        account: walletClient.account,
+        address: token.address,
+        abi: FIAT_TOKEN_ABI,
+        functionName: 'transferWithAuthorization',
+        args: [
+          authorization.from as Address,
+          authorization.to as Address,
+          BigInt(authorization.value),
+          BigInt(authorization.validAfter),
+          BigInt(authorization.validBefore),
+          authorization.nonce as `0x${string}`,
+          vNum,
+          r,
+          s,
+        ],
+      });
+      simRequest = sim.request;
+    } catch (e) {
+      return {
+        ok: false,
+        error: { code: 'SIMULATION_FAILED', message: sanitize(e), http: 500 },
+      };
+    }
+
+    // 4. Write (AC-7, AC-11, CD-6). Use sim.request opaque — do NOT reconstruct.
+    let hash: `0x${string}`;
+    try {
+      hash = await walletClient.writeContract(simRequest as never);
+    } catch (e) {
+      return {
+        ok: false,
+        error: { code: 'TRANSACTION_FAILED', message: sanitize(e), http: 500 },
+      };
+    }
+
+    // 5. Wait receipt (AC-7, AC-12).
+    let receipt;
+    try {
+      receipt = await publicClient.waitForTransactionReceipt({
+        hash,
+        timeout: RECEIPT_TIMEOUT_MS,
+      });
+    } catch (e) {
+      const msg =
+        e instanceof Error && e.name === 'WaitForTransactionReceiptTimeoutError'
+          ? 'receipt timeout'
+          : sanitize(e);
+      return {
+        ok: false,
+        error: { code: 'TRANSACTION_FAILED', message: msg, http: 500 },
+      };
+    }
+
+    // 6. Status (AC-13).
+    if (receipt.status === 'reverted') {
+      return {
+        ok: false,
+        error: {
+          code: 'TRANSACTION_FAILED',
+          message: 'transaction reverted on-chain',
+          http: 500,
+        },
+      };
+    }
+
+    // 7. Success (AC-7, AC-9). Fields from input params, NOT re-read from chain.
     return {
-      ok: false,
-      error: {
-        code: 'NETWORK_MISMATCH',
-        message: 'Settle not implemented yet (WFAC-11)',
-        http: 400,
-      },
+      ok: true,
+      settled: true,
+      transactionHash: hash,
+      blockNumber: Number(receipt.blockNumber),
+      amount: params.accepted.amount,
+      from: authorization.from as Address,
+      to: authorization.to as Address,
+      asset: token.address,
     };
   }
+}
+
+/**
+ * Read + validate the Kite PYUSD/USDC token address at module load.
+ *
+ * WFAC-50: throws ChainAdapterInitError if missing/invalid. Regex is
+ * defense-in-depth over EnvSchema (non-test env already enforces presence).
+ */
+function readUsdcAddress(chainIdNum: number): Address {
+  const v = process.env['KITE_USDC_ADDRESS'];
+  if (!v || !/^0x[0-9a-fA-F]{40}$/.test(v)) {
+    throw new ChainAdapterInitError('KITE_USDC_ADDRESS', chainIdNum);
+  }
+  return v as Address;
 }
 
 export const kiteTestnetAdapter: ChainAdapter = new KiteAdapter({
@@ -241,6 +565,7 @@ export const kiteTestnetAdapter: ChainAdapter = new KiteAdapter({
   envVarName: 'KITE_TESTNET_RPC_URL',
   name: 'Kite Testnet',
   network: 'testnet',
+  usdcAddress: readUsdcAddress(2368),
 });
 
 export const kiteMainnetAdapter: ChainAdapter = new KiteAdapter({
@@ -248,4 +573,6 @@ export const kiteMainnetAdapter: ChainAdapter = new KiteAdapter({
   envVarName: 'KITE_MAINNET_RPC_URL',
   name: 'Kite Mainnet',
   network: 'mainnet',
+  // MVP: reuse same env var. Future HU may introduce KITE_MAINNET_USDC_ADDRESS.
+  usdcAddress: readUsdcAddress(2366),
 });
