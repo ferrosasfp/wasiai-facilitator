@@ -1,15 +1,28 @@
 import Fastify, { type FastifyInstance, type FastifyBaseLogger } from 'fastify';
+import rateLimit from '@fastify/rate-limit';
 import type { DestinationStream } from 'pino';
 import { parseEnv, type EnvConfig } from './infra/env.js';
 import { createLogger } from './infra/logger.js';
 import { initRedis, getRedisClient } from './infra/redis.js';
 import { initSupabase } from './infra/supabase.js';
 import { buildAuditEntry, persistAuditEntry } from './core/audit.js';
+import { extractClientIp } from './core/network.js';
 import { healthRoute } from './routes/health.js';
 import { verifyRoute } from './routes/verify.js';
 import { settleRoute } from './routes/settle.js';
 import { supportedRoute } from './routes/supported.js';
 import { openapiRoute } from './routes/openapi.js';
+
+/**
+ * WFAC-40 — expose the parsed EnvConfig to route plugins via decorator.
+ * Consumed by `verify.ts`, `settle.ts`, `supported.ts` to read per-route
+ * rate-limit caps without changing plugin signatures (DT-13 in SDD).
+ */
+declare module 'fastify' {
+  interface FastifyInstance {
+    env: EnvConfig;
+  }
+}
 
 /**
  * Paths excluded from the audit hook (WFAC-33 DT-11 — blacklist pattern).
@@ -69,6 +82,56 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     disableRequestLogging: false,
   });
 
+  app.decorate('env', env);
+
+  // WFAC-40 — rate-limit plugin (DT-5 SDD: BEFORE route registration
+  // so the plugin's onRoute hook reads per-route config.rateLimit).
+  // Conditional registration (DT-14): when RATE_LIMIT_ENABLED=false,
+  // the plugin is NOT registered → zero-overhead global bypass (AC-6).
+  if (env.RATE_LIMIT_ENABLED) {
+    const redisClient = getRedisClient();
+    await app.register(rateLimit, {
+      global: true,
+      // Defensive fallback caps — the 3 public routes OVERRIDE these via
+      // per-route config.rateLimit in W2. Any future route without a
+      // config inherits these.
+      max: env.RATE_LIMIT_VERIFY_MAX,
+      timeWindow: env.RATE_LIMIT_WINDOW_SEC * 1000,
+      // DT-10: fail-open on Redis runtime outage. If the incr() call on
+      // the store rejects, the plugin lets the request through.
+      skipOnError: true,
+      // DT-9 + DT-10 boot-time: when getRedisClient() returns null
+      // (test env, REDIS_URL absent), pass undefined → plugin falls
+      // back to LocalStore (in-memory) without crashing.
+      redis: redisClient ?? undefined,
+      // DT-8: reuse the centralized extractor. Defensive `?? req.ip ??
+      // 'unknown'` fallback ensures the plugin always has a key.
+      keyGenerator: (req) => extractClientIp(req) ?? req.ip ?? 'unknown',
+      // DT-12: default headers (X-RateLimit-*). Draft-spec variant
+      // (RateLimit-*) not used — work-item AC-5 cites X- prefixed names.
+      enableDraftSpec: false,
+      // DT-7 + DT-11: spec-literal body + warn log without PII (CD-3, CD-4).
+      errorResponseBuilder: (req, context) => {
+        req.log.warn(
+          {
+            request_id: req.id,
+            path: req.routeOptions?.url ?? req.url,
+            rate_limit_max: context.max,
+            rate_limit_ttl_ms: context.ttl,
+          },
+          'rate limit exceeded',
+        );
+        return {
+          error: {
+            code: 'RATE_LIMITED',
+            message: 'Too many requests, please try again later',
+            http: 429,
+          },
+        };
+      },
+    });
+  }
+
   await app.register(healthRoute);
   await app.register(verifyRoute);
   await app.register(settleRoute);
@@ -85,18 +148,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     const routePath = request.routeOptions.url;
     if (!routePath || AUDIT_EXCLUDED_PATHS.has(routePath)) return;
 
-    // Proxy-aware IP extraction (DT-2). X-Forwarded-For first element.
-    const xff = request.headers['x-forwarded-for'];
-    let ipRaw: string | null = null;
-    if (typeof xff === 'string' && xff.length > 0) {
-      const first = xff.split(',')[0];
-      ipRaw = first ? first.trim() : null;
-    } else if (Array.isArray(xff) && xff.length > 0 && typeof xff[0] === 'string') {
-      const first = xff[0].split(',')[0];
-      ipRaw = first ? first.trim() : null;
-    } else if (typeof request.ip === 'string' && request.ip.length > 0) {
-      ipRaw = request.ip;
-    }
+    // WFAC-40 CD-9 — proxy-aware IP extraction (DT-2, DT-8 SDD).
+    // The XFF-first logic lives EXCLUSIVELY in src/core/network.ts.
+    const ipRaw = extractClientIp(request);
 
     const uaHeader = request.headers['user-agent'];
     const userAgentRaw = typeof uaHeader === 'string' && uaHeader.length > 0 ? uaHeader : null;
