@@ -38,6 +38,23 @@ import { chainRegistry } from '../../chains/registry.js';
 import { asChainId } from '../../core/types.js';
 import type { ChainAdapter, SettleParams } from '../../chains/types.js';
 
+// ─── core/ledger.js mock (WFAC-32 W3) ──────────────────────────────────────
+// Keep `buildLedgerEntry` as a simple passthrough-shaped structural mock.
+// `persistLedgerEntry` becomes a spy whose default resolves `undefined`
+// (mirrors the no-op production behaviour when SUPABASE_URL is absent).
+// Individual tests may reach into `__persistSpy` / `__buildSpy` to assert.
+vi.mock('../../core/ledger.js', () => {
+  const persistSpy = vi.fn(async () => undefined);
+  const buildSpy = vi.fn((input: unknown) => ({ __input: input }));
+  return {
+    __esModule: true,
+    buildLedgerEntry: buildSpy,
+    persistLedgerEntry: persistSpy,
+    __persistSpy: persistSpy,
+    __buildSpy: buildSpy,
+  };
+});
+
 // ─── ioredis mock (copied verbatim from routes.verify.test.ts) ─────────────
 vi.mock('ioredis', () => {
   const constructorSpy = vi.fn();
@@ -216,6 +233,13 @@ describe('POST /settle', () => {
     (ioredis as unknown as { __getSpy: ReturnType<typeof vi.fn> }).__getSpy.mockClear();
     (ioredis as unknown as { __setSpy: ReturnType<typeof vi.fn> }).__setSpy.mockClear();
     (ioredis as unknown as { __store: Map<string, string> }).__store.clear();
+
+    const ledger = (await import('../../core/ledger.js')) as unknown as {
+      __persistSpy: ReturnType<typeof vi.fn>;
+      __buildSpy: ReturnType<typeof vi.fn>;
+    };
+    ledger.__persistSpy.mockClear();
+    ledger.__buildSpy.mockClear();
   });
 
   afterEach(async () => {
@@ -767,5 +791,119 @@ describe('POST /settle', () => {
     expect(verifyKey).not.toBe(settleKey);
     expect(verifyKey.startsWith('verify:idempotency:')).toBe(true);
     expect(settleKey.startsWith('settle:idempotency:')).toBe(true);
+  });
+
+  // ─── WFAC-32 — ledger hooks (T20-T22, T24) ─────────────────────────────
+
+  it('T20 / AC-1: success path invokes persistLedgerEntry exactly once with success entry', async () => {
+    const adapter = makeFakeAdapter(2368, async () => VALID_SETTLE_RESULT);
+    app = await buildAppWithAdapter(adapter);
+    const ledger = (await import('../../core/ledger.js')) as unknown as {
+      __persistSpy: ReturnType<typeof vi.fn>;
+      __buildSpy: ReturnType<typeof vi.fn>;
+    };
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/settle',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify(VALID_BODY),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(ledger.__persistSpy).toHaveBeenCalledTimes(1);
+    expect(ledger.__buildSpy).toHaveBeenCalledTimes(1);
+
+    const buildInput = ledger.__buildSpy.mock.calls[0]?.[0] as {
+      method: string;
+      network: string;
+      result: { ok: boolean };
+    };
+    expect(buildInput.method).toBe('eip3009');
+    expect(buildInput.network).toBe('eip155:2368');
+    expect(buildInput.result.ok).toBe(true);
+  });
+
+  it('T21 / AC-2: adapter x402 failure invokes persistLedgerEntry once with failed entry', async () => {
+    const adapter = makeFakeAdapter(2368, async () => ({
+      ok: false,
+      error: { code: 'INSUFFICIENT_BALANCE', message: 'no funds', http: 402 },
+    }));
+    app = await buildAppWithAdapter(adapter);
+    const ledger = (await import('../../core/ledger.js')) as unknown as {
+      __persistSpy: ReturnType<typeof vi.fn>;
+      __buildSpy: ReturnType<typeof vi.fn>;
+    };
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/settle',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify(VALID_BODY),
+    });
+    expect(res.statusCode).toBe(402);
+    expect(ledger.__persistSpy).toHaveBeenCalledTimes(1);
+
+    const buildInput = ledger.__buildSpy.mock.calls[0]?.[0] as {
+      result: { ok: boolean; error?: { code: string; http: number } };
+    };
+    expect(buildInput.result.ok).toBe(false);
+    expect(buildInput.result.error?.code).toBe('INSUFFICIENT_BALANCE');
+    expect(buildInput.result.error?.http).toBe(402);
+  });
+
+  it('T22 / AC-2-extended: adapter throw invokes persistLedgerEntry once with TRANSACTION_FAILED 500', async () => {
+    const adapter = makeFakeAdapter(2368, async () => {
+      throw new Error('rpc down');
+    });
+    app = await buildAppWithAdapter(adapter);
+    const ledger = (await import('../../core/ledger.js')) as unknown as {
+      __persistSpy: ReturnType<typeof vi.fn>;
+      __buildSpy: ReturnType<typeof vi.fn>;
+    };
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/settle',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify(VALID_BODY),
+    });
+    expect(res.statusCode).toBe(500);
+    expect(ledger.__persistSpy).toHaveBeenCalledTimes(1);
+
+    const buildInput = ledger.__buildSpy.mock.calls[0]?.[0] as {
+      result: { ok: boolean; error?: { code: string; http: number } };
+    };
+    expect(buildInput.result.ok).toBe(false);
+    expect(buildInput.result.error?.code).toBe('TRANSACTION_FAILED');
+    expect(buildInput.result.error?.http).toBe(500);
+  });
+
+  it('T24: cache-hit does NOT invoke persistLedgerEntry (only first request persists)', async () => {
+    const adapter = makeFakeAdapter(2368, async () => VALID_SETTLE_RESULT);
+    app = await buildAppWithAdapter(adapter);
+    const ledger = (await import('../../core/ledger.js')) as unknown as {
+      __persistSpy: ReturnType<typeof vi.fn>;
+      __buildSpy: ReturnType<typeof vi.fn>;
+    };
+
+    const r1 = await app.inject({
+      method: 'POST',
+      url: '/settle',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify(VALID_BODY),
+    });
+    expect(r1.statusCode).toBe(200);
+    expect(ledger.__persistSpy).toHaveBeenCalledTimes(1);
+
+    // Second identical request hits the Redis idempotency cache.
+    const r2 = await app.inject({
+      method: 'POST',
+      url: '/settle',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify(VALID_BODY),
+    });
+    expect(r2.statusCode).toBe(200);
+    // Still only ONE persistLedgerEntry call — cache-hit must NOT duplicate.
+    expect(ledger.__persistSpy).toHaveBeenCalledTimes(1);
   });
 });
