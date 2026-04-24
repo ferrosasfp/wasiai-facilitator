@@ -45,6 +45,7 @@ type VerifyRouteErrorCode =
   | 'INVALID_RECEIVER'
   | 'TRANSACTION_FAILED'
   | 'DELEGATION_INVALID'
+  | 'CHAIN_UNAVAILABLE' // WFAC-41
   | 'INVALID_PAYLOAD';
 
 interface ErrorBody {

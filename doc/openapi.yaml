@@ -442,8 +442,9 @@ components:
     X402ErrorCode:
       type: string
       description: |
-        Canonical x402 error code. Exactly the 10 values exported as the
-        `X402ErrorCode` union from `src/core/types.ts`.
+        Canonical x402 error code. Exactly the 11 values exported as the
+        `X402ErrorCode` union from `src/core/types.ts` (10 x402 spec codes +
+        CHAIN_UNAVAILABLE per WFAC-41 DT-3 Opción B).
       enum:
         - INVALID_SIGNATURE
         - INSUFFICIENT_BALANCE
@@ -455,14 +456,15 @@ components:
         - INVALID_RECEIVER
         - TRANSACTION_FAILED
         - DELEGATION_INVALID
+        - CHAIN_UNAVAILABLE
 
     X402ErrorHttp:
       type: integer
       description: |
         HTTP status associated with the error code. Matches `HTTP_BY_CODE`
         in `src/core/errors.ts`. Values are `400`, `401`, `402`, `412`,
-        or `500`.
-      enum: [400, 401, 402, 412, 500]
+        `500`, or `503` (CHAIN_UNAVAILABLE per WFAC-41).
+      enum: [400, 401, 402, 412, 500, 503]
 
     ErrorBody:
       type: object

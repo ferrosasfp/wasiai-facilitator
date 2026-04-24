@@ -234,4 +234,83 @@ describe('parseEnv', () => {
     const allWrites = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
     expect(allWrites).toContain('RATE_LIMIT_ENABLED');
   });
+
+  // ─── WFAC-41 — CB (circuit breaker) vars (T-ENV-CB-*) ────────────────────
+  it('T-ENV-CB-1 (AC-10 defaults): CB_* env vars default to {true, 5, 30000, 10000}', () => {
+    const result = parseEnv({ NODE_ENV: 'test' });
+    expect(result.CB_ENABLED).toBe(true);
+    expect(result.CB_FAILURE_THRESHOLD).toBe(5);
+    expect(result.CB_ROLLING_WINDOW_MS).toBe(30000);
+    expect(result.CB_RESET_TIMEOUT_MS).toBe(10000);
+  });
+
+  it('T-ENV-CB-2 (CD-NEW-CB-BOOL): CB_ENABLED=false is parsed as boolean false', () => {
+    const result = parseEnv({ NODE_ENV: 'test', CB_ENABLED: 'false' });
+    expect(result.CB_ENABLED).toBe(false);
+    expect(typeof result.CB_ENABLED).toBe('boolean');
+  });
+
+  it('T-ENV-CB-3 (AC-10 override numeric): CB_* numerics parse as integers', () => {
+    const result = parseEnv({
+      NODE_ENV: 'test',
+      CB_FAILURE_THRESHOLD: '10',
+      CB_ROLLING_WINDOW_MS: '60000',
+      CB_RESET_TIMEOUT_MS: '15000',
+    });
+    expect(result.CB_FAILURE_THRESHOLD).toBe(10);
+    expect(result.CB_ROLLING_WINDOW_MS).toBe(60000);
+    expect(result.CB_RESET_TIMEOUT_MS).toBe(15000);
+  });
+
+  it('T-ENV-CB-4 (AC-10 invalid negative CB_FAILURE_THRESHOLD): exits with code 1', () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((_code?: number) => {
+      throw new Error('__exit__');
+    }) as never);
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    expect(() => parseEnv({ NODE_ENV: 'test', CB_FAILURE_THRESHOLD: '-1' })).toThrow('__exit__');
+
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const allWrites = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(allWrites).toContain('CB_FAILURE_THRESHOLD');
+  });
+
+  it('T-ENV-CB-5 (AC-10 invalid zero CB_ROLLING_WINDOW_MS): exits with code 1', () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((_code?: number) => {
+      throw new Error('__exit__');
+    }) as never);
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    expect(() => parseEnv({ NODE_ENV: 'test', CB_ROLLING_WINDOW_MS: '0' })).toThrow('__exit__');
+
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const allWrites = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(allWrites).toContain('CB_ROLLING_WINDOW_MS');
+  });
+
+  it('T-ENV-CB-6 (AC-10 invalid non-integer CB_RESET_TIMEOUT_MS): exits with code 1', () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((_code?: number) => {
+      throw new Error('__exit__');
+    }) as never);
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    expect(() => parseEnv({ NODE_ENV: 'test', CB_RESET_TIMEOUT_MS: 'abc' })).toThrow('__exit__');
+
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const allWrites = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(allWrites).toContain('CB_RESET_TIMEOUT_MS');
+  });
+
+  it('T-ENV-CB-7 (CD-NEW-CB-BOOL): CB_ENABLED rejects arbitrary strings like "yes"', () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((_code?: number) => {
+      throw new Error('__exit__');
+    }) as never);
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    expect(() => parseEnv({ NODE_ENV: 'test', CB_ENABLED: 'yes' })).toThrow('__exit__');
+
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const allWrites = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(allWrites).toContain('CB_ENABLED');
+  });
 });

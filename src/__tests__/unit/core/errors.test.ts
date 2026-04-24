@@ -12,8 +12,9 @@
  *   - AC-1: buildX402Error returns { code, message, http } with canonical HTTP.
  *   - AC-2: buildX402Error(code) without message uses DEFAULT_MESSAGE_BY_CODE[code].
  *   - AC-3: buildX402Error(code, 'explicit') uses the explicit message verbatim.
- *   - AC-4: HTTP_BY_CODE contains the 10 canonical entries with spec values.
- *   - AC-5: DEFAULT_MESSAGE_BY_CODE contains 10 entries with non-empty messages.
+ *   - AC-4: HTTP_BY_CODE contains the 11 canonical entries with spec values
+ *           (10 x402 spec codes + CHAIN_UNAVAILABLE per WFAC-41).
+ *   - AC-5: DEFAULT_MESSAGE_BY_CODE contains 11 entries with non-empty messages.
  *   - AC-6 & AC-8: enforced at compile time by `Record<X402ErrorCode, …>` +
  *                  TypeScript strict mode. A runtime test cannot exercise a
  *                  compile-time failure; see the type-level note below.
@@ -28,8 +29,8 @@ import { HTTP_BY_CODE, DEFAULT_MESSAGE_BY_CODE, buildX402Error } from '../../../
 import type { X402ErrorCode } from '../../../core/types.js';
 
 // ---------------------------------------------------------------------------
-// Canonical inventory — the 10 codes from the x402 spec, mirrored from
-// doc/architecture/X402-CONFORMANCE.md §"Standard error codes".
+// Canonical inventory — the 11 codes (10 x402 spec + CHAIN_UNAVAILABLE WFAC-41),
+// mirrored from doc/architecture/X402-CONFORMANCE.md §"Standard error codes".
 // ---------------------------------------------------------------------------
 const CANONICAL: Array<{ code: X402ErrorCode; http: number }> = [
   { code: 'INVALID_SIGNATURE', http: 401 },
@@ -42,6 +43,8 @@ const CANONICAL: Array<{ code: X402ErrorCode; http: number }> = [
   { code: 'INVALID_RECEIVER', http: 400 },
   { code: 'TRANSACTION_FAILED', http: 500 },
   { code: 'DELEGATION_INVALID', http: 401 },
+  // WFAC-41 — circuit breaker open, HTTP 503.
+  { code: 'CHAIN_UNAVAILABLE', http: 503 },
 ];
 
 describe('core/errors — HTTP_BY_CODE (AC-4)', () => {
@@ -51,8 +54,12 @@ describe('core/errors — HTTP_BY_CODE (AC-4)', () => {
     }
   });
 
-  it('contains exactly 10 entries (spec-literal inventory)', () => {
-    expect(Object.keys(HTTP_BY_CODE)).toHaveLength(10);
+  it('contains exactly 11 entries (spec-literal inventory + WFAC-41 CHAIN_UNAVAILABLE)', () => {
+    expect(Object.keys(HTTP_BY_CODE)).toHaveLength(11);
+  });
+
+  it('WFAC-41 T-CB-HTTP-503: CHAIN_UNAVAILABLE maps to 503', () => {
+    expect(HTTP_BY_CODE.CHAIN_UNAVAILABLE).toBe(503);
   });
 
   it('uses 401 for INVALID_SIGNATURE', () => {
@@ -87,8 +94,12 @@ describe('core/errors — HTTP_BY_CODE (AC-4)', () => {
 });
 
 describe('core/errors — DEFAULT_MESSAGE_BY_CODE (AC-5)', () => {
-  it('contains exactly 10 entries (exhaustive coverage)', () => {
-    expect(Object.keys(DEFAULT_MESSAGE_BY_CODE)).toHaveLength(10);
+  it('contains exactly 11 entries (exhaustive coverage)', () => {
+    expect(Object.keys(DEFAULT_MESSAGE_BY_CODE)).toHaveLength(11);
+  });
+
+  it('WFAC-41 T-CB-MSG: CHAIN_UNAVAILABLE default message is spec-literal', () => {
+    expect(DEFAULT_MESSAGE_BY_CODE.CHAIN_UNAVAILABLE).toBe('Chain RPC temporarily unavailable');
   });
 
   it('has a non-empty, string default message for every canonical code', () => {
@@ -137,6 +148,15 @@ describe('core/errors — buildX402Error(code) default message (AC-1, AC-2)', ()
     for (const { code, http } of CANONICAL) {
       expect(buildX402Error(code).http).toBe(http);
     }
+  });
+
+  it('WFAC-41 T-CB-BUILD: buildX402Error("CHAIN_UNAVAILABLE") returns { code, message, http:503 }', () => {
+    const out = buildX402Error('CHAIN_UNAVAILABLE');
+    expect(out).toEqual({
+      code: 'CHAIN_UNAVAILABLE',
+      message: 'Chain RPC temporarily unavailable',
+      http: 503,
+    });
   });
 });
 
