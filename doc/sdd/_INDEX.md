@@ -9,7 +9,7 @@
 | 005 | 2026-04-22 | EIP-3009 verify logic (WFAC-6) | method | QUALITY | DONE | feat/005-wfac-6-eip3009-verify |
 | 006 | 2026-04-23 | EIP-3009 settle logic (WFAC-10) | method | QUALITY | DONE | feat/006-wfac-10-eip3009-settle |
 | 007 | 2026-04-24 | Standard error codes — core/errors.ts (WFAC-11) | spec-conformance | FAST+AR | DONE | main (1fa4b21) |
-| 008 | 2026-04-23 | Signature normalization — EIP-2098 + Core wallet (WFAC-13) | security | FAST+AR | in progress | feat/008-wfac-13-signature-normalization |
+| 008 | 2026-04-24 | Signature normalization — EIP-2098 + Core wallet (WFAC-13) | security | FAST+AR | DONE | feat/008-wfac-13-signature-normalization |
 
 <!--
 Formato por entrada:
