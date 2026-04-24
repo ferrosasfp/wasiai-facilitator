@@ -20,6 +20,7 @@
  */
 
 import type { PublicClient, WalletClient } from 'viem';
+import type { Logger } from 'pino';
 import type { Result, Address, ChainId, X402ErrorCode } from '../core/types.js';
 
 export interface EIP3009Token {
@@ -44,6 +45,13 @@ export interface ChainMetadata {
     readonly decimals: number;
   };
   readonly tokens: readonly EIP3009Token[];
+  /**
+   * WFAC-41 (DT-7) — optional: current CB state exposed in /supported response.
+   * Omitted (NOT undefined) when `CB_ENABLED=false` or the adapter has no
+   * breaker. Populated lazily by `src/core/supported.ts` via
+   * `adapter.getBreakerState?.()`.
+   */
+  readonly breakerState?: 'CLOSED' | 'OPEN' | 'HALF_OPEN';
 }
 
 // --- x402 spec shapes (DT-2 of SDD: direct, no wrappers) ---
@@ -120,6 +128,20 @@ export interface ChainAdapter {
   settle(params: SettleParams): Promise<AdapterResult<SettleResult>>;
   getPublicClient(): PublicClient;
   getWalletClient(): WalletClient;
+  /**
+   * WFAC-41 — optional introspection: current circuit breaker state for
+   * this chain. Adapters that wrap verify/settle with ChainCircuitBreaker
+   * (KiteAdapter, AvalancheFujiAdapter) expose this; stubs without breakers
+   * may omit. Consumer (core/supported.ts) uses `typeof adapter.getBreakerState
+   * === 'function'` before calling.
+   */
+  getBreakerState?(): 'CLOSED' | 'OPEN' | 'HALF_OPEN';
+  /**
+   * WFAC-41 — optional logger injection (ducktype at buildApp init via
+   * src/chains/init-breakers.ts). Adapters that own a ChainCircuitBreaker
+   * forward the call to `breaker.setLogger(logger)`.
+   */
+  setLogger?(logger: Logger): void;
 }
 
 export type RegisterResult =

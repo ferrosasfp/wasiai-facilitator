@@ -16,6 +16,7 @@
 import { createPublicClient, createWalletClient, http } from 'viem';
 import type { PublicClient, WalletClient } from 'viem';
 import { avalancheFuji } from 'viem/chains';
+import type { Logger } from 'pino';
 import {
   ChainAdapterInitError,
   type AdapterResult,
@@ -28,6 +29,13 @@ import {
   type VerifyResult,
 } from './types.js';
 import { asChainId } from '../core/types.js';
+import {
+  ChainCircuitBreaker,
+  BreakerOpenError,
+  readCbNumber,
+  readCbBool,
+  type BreakerStateName,
+} from './circuit-breaker.js';
 
 const FUJI_CHAIN_ID = 43113;
 
@@ -56,6 +64,7 @@ class AvalancheFujiAdapter implements ChainAdapter {
   private readonly _rpcUrl: string;
   private _publicClient: PublicClient | null = null;
   private _walletClient: WalletClient | null = null;
+  private readonly _breaker: ChainCircuitBreaker;
 
   constructor() {
     this._rpcUrl = readRpcUrl();
@@ -69,6 +78,19 @@ class AvalancheFujiAdapter implements ChainAdapter {
       nativeCurrency: { name: 'Avalanche', symbol: 'AVAX', decimals: 18 },
       tokens: [USDC_FUJI],
     };
+
+    // WFAC-41 — per-chain circuit breaker. Defaults mirror the Zod schema
+    // in src/infra/env.ts (CD-NEW-CB-HELPER-DEFAULTS). Adapters cannot
+    // import env.ts (OWNERS); readCbNumber/readCbBool reuse the exact
+    // same fallbacks.
+    this._breaker = new ChainCircuitBreaker({
+      chainId: FUJI_CHAIN_ID,
+      chainName: 'Avalanche Fuji',
+      failureThreshold: readCbNumber('CB_FAILURE_THRESHOLD', 5),
+      rollingWindowMs: readCbNumber('CB_ROLLING_WINDOW_MS', 30000),
+      resetTimeoutMs: readCbNumber('CB_RESET_TIMEOUT_MS', 10000),
+      enabled: readCbBool('CB_ENABLED', true),
+    });
   }
 
   getPublicClient(): PublicClient {
@@ -93,8 +115,36 @@ class AvalancheFujiAdapter implements ChainAdapter {
     return this._walletClient;
   }
 
-  async verify(_params: VerifyParams): Promise<AdapterResult<VerifyResult>> {
-    return {
+  setLogger(logger: Logger): void {
+    this._breaker.setLogger(logger);
+  }
+
+  getBreakerState(): BreakerStateName {
+    return this._breaker.getState();
+  }
+
+  // ── verify split — CD-1 (wrap both verify and settle) ─────────────────
+  async verify(params: VerifyParams): Promise<AdapterResult<VerifyResult>> {
+    try {
+      return await this._breaker.execute(() => this._verifyRaw(params));
+    } catch (err) {
+      if (err instanceof BreakerOpenError) {
+        return {
+          ok: false,
+          error: {
+            code: 'CHAIN_UNAVAILABLE',
+            message: 'Chain RPC temporarily unavailable',
+            http: 503,
+            retryAfterMs: err.remainingMs,
+          },
+        };
+      }
+      throw err;
+    }
+  }
+
+  private async _verifyRaw(_params: VerifyParams): Promise<AdapterResult<VerifyResult>> {
+    const result: AdapterResult<VerifyResult> = {
       ok: false,
       error: {
         code: 'NETWORK_MISMATCH',
@@ -102,10 +152,38 @@ class AvalancheFujiAdapter implements ChainAdapter {
         http: 400,
       },
     };
+    // AC-13 — count business-level failures toward breaker.
+    if (
+      !result.ok &&
+      (result.error.code === 'SIMULATION_FAILED' || result.error.code === 'TRANSACTION_FAILED')
+    ) {
+      this._breaker.recordBusinessFailure(result.error.code);
+    }
+    return result;
   }
 
-  async settle(_params: SettleParams): Promise<AdapterResult<SettleResult>> {
-    return {
+  // ── settle split — mirror of verify ────────────────────────────────────
+  async settle(params: SettleParams): Promise<AdapterResult<SettleResult>> {
+    try {
+      return await this._breaker.execute(() => this._settleRaw(params));
+    } catch (err) {
+      if (err instanceof BreakerOpenError) {
+        return {
+          ok: false,
+          error: {
+            code: 'CHAIN_UNAVAILABLE',
+            message: 'Chain RPC temporarily unavailable',
+            http: 503,
+            retryAfterMs: err.remainingMs,
+          },
+        };
+      }
+      throw err;
+    }
+  }
+
+  private async _settleRaw(_params: SettleParams): Promise<AdapterResult<SettleResult>> {
+    const result: AdapterResult<SettleResult> = {
       ok: false,
       error: {
         code: 'NETWORK_MISMATCH',
@@ -113,6 +191,13 @@ class AvalancheFujiAdapter implements ChainAdapter {
         http: 400,
       },
     };
+    if (
+      !result.ok &&
+      (result.error.code === 'SIMULATION_FAILED' || result.error.code === 'TRANSACTION_FAILED')
+    ) {
+      this._breaker.recordBusinessFailure(result.error.code);
+    }
+    return result;
   }
 }
 
