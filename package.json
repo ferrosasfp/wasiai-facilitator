@@ -18,6 +18,7 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "security:audit": "npm audit --audit-level=high",
+    "ops:check-gas": "node scripts/check-operator-gas.mjs",
     "qa": "npm run typecheck && npm run lint && npm run format:check && npm run test"
   },
   "dependencies": {

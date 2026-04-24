@@ -1,5 +1,7 @@
 import Fastify, { type FastifyInstance, type FastifyBaseLogger } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
+import cors from '@fastify/cors';
+import helmet from '@fastify/helmet';
 import type { DestinationStream, Logger } from 'pino';
 import { parseEnv, type EnvConfig } from './infra/env.js';
 import { createLogger } from './infra/logger.js';
@@ -88,6 +90,24 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   });
 
   app.decorate('env', env);
+
+  // Security headers (helmet) — HSTS, X-Content-Type-Options, X-Frame-Options, etc.
+  // Disabling CSP because this is a JSON-only API (no HTML served).
+  // Registered FIRST so headers apply to all responses including errors.
+  await app.register(helmet, {
+    contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false,
+  });
+
+  // CORS — permissive origin: true (reflects Origin header) so integrators
+  // from any marketplace/wallet can call /verify, /settle, /supported.
+  // Server-to-server calls (wasiai-a2a) ignore CORS. Tighten via env if needed.
+  await app.register(cors, {
+    origin: true,
+    credentials: false,
+    methods: ['GET', 'POST', 'OPTIONS'],
+    maxAge: 86400,
+  });
 
   // WFAC-40 — rate-limit plugin (DT-5 SDD: BEFORE route registration
   // so the plugin's onRoute hook reads per-route config.rateLimit).
