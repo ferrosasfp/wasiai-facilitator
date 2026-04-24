@@ -61,199 +61,212 @@ interface ErrorBody {
 const ZOD_MESSAGE_MAX_LEN = 200;
 
 export const settleRoute: FastifyPluginAsync = async (app) => {
-  app.post('/settle', async (request, reply) => {
-    const startMs = Date.now();
-    const requestId = request.id;
-
-    // Step 1 — Zod validation
-    const parseResult = SettleRequestSchema.safeParse(request.body);
-    if (!parseResult.success) {
-      const issue = parseResult.error.issues[0];
-      const path = issue?.path.length ? issue.path.join('.') : 'body';
-      const rawMsg = issue?.message ?? 'invalid';
-      const message = `${path}: ${rawMsg}`.slice(0, ZOD_MESSAGE_MAX_LEN);
-      const body: ErrorBody = {
-        error: { code: 'INVALID_PAYLOAD', message, http: 400 },
-      };
-      app.log.warn(
-        {
-          request_id: requestId,
-          error_code: 'INVALID_PAYLOAD',
-          http_status: 400,
-          duration_ms: Date.now() - startMs,
+  // WFAC-40 — per-route rate-limit config (DT-6 + DT-13 SDD).
+  const env = app.env;
+  app.post(
+    '/settle',
+    {
+      config: {
+        rateLimit: {
+          max: env.RATE_LIMIT_SETTLE_MAX,
+          timeWindow: env.RATE_LIMIT_WINDOW_SEC * 1000,
         },
-        'settle failed',
-      );
-      // WFAC-33 (CD-11): populate auditMeta.errorCode before reply.send.
-      request.auditMeta = { ...request.auditMeta, errorCode: 'INVALID_PAYLOAD' };
-      return reply.code(400).send(body);
-    }
-    const parsed: SettleRequest = parseResult.data;
-
-    // Step 2 — idempotency lookup
-    const idempotencyKey = buildSettleIdempotencyKey(parsed);
-    // WFAC-33 (CD-11, AC-12): propagate idempotencyKey to audit row. Set BEFORE
-    // the cache-lookup branch so cache-hit replays also get linked to the
-    // original settlement in facilitator_audit_log.
-    request.auditMeta = { ...request.auditMeta, idempotencyKey };
-    const redisUp = isRedisAvailable();
-    if (redisUp) {
-      const cached = await getCachedSettleResponse(idempotencyKey);
-      if (cached) {
-        return sendCachedSettle(reply, cached, {
-          requestId,
-          startMs,
-          network: parsed.accepted.network,
-          app,
-        });
-      }
-    } else {
-      // AC-10 graceful degradation — L2 warn
-      app.log.warn({ request_id: requestId }, 'idempotency cache miss — Redis unavailable');
-    }
-
-    // Step 3 — dispatch to core
-    let result;
-    try {
-      result = await settleCore(parsed);
-    } catch (err: unknown) {
-      // L4 — adapter threw. Defense-in-depth (CD-4 + SDD §DT-8).
-      app.log.error(
-        {
-          request_id: requestId,
-          error_code: 'TRANSACTION_FAILED',
-          http_status: 500,
-          err_type: (err as Error)?.name ?? 'UnknownError',
-          duration_ms: Date.now() - startMs,
-        },
-        'settle adapter threw',
-      );
-      // WFAC-32 H3 — ledger entry for adapter-throw. Synthetic failure result
-      // with TRANSACTION_FAILED / 500. CD-14: await, no .catch() / void.
-      await persistLedgerEntry(
-        buildLedgerEntry({
-          idempotencyKey,
-          durationMs: Date.now() - startMs,
-          method: 'eip3009',
-          network: parsed.accepted.network,
-          parsed,
-          result: {
-            ok: false,
-            error: {
-              code: 'TRANSACTION_FAILED',
-              message: 'Internal adapter error',
-              http: 500,
-            },
-          },
-        }),
-        app.log,
-      );
-      const body: ErrorBody = {
-        error: {
-          code: 'TRANSACTION_FAILED',
-          message: 'Internal adapter error',
-          http: 500,
-        },
-      };
-      // WFAC-33 (CD-11): populate auditMeta.errorCode before reply.send.
-      request.auditMeta = { ...request.auditMeta, errorCode: 'TRANSACTION_FAILED' };
-      return reply.code(500).send(body);
-    }
-
-    // Step 4 — cache (CD-12 filters 5xx inside toCacheableSettle)
-    if (redisUp) {
-      const cacheable = toCacheableSettle(result);
-      if (cacheable) {
-        await setCachedSettleResponse(idempotencyKey, cacheable);
-      }
-    }
-
-    // Step 5 — map Result<SettleResult> → HTTP
-    if (!result.ok) {
-      // L3 — warn
-      app.log.warn(
-        {
-          request_id: requestId,
-          error_code: result.error.code,
-          http_status: result.error.http,
-          duration_ms: Date.now() - startMs,
-        },
-        'settle failed',
-      );
-      // WFAC-32 H2 — ledger entry for adapter-returned x402 error (4xx/5xx).
-      // CD-14: await; no .catch() / void. CD-3: via core/ledger only.
-      await persistLedgerEntry(
-        buildLedgerEntry({
-          idempotencyKey,
-          durationMs: Date.now() - startMs,
-          method: 'eip3009',
-          network: parsed.accepted.network,
-          parsed,
-          result: {
-            ok: false,
-            error: {
-              code: result.error.code,
-              message: result.error.message,
-              http: result.error.http,
-            },
-          },
-        }),
-        app.log,
-      );
-      // WFAC-33 (CD-11): propagate adapter-returned x402 error code to audit row.
-      request.auditMeta = { ...request.auditMeta, errorCode: result.error.code };
-      return reply.code(result.error.http).send({ error: result.error } satisfies ErrorBody);
-    }
-
-    // WFAC-32 H1 — ledger entry for on-chain success. After the cache write,
-    // before the info log + reply.send. CD-14: await; no .catch() / void.
-    // Cache-hit path is handled by `sendCachedSettle` which intentionally
-    // does NOT persist (first request already did; would be a duplicate).
-    await persistLedgerEntry(
-      buildLedgerEntry({
-        idempotencyKey,
-        durationMs: Date.now() - startMs,
-        method: 'eip3009',
-        network: parsed.accepted.network,
-        parsed,
-        result: {
-          ok: true,
-          settled: result.settled,
-          transactionHash: result.transactionHash,
-          blockNumber: result.blockNumber,
-          amount: result.amount,
-          from: result.from,
-          to: result.to,
-          asset: result.asset,
-        },
-      }),
-      app.log,
-    );
-
-    // Success — L1 info with tx_hash (CD-12 nuevo; tx_hash is public on-chain).
-    app.log.info(
-      {
-        request_id: requestId,
-        network: parsed.accepted.network,
-        method: 'eip3009',
-        duration_ms: Date.now() - startMs,
-        tx_hash: result.transactionHash,
       },
-      'settle ok',
-    );
+    },
+    async (request, reply) => {
+      const startMs = Date.now();
+      const requestId = request.id;
 
-    // CD-2 adaptado: spec-literal 200 body — 7 fields, EXPLICIT object build
-    // (NO rest-spread destructure — WFAC-20 auto-blindaje W1 lesson).
-    return reply.code(200).send({
-      settled: result.settled,
-      transactionHash: result.transactionHash,
-      blockNumber: result.blockNumber,
-      amount: result.amount,
-      from: result.from,
-      to: result.to,
-      asset: result.asset,
-    });
-  });
+      // Step 1 — Zod validation
+      const parseResult = SettleRequestSchema.safeParse(request.body);
+      if (!parseResult.success) {
+        const issue = parseResult.error.issues[0];
+        const path = issue?.path.length ? issue.path.join('.') : 'body';
+        const rawMsg = issue?.message ?? 'invalid';
+        const message = `${path}: ${rawMsg}`.slice(0, ZOD_MESSAGE_MAX_LEN);
+        const body: ErrorBody = {
+          error: { code: 'INVALID_PAYLOAD', message, http: 400 },
+        };
+        app.log.warn(
+          {
+            request_id: requestId,
+            error_code: 'INVALID_PAYLOAD',
+            http_status: 400,
+            duration_ms: Date.now() - startMs,
+          },
+          'settle failed',
+        );
+        // WFAC-33 (CD-11): populate auditMeta.errorCode before reply.send.
+        request.auditMeta = { ...request.auditMeta, errorCode: 'INVALID_PAYLOAD' };
+        return reply.code(400).send(body);
+      }
+      const parsed: SettleRequest = parseResult.data;
+
+      // Step 2 — idempotency lookup
+      const idempotencyKey = buildSettleIdempotencyKey(parsed);
+      // WFAC-33 (CD-11, AC-12): propagate idempotencyKey to audit row. Set BEFORE
+      // the cache-lookup branch so cache-hit replays also get linked to the
+      // original settlement in facilitator_audit_log.
+      request.auditMeta = { ...request.auditMeta, idempotencyKey };
+      const redisUp = isRedisAvailable();
+      if (redisUp) {
+        const cached = await getCachedSettleResponse(idempotencyKey);
+        if (cached) {
+          return sendCachedSettle(reply, cached, {
+            requestId,
+            startMs,
+            network: parsed.accepted.network,
+            app,
+          });
+        }
+      } else {
+        // AC-10 graceful degradation — L2 warn
+        app.log.warn({ request_id: requestId }, 'idempotency cache miss — Redis unavailable');
+      }
+
+      // Step 3 — dispatch to core
+      let result;
+      try {
+        result = await settleCore(parsed);
+      } catch (err: unknown) {
+        // L4 — adapter threw. Defense-in-depth (CD-4 + SDD §DT-8).
+        app.log.error(
+          {
+            request_id: requestId,
+            error_code: 'TRANSACTION_FAILED',
+            http_status: 500,
+            err_type: (err as Error)?.name ?? 'UnknownError',
+            duration_ms: Date.now() - startMs,
+          },
+          'settle adapter threw',
+        );
+        // WFAC-32 H3 — ledger entry for adapter-throw. Synthetic failure result
+        // with TRANSACTION_FAILED / 500. CD-14: await, no .catch() / void.
+        await persistLedgerEntry(
+          buildLedgerEntry({
+            idempotencyKey,
+            durationMs: Date.now() - startMs,
+            method: 'eip3009',
+            network: parsed.accepted.network,
+            parsed,
+            result: {
+              ok: false,
+              error: {
+                code: 'TRANSACTION_FAILED',
+                message: 'Internal adapter error',
+                http: 500,
+              },
+            },
+          }),
+          app.log,
+        );
+        const body: ErrorBody = {
+          error: {
+            code: 'TRANSACTION_FAILED',
+            message: 'Internal adapter error',
+            http: 500,
+          },
+        };
+        // WFAC-33 (CD-11): populate auditMeta.errorCode before reply.send.
+        request.auditMeta = { ...request.auditMeta, errorCode: 'TRANSACTION_FAILED' };
+        return reply.code(500).send(body);
+      }
+
+      // Step 4 — cache (CD-12 filters 5xx inside toCacheableSettle)
+      if (redisUp) {
+        const cacheable = toCacheableSettle(result);
+        if (cacheable) {
+          await setCachedSettleResponse(idempotencyKey, cacheable);
+        }
+      }
+
+      // Step 5 — map Result<SettleResult> → HTTP
+      if (!result.ok) {
+        // L3 — warn
+        app.log.warn(
+          {
+            request_id: requestId,
+            error_code: result.error.code,
+            http_status: result.error.http,
+            duration_ms: Date.now() - startMs,
+          },
+          'settle failed',
+        );
+        // WFAC-32 H2 — ledger entry for adapter-returned x402 error (4xx/5xx).
+        // CD-14: await; no .catch() / void. CD-3: via core/ledger only.
+        await persistLedgerEntry(
+          buildLedgerEntry({
+            idempotencyKey,
+            durationMs: Date.now() - startMs,
+            method: 'eip3009',
+            network: parsed.accepted.network,
+            parsed,
+            result: {
+              ok: false,
+              error: {
+                code: result.error.code,
+                message: result.error.message,
+                http: result.error.http,
+              },
+            },
+          }),
+          app.log,
+        );
+        // WFAC-33 (CD-11): propagate adapter-returned x402 error code to audit row.
+        request.auditMeta = { ...request.auditMeta, errorCode: result.error.code };
+        return reply.code(result.error.http).send({ error: result.error } satisfies ErrorBody);
+      }
+
+      // WFAC-32 H1 — ledger entry for on-chain success. After the cache write,
+      // before the info log + reply.send. CD-14: await; no .catch() / void.
+      // Cache-hit path is handled by `sendCachedSettle` which intentionally
+      // does NOT persist (first request already did; would be a duplicate).
+      await persistLedgerEntry(
+        buildLedgerEntry({
+          idempotencyKey,
+          durationMs: Date.now() - startMs,
+          method: 'eip3009',
+          network: parsed.accepted.network,
+          parsed,
+          result: {
+            ok: true,
+            settled: result.settled,
+            transactionHash: result.transactionHash,
+            blockNumber: result.blockNumber,
+            amount: result.amount,
+            from: result.from,
+            to: result.to,
+            asset: result.asset,
+          },
+        }),
+        app.log,
+      );
+
+      // Success — L1 info with tx_hash (CD-12 nuevo; tx_hash is public on-chain).
+      app.log.info(
+        {
+          request_id: requestId,
+          network: parsed.accepted.network,
+          method: 'eip3009',
+          duration_ms: Date.now() - startMs,
+          tx_hash: result.transactionHash,
+        },
+        'settle ok',
+      );
+
+      // CD-2 adaptado: spec-literal 200 body — 7 fields, EXPLICIT object build
+      // (NO rest-spread destructure — WFAC-20 auto-blindaje W1 lesson).
+      return reply.code(200).send({
+        settled: result.settled,
+        transactionHash: result.transactionHash,
+        blockNumber: result.blockNumber,
+        amount: result.amount,
+        from: result.from,
+        to: result.to,
+        asset: result.asset,
+      });
+    },
+  );
 };
 
 // ─── helpers (not exported) ─────────────────────────────────────────────────

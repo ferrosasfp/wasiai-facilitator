@@ -158,4 +158,80 @@ describe('parseEnv', () => {
     expect(result.SUPABASE_SERVICE_KEY).toBeUndefined();
     expect(exitSpy).not.toHaveBeenCalled();
   });
+
+  // ─── WFAC-40 — RATE_LIMIT_* vars (T-ENV-RL-1..7) ─────────────────────────
+  it('T-ENV-RL-1 (AC-12 defaults): all RATE_LIMIT_* vars take documented defaults', () => {
+    const result = parseEnv({ NODE_ENV: 'test' });
+    expect(result.RATE_LIMIT_ENABLED).toBe(true);
+    expect(result.RATE_LIMIT_WINDOW_SEC).toBe(60);
+    expect(result.RATE_LIMIT_VERIFY_MAX).toBe(60);
+    expect(result.RATE_LIMIT_SETTLE_MAX).toBe(30);
+    expect(result.RATE_LIMIT_SUPPORTED_MAX).toBe(120);
+  });
+
+  it('T-ENV-RL-2 (AC-6 disabled): RATE_LIMIT_ENABLED="false" → boolean false', () => {
+    const result = parseEnv({ NODE_ENV: 'test', RATE_LIMIT_ENABLED: 'false' });
+    expect(result.RATE_LIMIT_ENABLED).toBe(false);
+    // Sanity: literal string "false" became the boolean `false`, not string.
+    expect(typeof result.RATE_LIMIT_ENABLED).toBe('boolean');
+  });
+
+  it('T-ENV-RL-3 (CD-12 explicit true): RATE_LIMIT_ENABLED="true" → boolean true', () => {
+    const result = parseEnv({ NODE_ENV: 'test', RATE_LIMIT_ENABLED: 'true' });
+    expect(result.RATE_LIMIT_ENABLED).toBe(true);
+    expect(typeof result.RATE_LIMIT_ENABLED).toBe('boolean');
+  });
+
+  it('T-ENV-RL-4 (AC-12 overrides): numeric RATE_LIMIT_* vars parse from strings', () => {
+    const result = parseEnv({
+      NODE_ENV: 'test',
+      RATE_LIMIT_WINDOW_SEC: '120',
+      RATE_LIMIT_VERIFY_MAX: '100',
+      RATE_LIMIT_SETTLE_MAX: '50',
+      RATE_LIMIT_SUPPORTED_MAX: '200',
+    });
+    expect(result.RATE_LIMIT_WINDOW_SEC).toBe(120);
+    expect(result.RATE_LIMIT_VERIFY_MAX).toBe(100);
+    expect(result.RATE_LIMIT_SETTLE_MAX).toBe(50);
+    expect(result.RATE_LIMIT_SUPPORTED_MAX).toBe(200);
+  });
+
+  it('T-ENV-RL-5 (AC-12 invalid negative WINDOW_SEC): exits with stderr mention', () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((_code?: number) => {
+      throw new Error('__exit__');
+    }) as never);
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    expect(() => parseEnv({ NODE_ENV: 'test', RATE_LIMIT_WINDOW_SEC: '-1' })).toThrow('__exit__');
+
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const allWrites = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(allWrites).toContain('RATE_LIMIT_WINDOW_SEC');
+  });
+
+  it('T-ENV-RL-6 (AC-12 invalid zero VERIFY_MAX): exits with code 1', () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((_code?: number) => {
+      throw new Error('__exit__');
+    }) as never);
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    expect(() => parseEnv({ NODE_ENV: 'test', RATE_LIMIT_VERIFY_MAX: '0' })).toThrow('__exit__');
+
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const allWrites = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(allWrites).toContain('RATE_LIMIT_VERIFY_MAX');
+  });
+
+  it('T-ENV-RL-7 (CD-12 invalid ENABLED): rejects "yes"/arbitrary strings (defense vs z.coerce.boolean footgun)', () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((_code?: number) => {
+      throw new Error('__exit__');
+    }) as never);
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    expect(() => parseEnv({ NODE_ENV: 'test', RATE_LIMIT_ENABLED: 'yes' })).toThrow('__exit__');
+
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const allWrites = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(allWrites).toContain('RATE_LIMIT_ENABLED');
+  });
 });

@@ -27,29 +27,42 @@ import type { FastifyPluginAsync } from 'fastify';
 import { getSupportedResponse } from '../core/supported.js';
 
 export const supportedRoute: FastifyPluginAsync = async (app) => {
-  app.get('/supported', async (request, reply) => {
-    const startMs = Date.now();
-    const requestId = request.id;
-
-    const response = getSupportedResponse();
-
-    // L1 — success info log. Authorized fields only: request_id, chain_count,
-    // duration_ms (CD-3). No request.ip, no request.headers, no user-agent.
-    app.log.info(
-      {
-        request_id: requestId,
-        chain_count: response.chains.length,
-        duration_ms: Date.now() - startMs,
+  // WFAC-40 — per-route rate-limit config (DT-6 + DT-13 SDD).
+  const env = app.env;
+  app.get(
+    '/supported',
+    {
+      config: {
+        rateLimit: {
+          max: env.RATE_LIMIT_SUPPORTED_MAX,
+          timeWindow: env.RATE_LIMIT_WINDOW_SEC * 1000,
+        },
       },
-      'supported ok',
-    );
+    },
+    async (request, reply) => {
+      const startMs = Date.now();
+      const requestId = request.id;
 
-    // CD-2: explicit field-by-field body build. Even though `response` already
-    // has the right shape, a future refactor of SupportedResponse could
-    // accidentally leak extra fields if we did `reply.send(response)` directly.
-    return reply.code(200).send({
-      chains: response.chains,
-      methods: response.methods,
-    });
-  });
+      const response = getSupportedResponse();
+
+      // L1 — success info log. Authorized fields only: request_id, chain_count,
+      // duration_ms (CD-3). No request.ip, no request.headers, no user-agent.
+      app.log.info(
+        {
+          request_id: requestId,
+          chain_count: response.chains.length,
+          duration_ms: Date.now() - startMs,
+        },
+        'supported ok',
+      );
+
+      // CD-2: explicit field-by-field body build. Even though `response` already
+      // has the right shape, a future refactor of SupportedResponse could
+      // accidentally leak extra fields if we did `reply.send(response)` directly.
+      return reply.code(200).send({
+        chains: response.chains,
+        methods: response.methods,
+      });
+    },
+  );
 };

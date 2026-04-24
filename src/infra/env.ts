@@ -34,6 +34,19 @@ export const EnvSchema = z
       .refine((u) => /^https?:\/\//i.test(u), { message: 'must be http:// or https://' })
       .optional(),
     SUPABASE_SERVICE_KEY: z.string().min(1).optional(),
+
+    // WFAC-40 — rate limiting (SDD §4.1). NO magic numbers in routes (CD-7).
+    // RATE_LIMIT_ENABLED: accepts literal 'true'/'false' strings from env;
+    // transforms to boolean. `z.coerce.boolean()` is PROHIBITED (CD-12) —
+    // it would interpret 'false' as truthy (any non-empty string).
+    RATE_LIMIT_ENABLED: z
+      .enum(['true', 'false'])
+      .default('true')
+      .transform((v) => v === 'true'),
+    RATE_LIMIT_WINDOW_SEC: z.coerce.number().int().min(1).default(60),
+    RATE_LIMIT_VERIFY_MAX: z.coerce.number().int().min(1).default(60),
+    RATE_LIMIT_SETTLE_MAX: z.coerce.number().int().min(1).default(30),
+    RATE_LIMIT_SUPPORTED_MAX: z.coerce.number().int().min(1).default(120),
   })
   .superRefine((data, ctx) => {
     if (!data.REDIS_URL && data.NODE_ENV !== 'test') {
