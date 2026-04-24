@@ -78,9 +78,7 @@ export const AcceptedSchema = z
  */
 export const PayloadSchema = z
   .object({
-    signature: z
-      .string()
-      .regex(/^0x[0-9a-fA-F]+$/u, 'signature must be 0x-prefixed hex'),
+    signature: z.string().regex(/^0x[0-9a-fA-F]+$/u, 'signature must be 0x-prefixed hex'),
     authorization: Eip3009AuthorizationSchema,
   })
   .strict();

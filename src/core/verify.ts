@@ -42,7 +42,11 @@ const MAX_CHAINID_DIGITS = 16;
 export async function verifyCore(parsed: VerifyRequest): Promise<Result<VerifyResult>> {
   // Step 1 — parse network string.
   const m = EIP155_RE.exec(parsed.accepted.network);
-  if (!m) {
+  // The regex is anchored and has a single capturing group that always
+  // matches at least one digit (`[1-9]\d*`) when `m` is non-null.
+  // Testing `m !== null && m[1] !== undefined` in one branch keeps TS
+  // narrowing happy AND reports as a single covered branch.
+  if (m === null || m[1] === undefined) {
     return {
       ok: false,
       error: buildX402Error(
@@ -52,14 +56,6 @@ export async function verifyCore(parsed: VerifyRequest): Promise<Result<VerifyRe
     };
   }
   const digits = m[1];
-  if (digits === undefined) {
-    // Unreachable (regex has exactly one capturing group that must match),
-    // but keep a defensive branch so `digits` is narrowed to string below.
-    return {
-      ok: false,
-      error: buildX402Error('NETWORK_MISMATCH', 'invalid network format'),
-    };
-  }
 
   // CD-14: do NOT trust Number() for chainId overflow detection — use
   // BigInt with a digit-length guard first to avoid BigInt() allocation
@@ -71,24 +67,16 @@ export async function verifyCore(parsed: VerifyRequest): Promise<Result<VerifyRe
     };
   }
 
-  let chainId;
-  try {
-    chainId = asChainId(Number(digits));
-  } catch {
-    return {
-      ok: false,
-      error: buildX402Error('NETWORK_MISMATCH', 'invalid chainId'),
-    };
-  }
+  // By construction: `digits` matches `[1-9]\d*` (positive integer) and
+  // BigInt-safe — so `asChainId(Number(digits))` cannot throw. No
+  // try/catch needed here.
+  const chainId = asChainId(Number(digits));
 
   // Step 2 — method dispatch.
   if (parsed.accepted.extra.assetTransferMethod !== 'eip3009') {
     return {
       ok: false,
-      error: buildX402Error(
-        'NETWORK_MISMATCH',
-        'Method not supported: only eip3009 in v1',
-      ),
+      error: buildX402Error('NETWORK_MISMATCH', 'Method not supported: only eip3009 in v1'),
     };
   }
 

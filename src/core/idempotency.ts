@@ -151,9 +151,7 @@ export function isRedisAvailable(): boolean {
  *   - object  → cache hit → caller replays without invoking the adapter
  *               (AC-9).
  */
-export async function getCachedVerifyResponse(
-  key: string,
-): Promise<CachedVerifyResponse | null> {
+export async function getCachedVerifyResponse(key: string): Promise<CachedVerifyResponse | null> {
   const client = getRedisClient();
   if (!client) return null;
   try {

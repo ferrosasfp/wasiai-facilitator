@@ -102,10 +102,7 @@ export const verifyRoute: FastifyPluginAsync = async (app) => {
       }
     } else {
       // AC-10 graceful degradation log — L2.
-      app.log.warn(
-        { request_id: requestId },
-        'idempotency cache miss — Redis unavailable',
-      );
+      app.log.warn({ request_id: requestId }, 'idempotency cache miss — Redis unavailable');
     }
 
     // Step 3 — dispatch to core.
