@@ -529,18 +529,54 @@ describe('avalanche.ts adapter', () => {
     }
   });
 
-  it('verify returns NETWORK_MISMATCH with pending WFAC-52 message', async () => {
+  it('verify rejects mismatched network (WFAC-52: real implementation)', async () => {
     const mod = await import('../../chains/avalanche.js');
-    const result = await mod.avalancheFujiAdapter.verify({} as never);
+    const result = await mod.avalancheFujiAdapter.verify({
+      accepted: {
+        network: 'eip155:1',
+        asset: '0x5425890298aed601595a70AB815c96711a31Bc65',
+        amount: '1000000',
+        payTo: '0x0000000000000000000000000000000000000001',
+      },
+      payload: {
+        signature: '0x' + '00'.repeat(65),
+        authorization: {
+          from: '0x0000000000000000000000000000000000000002',
+          to: '0x0000000000000000000000000000000000000001',
+          value: '1000000',
+          validAfter: '0',
+          validBefore: String(Math.floor(Date.now() / 1000) + 3600),
+          nonce: ('0x' + '00'.repeat(32)) as `0x${string}`,
+        },
+      },
+    } as never);
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error.message).toMatch(/WFAC-52/);
+    if (!result.ok) expect(result.error.code).toBe('NETWORK_MISMATCH');
   });
 
-  it('settle returns NETWORK_MISMATCH with pending WFAC-52 message', async () => {
+  it('settle rejects expired authorization (WFAC-52: real implementation)', async () => {
     const mod = await import('../../chains/avalanche.js');
-    const result = await mod.avalancheFujiAdapter.settle({} as never);
+    const result = await mod.avalancheFujiAdapter.settle({
+      accepted: {
+        network: 'eip155:43113',
+        asset: '0x5425890298aed601595a70AB815c96711a31Bc65',
+        amount: '1000000',
+        payTo: '0x0000000000000000000000000000000000000001',
+      },
+      payload: {
+        signature: '0x' + '00'.repeat(65),
+        authorization: {
+          from: '0x0000000000000000000000000000000000000002',
+          to: '0x0000000000000000000000000000000000000001',
+          value: '1000000',
+          validAfter: '0',
+          validBefore: '1', // expired
+          nonce: ('0x' + '00'.repeat(32)) as `0x${string}`,
+        },
+      },
+    } as never);
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error.message).toMatch(/WFAC-52/);
+    if (!result.ok) expect(result.error.code).toBe('EXPIRED_AUTHORIZATION');
   });
 });
 

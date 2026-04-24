@@ -4,17 +4,27 @@
  * Exposes:
  *   - avalancheFujiAdapter: ChainAdapter — chainId 43113, env AVALANCHE_FUJI_RPC_URL.
  *
- * verify() and settle() are STUBS — return NETWORK_MISMATCH pending WFAC-52.
+ * WFAC-52: `_verifyRaw` / `_settleRaw` implement the full EIP-3009 flow against
+ * Fuji RPC (real signature recovery + simulate/write/waitReceipt) using the
+ * canonical Circle USDC at 0x5425890298…Bc65. The outer `verify()` / `settle()`
+ * wrappers preserve the WFAC-41 circuit breaker accounting (BusinessFailureError
+ * pattern, AR-BLQ-ALTO-1).
  *
  * Boundaries:
- *   - imports ./types.js + viem + viem/chains (for canonical avalancheFuji def).
- *   - NO imports from src/core/* (runtime), src/methods/*, src/routes/*, src/infra/*.
- *
- * Future work: WFAC-52 implements real verify/settle for Fuji USDC.
+ *   - imports ./types.js, ./abi/*, ./circuit-breaker.js, ../infra/wallet.js, viem, viem/chains.
+ *   - type-only import from ../core/types.js (for asChainId branded factory).
+ *   - NO runtime imports from src/core/*, src/methods/*, src/routes/*.
  */
 
-import { createPublicClient, createWalletClient, http } from 'viem';
-import type { PublicClient, WalletClient } from 'viem';
+import {
+  createPublicClient,
+  createWalletClient,
+  http,
+  isAddressEqual,
+  recoverTypedDataAddress,
+  getAddress,
+} from 'viem';
+import type { PublicClient, WalletClient, Address } from 'viem';
 import { avalancheFuji } from 'viem/chains';
 import type { Logger } from 'pino';
 import {
@@ -37,6 +47,24 @@ import {
   readCbBool,
   type BreakerStateName,
 } from './circuit-breaker.js';
+import {
+  EIP3009_TYPES,
+  EIP3009_PRIMARY_TYPE,
+  FIAT_TOKEN_ABI,
+  RECEIPT_TIMEOUT_MS,
+} from './abi/fiat-token.js';
+import { normalizeSignature } from './abi/signature.js';
+import { getOperatorAccount } from '../infra/wallet.js';
+
+/**
+ * Extract a safe, bounded-length string from an unknown error. Defensive
+ * against viem errors that may embed request data in their `.message`.
+ * Mirrors `kite.ts:63` (sanitize helper).
+ */
+function sanitize(e: unknown): string {
+  const raw = e instanceof Error ? e.message : String(e);
+  return raw.slice(0, 200);
+}
 
 const FUJI_CHAIN_ID = 43113;
 
@@ -106,9 +134,9 @@ class AvalancheFujiAdapter implements ChainAdapter {
 
   getWalletClient(): WalletClient {
     if (!this._walletClient) {
-      // TODO: WFAC-wallet-singleton — wallet real (OPERATOR_PRIVATE_KEY) se inyecta
-      // cuando exista src/infra/wallet.ts. Por ahora este client no puede firmar (account: undefined).
+      // WFAC-52 — inject operator account for signing (mirror kite.ts:159).
       this._walletClient = createWalletClient({
+        account: getOperatorAccount(),
         chain: avalancheFuji,
         transport: http(this._rpcUrl),
       }) as WalletClient;
@@ -162,17 +190,143 @@ class AvalancheFujiAdapter implements ChainAdapter {
     }
   }
 
-  private async _verifyRaw(_params: VerifyParams): Promise<AdapterResult<VerifyResult>> {
-    // Stub body pre-WFAC-52. AC-13 accounting is handled by the outer
-    // verify() which throws BusinessFailureError for SIMULATION_FAILED /
-    // TRANSACTION_FAILED results (AR-BLQ-ALTO-1 fix).
+  // WFAC-52 — real EIP-712 recovery + chain-layer checks. Mirror of
+  // kite.ts `_verifyRaw` (AC-1..AC-6). Differences vs Kite: token is
+  // canonical Circle USDC on Fuji (6 decimals, eip712Version='2',
+  // eip712Name='USD Coin'). Outer verify() wraps with circuit breaker
+  // (BusinessFailureError pattern, AR-BLQ-ALTO-1).
+  private async _verifyRaw(params: VerifyParams): Promise<AdapterResult<VerifyResult>> {
+    const token = this.metadata.tokens[0];
+    if (!token) {
+      return {
+        ok: false,
+        error: {
+          code: 'NETWORK_MISMATCH',
+          message: 'Chain has no registered token',
+          http: 400,
+        },
+      };
+    }
+
+    // 1. Network match.
+    if (params.accepted.network !== this.metadata.networkId) {
+      return {
+        ok: false,
+        error: {
+          code: 'NETWORK_MISMATCH',
+          message: 'Network does not match chain',
+          http: 400,
+        },
+      };
+    }
+
+    // 2. Asset match.
+    if (!isAddressEqual(params.accepted.asset as Address, token.address)) {
+      return {
+        ok: false,
+        error: {
+          code: 'NETWORK_MISMATCH',
+          message: 'Asset not found in chain token registry',
+          http: 400,
+        },
+      };
+    }
+
+    // 3. Amount validation.
+    const authorization = params.payload.authorization;
+    const acceptedAmount = BigInt(params.accepted.amount);
+    if (BigInt(authorization.value) < acceptedAmount) {
+      return {
+        ok: false,
+        error: {
+          code: 'INVALID_AMOUNT',
+          message: 'Authorized value is below accepted amount',
+          http: 400,
+        },
+      };
+    }
+
+    // 4. Timestamp window.
+    const nowSec = BigInt(Math.floor(Date.now() / 1000));
+    if (BigInt(authorization.validBefore) <= nowSec) {
+      return {
+        ok: false,
+        error: {
+          code: 'EXPIRED_AUTHORIZATION',
+          message: 'Authorization expired',
+          http: 400,
+        },
+      };
+    }
+
+    // 5. Signature normalize.
+    const sig = normalizeSignature(params.payload.signature);
+    if (!sig.ok) {
+      return { ok: false, error: sig.error };
+    }
+    const canonicalVHex = sig.v === 27n ? '1b' : '1c';
+    const canonicalSignature =
+      `0x${sig.r.slice(2)}${sig.s.slice(2)}${canonicalVHex}` as `0x${string}`;
+
+    // 6. Build EIP-712 domain inline. For Circle USDC on Fuji:
+    //    name='USD Coin', version='2', chainId=43113, verifyingContract=USDC_FUJI.
+    const domain = {
+      name: token.eip712Name ?? token.name,
+      version: token.eip712Version ?? '1',
+      chainId: this.metadata.chainId as number,
+      verifyingContract: token.address,
+    };
+
+    // 7. Recover signer from EIP-712 typed data.
+    let recovered: Address;
+    try {
+      recovered = await recoverTypedDataAddress({
+        domain,
+        types: EIP3009_TYPES,
+        primaryType: EIP3009_PRIMARY_TYPE,
+        message: {
+          from: authorization.from as Address,
+          to: authorization.to as Address,
+          value: BigInt(authorization.value),
+          validAfter: BigInt(authorization.validAfter),
+          validBefore: BigInt(authorization.validBefore),
+          nonce: authorization.nonce as `0x${string}`,
+        },
+        signature: canonicalSignature,
+      });
+    } catch {
+      return {
+        ok: false,
+        error: {
+          code: 'INVALID_SIGNATURE',
+          message: 'Failed to recover typed data address',
+          http: 401,
+        },
+      };
+    }
+
+    // 8. Recovered must equal claimed sender.
+    if (!isAddressEqual(recovered, authorization.from as Address)) {
+      return {
+        ok: false,
+        error: {
+          code: 'INVALID_SIGNATURE',
+          message: 'Recovered address does not match sender',
+          http: 401,
+        },
+      };
+    }
+
+    // 9. Success.
     return {
-      ok: false,
-      error: {
-        code: 'NETWORK_MISMATCH',
-        message: 'Verify not implemented yet (WFAC-52)',
-        http: 400,
-      },
+      ok: true,
+      verified: true,
+      client: getAddress(recovered),
+      amount: params.accepted.amount,
+      asset: token.address,
+      network: params.accepted.network,
+      payTo: getAddress(params.accepted.payTo),
+      expiresAt: Number(authorization.validBefore),
     };
   }
 
@@ -208,14 +362,157 @@ class AvalancheFujiAdapter implements ChainAdapter {
     }
   }
 
-  private async _settleRaw(_params: SettleParams): Promise<AdapterResult<SettleResult>> {
+  // WFAC-52 — real EIP-3009 transferWithAuthorization flow. Mirror of
+  // kite.ts `_settleRaw` (AC-7..AC-13). Outer settle() wraps with circuit
+  // breaker (BusinessFailureError pattern, CD-NEW-SDD-3).
+  private async _settleRaw(params: SettleParams): Promise<AdapterResult<SettleResult>> {
+    const token = this.metadata.tokens[0];
+    if (!token) {
+      return {
+        ok: false,
+        error: {
+          code: 'NETWORK_MISMATCH',
+          message: 'Chain has no registered token',
+          http: 400,
+        },
+      };
+    }
+
+    // 1. Defense-in-depth re-verify (DT-H). Mirror first 4 steps of _verifyRaw.
+    const authorization = params.payload.authorization;
+
+    if (params.accepted.network !== this.metadata.networkId) {
+      return {
+        ok: false,
+        error: {
+          code: 'NETWORK_MISMATCH',
+          message: 'Network does not match chain',
+          http: 400,
+        },
+      };
+    }
+    if (!isAddressEqual(params.accepted.asset as Address, token.address)) {
+      return {
+        ok: false,
+        error: {
+          code: 'NETWORK_MISMATCH',
+          message: 'Asset not found in chain token registry',
+          http: 400,
+        },
+      };
+    }
+    const acceptedAmount = BigInt(params.accepted.amount);
+    if (BigInt(authorization.value) < acceptedAmount) {
+      return {
+        ok: false,
+        error: {
+          code: 'INVALID_AMOUNT',
+          message: 'Authorized value is below accepted amount',
+          http: 400,
+        },
+      };
+    }
+    const nowSec = BigInt(Math.floor(Date.now() / 1000));
+    if (BigInt(authorization.validBefore) <= nowSec) {
+      return {
+        ok: false,
+        error: {
+          code: 'EXPIRED_AUTHORIZATION',
+          message: 'Authorization expired',
+          http: 400,
+        },
+      };
+    }
+
+    // 2. Normalize signature — gates malleable/zero scalars before spending gas.
+    const sig = normalizeSignature(params.payload.signature);
+    if (!sig.ok) {
+      return { ok: false, error: sig.error };
+    }
+    const { r, s } = sig;
+    const vNum = Number(sig.v); // 27 or 28
+
+    // 3. Simulate. MUST run BEFORE writeContract.
+    const publicClient = this.getPublicClient();
+    const walletClient = this.getWalletClient();
+    let simRequest: unknown;
+    try {
+      const sim = await publicClient.simulateContract({
+        account: walletClient.account,
+        address: token.address,
+        abi: FIAT_TOKEN_ABI,
+        functionName: 'transferWithAuthorization',
+        args: [
+          authorization.from as Address,
+          authorization.to as Address,
+          BigInt(authorization.value),
+          BigInt(authorization.validAfter),
+          BigInt(authorization.validBefore),
+          authorization.nonce as `0x${string}`,
+          vNum,
+          r,
+          s,
+        ],
+      });
+      simRequest = sim.request;
+    } catch (e) {
+      return {
+        ok: false,
+        error: { code: 'SIMULATION_FAILED', message: sanitize(e), http: 500 },
+      };
+    }
+
+    // 4. Write. Use sim.request opaque — do NOT reconstruct.
+    let hash: `0x${string}`;
+    try {
+      hash = await walletClient.writeContract(simRequest as never);
+    } catch (e) {
+      return {
+        ok: false,
+        error: { code: 'TRANSACTION_FAILED', message: sanitize(e), http: 500 },
+      };
+    }
+
+    // 5. Wait receipt.
+    let receipt;
+    try {
+      receipt = await publicClient.waitForTransactionReceipt({
+        hash,
+        timeout: RECEIPT_TIMEOUT_MS,
+      });
+    } catch (e) {
+      const msg =
+        e instanceof Error && e.name === 'WaitForTransactionReceiptTimeoutError'
+          ? 'receipt timeout'
+          : sanitize(e);
+      return {
+        ok: false,
+        error: { code: 'TRANSACTION_FAILED', message: msg, http: 500 },
+      };
+    }
+
+    // 6. Status.
+    if (receipt.status === 'reverted') {
+      return {
+        ok: false,
+        error: {
+          code: 'TRANSACTION_FAILED',
+          message: 'transaction reverted on-chain',
+          http: 500,
+        },
+      };
+    }
+
+    // 7. Success.
     return {
-      ok: false,
-      error: {
-        code: 'NETWORK_MISMATCH',
-        message: 'Settle not implemented yet (WFAC-52)',
-        http: 400,
-      },
+      ok: true,
+      settled: true,
+      transactionHash: hash,
+      blockNumber: Number(receipt.blockNumber),
+      amount: params.accepted.amount,
+      from: authorization.from as Address,
+      to: authorization.to as Address,
+      asset: token.address,
     };
   }
 }
