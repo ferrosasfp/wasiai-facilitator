@@ -33,13 +33,10 @@ import type {
   SettleParams,
   SettleResult,
 } from '../../chains/types.js';
-import type { ChainId, X402ErrorCode } from '../../core/types.js';
+import type { ChainId } from '../../core/types.js';
+import { buildX402Error } from '../../core/errors.js';
 import { FIAT_TOKEN_ABI, RECEIPT_TIMEOUT_MS } from './abi.js';
 import { verifyEip3009 } from './verify.js';
-
-function err(code: X402ErrorCode, message: string, http: number): AdapterResult<SettleResult> {
-  return { ok: false, error: { code, message, http } };
-}
 
 /** Extract a safe, bounded-length string from an unknown error. */
 function sanitize(e: unknown): string {
@@ -71,14 +68,16 @@ export async function settleEip3009(
   try {
     parsed = parseSignature(params.payload.signature);
   } catch (e) {
-    return err('INVALID_SIGNATURE', sanitize(e), 401);
+    return { ok: false, error: buildX402Error('INVALID_SIGNATURE', sanitize(e)) };
   }
   if (!('v' in parsed) || parsed.v === undefined) {
-    return err(
-      'INVALID_SIGNATURE',
-      'EIP-2098 compact signatures not supported in V1 (WFAC-13)',
-      401,
-    );
+    return {
+      ok: false,
+      error: buildX402Error(
+        'INVALID_SIGNATURE',
+        'EIP-2098 compact signatures not supported in V1 (WFAC-13)',
+      ),
+    };
   }
   const { r, s } = parsed;
   const vNum = Number(parsed.v); // v ∈ {27, 28} — safe Number conversion
@@ -110,7 +109,7 @@ export async function settleEip3009(
       ],
     });
   } catch (e) {
-    return err('SIMULATION_FAILED', sanitize(e), 500);
+    return { ok: false, error: buildX402Error('SIMULATION_FAILED', sanitize(e)) };
   }
 
   // 4. Write (AC-3, AC-4, CD-9). Use sim.request opaque — do NOT reconstruct.
@@ -118,7 +117,7 @@ export async function settleEip3009(
   try {
     hash = await walletClient.writeContract(sim.request);
   } catch (e) {
-    return err('TRANSACTION_FAILED', sanitize(e), 500);
+    return { ok: false, error: buildX402Error('TRANSACTION_FAILED', sanitize(e)) };
   }
 
   // 5. Wait receipt (AC-5, AC-6, CD-4).
@@ -137,12 +136,15 @@ export async function settleEip3009(
       e instanceof Error && e.name === 'WaitForTransactionReceiptTimeoutError'
         ? 'receipt timeout'
         : sanitize(e);
-    return err('TRANSACTION_FAILED', msg, 500);
+    return { ok: false, error: buildX402Error('TRANSACTION_FAILED', msg) };
   }
 
   // 6. Check status (AC-7).
   if (receipt.status === 'reverted') {
-    return err('TRANSACTION_FAILED', 'transaction reverted on-chain', 500);
+    return {
+      ok: false,
+      error: buildX402Error('TRANSACTION_FAILED', 'transaction reverted on-chain'),
+    };
   }
 
   // 7. Success (AC-8). Fields from input params, NOT re-read from chain.
