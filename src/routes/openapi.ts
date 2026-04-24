@@ -47,9 +47,10 @@ const yamlPath = resolve(dirname(fileURLToPath(import.meta.url)), '../../doc/ope
  * route handler to `Record<string, unknown>` to keep the body typed without
  * pulling a runtime OpenAPI types package.
  */
-const OPENAPI_SPEC: Record<string, unknown> = yamlLoad(
-  readFileSync(yamlPath, 'utf-8'),
-) as Record<string, unknown>;
+const OPENAPI_SPEC: Record<string, unknown> = yamlLoad(readFileSync(yamlPath, 'utf-8')) as Record<
+  string,
+  unknown
+>;
 
 export const openapiRoute: FastifyPluginAsync = async (app) => {
   app.get('/openapi.json', async (_request, reply) => {
