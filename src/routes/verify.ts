@@ -75,7 +75,6 @@ export const verifyRoute: FastifyPluginAsync = async (app) => {
       };
       app.log.warn(
         {
-          msg: 'verify failed',
           request_id: requestId,
           error_code: 'INVALID_PAYLOAD',
           http_status: 400,
@@ -114,9 +113,10 @@ export const verifyRoute: FastifyPluginAsync = async (app) => {
       // foreseeable throws).
       app.log.error(
         {
-          msg: 'verify adapter threw',
           request_id: requestId,
-          err,
+          error_code: 'TRANSACTION_FAILED',
+          http_status: 500,
+          err_type: (err as Error)?.name ?? 'UnknownError',
           duration_ms: Date.now() - startMs,
         },
         'verify adapter threw',
@@ -144,7 +144,6 @@ export const verifyRoute: FastifyPluginAsync = async (app) => {
       // L3 — warn.
       app.log.warn(
         {
-          msg: 'verify failed',
           request_id: requestId,
           error_code: result.error.code,
           http_status: result.error.http,
@@ -158,7 +157,6 @@ export const verifyRoute: FastifyPluginAsync = async (app) => {
     // Success — L1 info.
     app.log.info(
       {
-        msg: 'verify ok',
         request_id: requestId,
         network: parsed.accepted.network,
         method: 'eip3009',
@@ -203,7 +201,6 @@ function sendCached(
   if (cached.ok) {
     app.log.info(
       {
-        msg: 'verify ok',
         request_id: requestId,
         network,
         method: 'eip3009',
@@ -216,7 +213,6 @@ function sendCached(
   }
   app.log.warn(
     {
-      msg: 'verify failed',
       request_id: requestId,
       error_code: cached.error.code,
       http_status: cached.error.http,

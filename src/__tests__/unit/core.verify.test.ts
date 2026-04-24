@@ -21,7 +21,7 @@
  *   - T-V12 : verifyCore does not catch adapter exceptions.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { VerifyRequestSchema, type VerifyRequest } from '../../core/schemas.js';
 import { verifyCore } from '../../core/verify.js';
 import { chainRegistry } from '../../chains/registry.js';
@@ -136,6 +136,10 @@ describe('VerifyRequestSchema (Zod x402 body)', () => {
 
 describe('verifyCore', () => {
   beforeEach(() => {
+    chainRegistry._resetForTesting();
+  });
+
+  afterEach(() => {
     chainRegistry._resetForTesting();
   });
 

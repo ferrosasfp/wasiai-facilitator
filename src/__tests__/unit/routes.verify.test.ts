@@ -664,6 +664,37 @@ describe('POST /verify', () => {
     expect(typeof errorLine?.duration_ms).toBe('number');
   });
 
+  // ─── CD-3 structural: adapter-throw log MUST NOT leak Error.message bytes ─
+
+  it('T-R20 (CD-3): adapter throw with signature hex in Error.message → log does NOT contain hex', async () => {
+    const capture = new CaptureStream();
+    const leakyHex = `0x${'de'.repeat(65)}`;
+    const adapter = makeFakeAdapter(2368, async () => {
+      throw new Error(`ecrecover failed for signature ${leakyHex}`);
+    });
+    app = await buildAppWithAdapter(adapter, { capture });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/verify',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify(VALID_BODY),
+    });
+    expect(res.statusCode).toBe(500);
+
+    const lines = capture.getLines();
+    const errorLine = lines.find((l) => l.msg === 'verify adapter threw');
+    expect(errorLine).toBeDefined();
+    // Projection fields only — no err.message, no err.stack serialization.
+    expect(errorLine?.error_code).toBe('TRANSACTION_FAILED');
+    expect(errorLine?.http_status).toBe(500);
+    expect(errorLine?.err_type).toBe('Error');
+    // CD-3: no PII / signature bytes in the log line.
+    const asJson = JSON.stringify(errorLine);
+    expect(asJson).not.toContain(leakyHex);
+    expect(asJson).not.toContain('ecrecover failed');
+  });
+
   // ─── Idempotency error-replay path (CD-12 cached non-5xx error) ────────
 
   it('T-R18: cached non-5xx error replays verbatim on repeat (idempotency error hit)', async () => {
