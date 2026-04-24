@@ -4,13 +4,19 @@
  * Pure async function. No RPC calls. No side effects. No logger.
  *
  * Validates (in order, fail-fast):
- *   1. Zod shape of payload.authorization (nonce bytes32, uint256 strings).
- *   2. Network match: accepted.network === 'eip155:<chainId>'.
- *   3. Asset match: accepted.asset isAddressEqual token.address.
- *   4. Amount: accepted.amount > 0 AND authorization.value >= accepted.amount.
- *   5. Receiver: authorization.to isAddressEqual accepted.payTo.
- *   6. Timestamp window: validAfter <= now < validBefore.
- *   7. EIP-712 recover: signature -> address; must equal authorization.from.
+ *   1a. Zod shape of payload.authorization (nonce bytes32, uint256 strings).
+ *   1b. Zod shape of params.accepted (amount/asset/payTo/network).
+ *   2.  Network match: accepted.network === 'eip155:<chainId>'.
+ *   3.  Asset match: accepted.asset isAddressEqual token.address.
+ *   4.  Amount: accepted.amount > 0 AND authorization.value >= accepted.amount.
+ *   5.  Receiver: authorization.to isAddressEqual accepted.payTo.
+ *   6.  Timestamp window: validAfter <= now < validBefore.
+ *   7.  Signature pre-validation (WFAC-13): normalize + reject malleable
+ *       (high-s), out-of-range, and zero scalars before recover; reconstruct
+ *       canonical 65-byte hex from r/s/v for viem compatibility.
+ *   8.  EIP-712 recover: canonical signature -> address.
+ *   9.  Recovered address equals authorization.from.
+ *   10. Success — build VerifyResult.
  *
  * The caller MUST ensure nonce uniqueness via the chain adapter before
  * settlement — this function does NOT check replay protection.
@@ -173,7 +179,7 @@ export async function verifyEip3009(
     };
   }
 
-  // 8. Recovered vs claimed (AC-2)
+  // 9. Recovered vs claimed (AC-2)
   if (!isAddressEqual(recovered, authorization.from as Address)) {
     return {
       ok: false,
@@ -181,7 +187,7 @@ export async function verifyEip3009(
     };
   }
 
-  // 9. Success (AC-1, AC-12).
+  // 10. Success (AC-1, AC-12).
   // BLQ-MED-1 note: VerifyResult.expiresAt is typed `number` (chains/types.ts).
   // validBefore is validated as uint256 <= 2^256-1, which CAN exceed
   // Number.MAX_SAFE_INTEGER (2^53-1). We preserve the `number` shape for
