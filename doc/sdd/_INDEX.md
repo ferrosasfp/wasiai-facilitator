@@ -14,7 +14,7 @@
 | 010 | 2026-04-24 | POST /settle route — on-chain tx + idempotency (WFAC-21) | feature | QUALITY | DONE | main (08214b1) |
 | 011 | 2026-04-24 | GET /supported — discovery endpoint (WFAC-22) | feature | FAST+AR | DONE | main (d702938) |
 | 012 | 2026-04-24 | OpenAPI 3.1 spec — contrato publico del facilitator (WFAC-23) | docs | FAST+AR | DONE | main (3c2fb88) |
-| 013 | 2026-04-23 | Settlement ledger — Supabase facilitator_settlements (WFAC-32) | infra | QUALITY | in progress | feat/013-wfac-32-settlement-ledger |
+| 013 | 2026-04-24 | Settlement ledger — Supabase facilitator_settlements (WFAC-32) | infra | QUALITY | DONE | feat/013-wfac-32-settlement-ledger |
 
 <!--
 Formato por entrada:
