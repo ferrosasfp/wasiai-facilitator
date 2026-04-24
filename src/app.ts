@@ -13,6 +13,10 @@ import { settleRoute } from './routes/settle.js';
 import { supportedRoute } from './routes/supported.js';
 import { openapiRoute } from './routes/openapi.js';
 import { initChainBreakers } from './chains/init-breakers.js';
+// Side-effect import: registers built-in chain adapters (kite, avalanche) in chainRegistry.
+// MUST be imported at app bootstrap — without this, chainRegistry stays empty and
+// GET /supported returns { chains: [], methods: [] }.
+import './chains/index.js';
 
 /**
  * WFAC-40 — expose the parsed EnvConfig to route plugins via decorator.
