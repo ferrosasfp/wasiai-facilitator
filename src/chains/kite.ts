@@ -116,12 +116,15 @@ class KiteAdapter implements ChainAdapter {
       // WFAC-50 — populated from KITE_USDC_ADDRESS env (injected by caller).
       tokens: [
         {
+          // Kite Testnet payment token is PYUSD (verified against live contract
+          // DOMAIN_SEPARATOR on chain 2368 @ 0x8E04…ec9).
+          // `version()` function reverts on-chain → hardcoded to '1'.
           address: opts.usdcAddress,
-          symbol: 'USDC',
-          decimals: 6,
-          name: 'USD Coin',
-          eip712Name: 'USD Coin',
-          eip712Version: '2',
+          symbol: 'PYUSD',
+          decimals: 18,
+          name: 'PYUSD',
+          eip712Name: 'PYUSD',
+          eip712Version: '1',
         },
       ],
     };
