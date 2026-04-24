@@ -20,6 +20,12 @@ export const EnvSchema = z
     SHUTDOWN_GRACE_MS: z.coerce.number().int().min(0).default(10000),
     REDIS_URL: z.string().min(1).optional(),
     REDIS_DB: z.coerce.number().int().min(0).max(15).default(0),
+    // Supabase (WFAC-32): optional — disabled when either var is missing.
+    // CD-4: NO superRefine cross-field "both required in prod" — decision
+    // lives in `initSupabase` / `getSupabaseClient` at runtime.
+    // DT-1: canonical name is `SUPABASE_SERVICE_KEY` (NOT `SUPABASE_SERVICE_ROLE_KEY`).
+    SUPABASE_URL: z.string().url().optional(),
+    SUPABASE_SERVICE_KEY: z.string().min(1).optional(),
   })
   .superRefine((data, ctx) => {
     if (!data.REDIS_URL && data.NODE_ENV !== 'test') {
