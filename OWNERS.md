@@ -24,11 +24,36 @@ en la abstracción, no una excepción válida.
 | `src/core/`               | `src/infra/*`, tipos compartidos, Zod                   | `src/chains/*` (salvo vía registry), `src/methods/*` (vía dispatch), `src/routes/*` |
 | `src/chains/<chain>.ts`   | `src/chains/types.ts`, viem                             | `src/core/*`, `src/methods/*`, `src/routes/*`, otras chains                |
 | `src/chains/registry.ts`  | Todos los `src/chains/<chain>.ts` (explícitos)          | `src/core/*`, `src/methods/*`, `src/routes/*`                              |
-| `src/methods/<method>/`   | `src/chains/types.ts` (solo tipos), viem, ABIs propias  | `src/core/*`, `src/chains/registry.ts`, otros methods                      |
+| `src/methods/<method>/`   | `src/chains/types.ts` (solo tipos), `src/core/types.ts` (solo tipos), `src/core/errors.ts` [1], viem, ABIs propias | `src/core/*` (salvo excepciones [1]), `src/chains/registry.ts`, otros methods |
 | `src/routes/`             | `src/core/*`, `src/infra/*`, Zod schemas                | `src/chains/*`, `src/methods/*` (se accede vía `core.verify/settle`)       |
 | `src/middleware/`         | `src/infra/*`, tipos Fastify                            | `src/core/*`, `src/methods/*`, `src/chains/*`                              |
 | `src/infra/`              | SDK clients (viem, supabase-js, ioredis, pino, etc.)    | TODO el resto de `src/*`                                                   |
 | `src/__tests__/`          | Cualquier cosa (tests tienen bypass)                    | —                                                                           |
+
+### [1] Excepción documentada: `src/core/errors.ts` desde methods
+
+`src/methods/<method>/` puede hacer **runtime import** de `src/core/errors.ts`
+(ej.: `buildX402Error`). Es una excepción explícita al boundary general
+`methods ↛ core/*`. Justificación:
+
+- **Zero-runtime-deps**: `errors.ts` solo importa `src/core/types.ts` (type-only),
+  nada más — sin logger, sin I/O, sin SDK clients.
+- **Pure function**: `buildX402Error(code, message?)` no tiene side effects
+  (mismo input ⇒ mismo output). Ver CD-4 de WFAC-11.
+- **Spec-conformance table**: `HTTP_BY_CODE` y `DEFAULT_MESSAGE_BY_CODE` son
+  mappings canónicos de la spec x402 (`docs.x402.org`), tipados como
+  `Record<X402ErrorCode, T>` — el compilador fuerza exhaustividad.
+- **Origen**: introducido en **WFAC-11**, que también establece este patrón.
+
+**Regla para futuros módulos** en `src/core/*.ts` que quieran ser importables
+en runtime desde `src/methods/<method>/`:
+
+1. Zero runtime deps más allá de `src/core/types.ts` (type-only).
+2. Pure — sin side effects, sin logger, sin I/O, sin state.
+3. Tipos exhaustivos (`Record<FiniteUnion, T>`, no `Partial`, no `as const`
+   cuando se quiere fuerza del compilador).
+4. Documentarse **explícitamente** en esta matriz como excepción (nueva
+   nota `[N]`). Si no está aquí, AR la marca BLOQUEANTE.
 
 ---
 

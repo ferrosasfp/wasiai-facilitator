@@ -85,7 +85,7 @@ export const DEFAULT_MESSAGE_BY_CODE: Record<X402ErrorCode, string> = {
  *
  * @param code - one of the 10 canonical `X402ErrorCode` values (TS-enforced).
  * @param message - optional override. When omitted, uses `DEFAULT_MESSAGE_BY_CODE[code]`.
- *                  When present, used verbatim.
+ *                  When present, used verbatim (empty string is preserved).
  * @returns `{ code, message, http }` shape matching `Err['error']`.
  *
  * @example
