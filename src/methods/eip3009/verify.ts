@@ -24,14 +24,11 @@ import type {
   VerifyParams,
   VerifyResult,
 } from '../../chains/types.js';
-import type { ChainId, X402ErrorCode } from '../../core/types.js';
+import type { ChainId } from '../../core/types.js';
+import { buildX402Error } from '../../core/errors.js';
 import { AcceptedSchema, Eip3009AuthorizationSchema } from './schemas.js';
 import { buildEip3009Domain } from './domain.js';
 import { EIP3009_TYPES, EIP3009_PRIMARY_TYPE } from './abi.js';
-
-function err(code: X402ErrorCode, message: string, http: number): AdapterResult<VerifyResult> {
-  return { ok: false, error: { code, message, http } };
-}
 
 export async function verifyEip3009(
   params: VerifyParams,
@@ -41,7 +38,10 @@ export async function verifyEip3009(
   // 1a. Shape validation — authorization (Zod)
   const authParse = Eip3009AuthorizationSchema.safeParse(params.payload.authorization);
   if (!authParse.success) {
-    return err('INVALID_SIGNATURE', 'Authorization payload malformed', 401);
+    return {
+      ok: false,
+      error: buildX402Error('INVALID_SIGNATURE', 'Authorization payload malformed'),
+    };
   }
   const authorization = authParse.data;
 
@@ -57,21 +57,30 @@ export async function verifyEip3009(
     // Route asset/payTo/network shape errors to NETWORK_MISMATCH (same class
     // as steps 2 and 3); route amount errors to INVALID_AMOUNT.
     if (path === 'amount') {
-      return err('INVALID_AMOUNT', `Invalid accepted.amount: ${reason}`, 400);
+      return {
+        ok: false,
+        error: buildX402Error('INVALID_AMOUNT', `Invalid accepted.amount: ${reason}`),
+      };
     }
-    return err('NETWORK_MISMATCH', `Invalid accepted.${path}: ${reason}`, 400);
+    return {
+      ok: false,
+      error: buildX402Error('NETWORK_MISMATCH', `Invalid accepted.${path}: ${reason}`),
+    };
   }
   const accepted = accParse.data;
 
   // 2. Network match (AC-8)
   const canonicalNetwork = `eip155:${Number(chainId)}`;
   if (accepted.network !== canonicalNetwork) {
-    return err('NETWORK_MISMATCH', 'Network does not match chain', 400);
+    return { ok: false, error: buildX402Error('NETWORK_MISMATCH', 'Network does not match chain') };
   }
 
   // 3. Asset match (AC-11, defense-in-depth)
   if (!isAddressEqual(accepted.asset as Address, token.address)) {
-    return err('NETWORK_MISMATCH', 'Asset not found in chain token registry', 400);
+    return {
+      ok: false,
+      error: buildX402Error('NETWORK_MISMATCH', 'Asset not found in chain token registry'),
+    };
   }
 
   // 4. Amount validation (AC-6, AC-7).
@@ -80,15 +89,24 @@ export async function verifyEip3009(
   // defense-in-depth — it additionally rejects the canonical "0" input.
   const acceptedAmount = BigInt(accepted.amount);
   if (acceptedAmount <= 0n) {
-    return err('INVALID_AMOUNT', 'Accepted amount must be greater than zero', 400);
+    return {
+      ok: false,
+      error: buildX402Error('INVALID_AMOUNT', 'Accepted amount must be greater than zero'),
+    };
   }
   if (BigInt(authorization.value) < acceptedAmount) {
-    return err('INVALID_AMOUNT', 'Authorized value is below accepted amount', 400);
+    return {
+      ok: false,
+      error: buildX402Error('INVALID_AMOUNT', 'Authorized value is below accepted amount'),
+    };
   }
 
   // 5. Receiver match (AC-9)
   if (!isAddressEqual(authorization.to as Address, accepted.payTo as Address)) {
-    return err('INVALID_RECEIVER', 'Receiver does not match payTo', 400);
+    return {
+      ok: false,
+      error: buildX402Error('INVALID_RECEIVER', 'Receiver does not match payTo'),
+    };
   }
 
   // 6. Timestamp window (AC-4, AC-5).
@@ -97,10 +115,13 @@ export async function verifyEip3009(
   // loses precision and could make an "expired" auth look "valid".
   const nowSec = BigInt(Math.floor(Date.now() / 1000));
   if (BigInt(authorization.validBefore) <= nowSec) {
-    return err('EXPIRED_AUTHORIZATION', 'Authorization expired', 400);
+    return { ok: false, error: buildX402Error('EXPIRED_AUTHORIZATION', 'Authorization expired') };
   }
   if (BigInt(authorization.validAfter) > nowSec) {
-    return err('EXPIRED_AUTHORIZATION', 'Authorization not yet valid', 400);
+    return {
+      ok: false,
+      error: buildX402Error('EXPIRED_AUTHORIZATION', 'Authorization not yet valid'),
+    };
   }
 
   // 7. Build domain + recover (AC-10)
@@ -128,12 +149,18 @@ export async function verifyEip3009(
     // AC-3: malformed signature bytes / invalid v-value -> catch and return.
     // We do NOT inspect err.message — viem's error messages are implementation-
     // defined and may change between patch releases.
-    return err('INVALID_SIGNATURE', 'Failed to recover typed data address', 401);
+    return {
+      ok: false,
+      error: buildX402Error('INVALID_SIGNATURE', 'Failed to recover typed data address'),
+    };
   }
 
   // 8. Recovered vs claimed (AC-2)
   if (!isAddressEqual(recovered, authorization.from as Address)) {
-    return err('INVALID_SIGNATURE', 'Recovered address does not match sender', 401);
+    return {
+      ok: false,
+      error: buildX402Error('INVALID_SIGNATURE', 'Recovered address does not match sender'),
+    };
   }
 
   // 9. Success (AC-1, AC-12).

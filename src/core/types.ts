@@ -11,9 +11,6 @@
  * Boundaries respected (OWNERS.md):
  *   - No imports from src/chains/*, src/methods/*, src/routes/*, src/infra/*.
  *   - Only primitives — no runtime deps.
- *
- * Future work:
- *   - WFAC-12 may move X402ErrorCode to src/core/errors.ts and re-export.
  */
 
 export type Address = `0x${string}`;
