@@ -10,7 +10,7 @@
 | 006 | 2026-04-23 | EIP-3009 settle logic (WFAC-10) | method | QUALITY | DONE | feat/006-wfac-10-eip3009-settle |
 | 007 | 2026-04-24 | Standard error codes — core/errors.ts (WFAC-11) | spec-conformance | FAST+AR | DONE | main (1fa4b21) |
 | 008 | 2026-04-24 | Signature normalization — EIP-2098 + Core wallet (WFAC-13) | security | FAST+AR | DONE | feat/008-wfac-13-signature-normalization |
-| 009 | 2026-04-23 | POST /verify route — x402 HTTP API (WFAC-20) | feature | QUALITY | in progress | feat/009-wfac-20-verify-route |
+| 009 | 2026-04-24 | POST /verify route — x402 HTTP API (WFAC-20) | feature | QUALITY | DONE | main (5296b89) |
 
 <!--
 Formato por entrada:
