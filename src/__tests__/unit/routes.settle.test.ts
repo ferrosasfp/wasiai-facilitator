@@ -55,6 +55,23 @@ vi.mock('../../core/ledger.js', () => {
   };
 });
 
+// ─── core/audit.js mock (WFAC-33 W4) ───────────────────────────────────────
+// The onResponse hook in `src/app.ts` invokes both helpers. We spy on the
+// input shape (`__buildAuditSpy.mock.calls[0][0]`) to assert propagation of
+// IP/UA/auditMeta, while `__persistAuditSpy` defaults to a silent resolve so
+// tests never hit a real Supabase.
+vi.mock('../../core/audit.js', () => {
+  const persistAuditSpy = vi.fn(async () => undefined);
+  const buildAuditSpy = vi.fn((input: unknown) => ({ __auditInput: input }));
+  return {
+    __esModule: true,
+    buildAuditEntry: buildAuditSpy,
+    persistAuditEntry: persistAuditSpy,
+    __persistAuditSpy: persistAuditSpy,
+    __buildAuditSpy: buildAuditSpy,
+  };
+});
+
 // ─── ioredis mock (copied verbatim from routes.verify.test.ts) ─────────────
 vi.mock('ioredis', () => {
   const constructorSpy = vi.fn();
@@ -240,6 +257,13 @@ describe('POST /settle', () => {
     };
     ledger.__persistSpy.mockClear();
     ledger.__buildSpy.mockClear();
+
+    const audit = (await import('../../core/audit.js')) as unknown as {
+      __persistAuditSpy: ReturnType<typeof vi.fn>;
+      __buildAuditSpy: ReturnType<typeof vi.fn>;
+    };
+    audit.__persistAuditSpy.mockClear();
+    audit.__buildAuditSpy.mockClear();
   });
 
   afterEach(async () => {
@@ -905,5 +929,228 @@ describe('POST /settle', () => {
     expect(r2.statusCode).toBe(200);
     // Still only ONE persistLedgerEntry call — cache-hit must NOT duplicate.
     expect(ledger.__persistSpy).toHaveBeenCalledTimes(1);
+  });
+
+  // ─── WFAC-33 W4 — audit hook integration ───────────────────────────────
+
+  it('T-AR-1 / AC-1: success path invokes persistAuditEntry once with XFF + UA + idempotencyKey', async () => {
+    const adapter = makeFakeAdapter(2368, async () => VALID_SETTLE_RESULT);
+    app = await buildAppWithAdapter(adapter);
+    const audit = (await import('../../core/audit.js')) as unknown as {
+      __persistAuditSpy: ReturnType<typeof vi.fn>;
+      __buildAuditSpy: ReturnType<typeof vi.fn>;
+    };
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/settle',
+      headers: {
+        'content-type': 'application/json',
+        'x-forwarded-for': '203.0.113.5, 10.0.0.1',
+        'user-agent': 'curl/7.88',
+      },
+      payload: JSON.stringify(VALID_BODY),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(audit.__persistAuditSpy).toHaveBeenCalledTimes(1);
+
+    const input = audit.__buildAuditSpy.mock.calls[0]![0] as {
+      path: string;
+      statusCode: number;
+      ipRaw: string | null;
+      userAgentRaw: string | null;
+      idempotencyKey?: string;
+      errorCode?: string;
+    };
+    expect(input.path).toBe('/settle');
+    expect(input.statusCode).toBe(200);
+    expect(input.ipRaw).toBe('203.0.113.5');
+    expect(input.userAgentRaw).toBe('curl/7.88');
+    // Auto-Blindaje W4: buildSettleIdempotencyKey returns the full Redis key
+    // `settle:idempotency:<64-hex>` (length 83). Production stores the prefixed
+    // form in facilitator_audit_log.idempotency_key.
+    expect(input.idempotencyKey).toMatch(/^settle:idempotency:[0-9a-f]{64}$/);
+    expect(input.errorCode).toBeUndefined();
+  });
+
+  it('T-AR-2 / AC-12: success path propagates 64-char hex idempotencyKey', async () => {
+    const adapter = makeFakeAdapter(2368, async () => VALID_SETTLE_RESULT);
+    app = await buildAppWithAdapter(adapter);
+    const audit = (await import('../../core/audit.js')) as unknown as {
+      __buildAuditSpy: ReturnType<typeof vi.fn>;
+    };
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/settle',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify(VALID_BODY),
+    });
+    expect(res.statusCode).toBe(200);
+
+    const input = audit.__buildAuditSpy.mock.calls[0]![0] as { idempotencyKey?: string };
+    // Auto-Blindaje W4: full Redis key `settle:idempotency:<hash>` (83 chars).
+    expect(input.idempotencyKey).toMatch(/^settle:idempotency:[0-9a-f]{64}$/);
+  });
+
+  it('T-AR-3 / AC-13: 400 Zod path populates errorCode=INVALID_PAYLOAD', async () => {
+    const adapter = makeFakeAdapter(2368, async () => VALID_SETTLE_RESULT);
+    app = await buildAppWithAdapter(adapter);
+    const audit = (await import('../../core/audit.js')) as unknown as {
+      __buildAuditSpy: ReturnType<typeof vi.fn>;
+    };
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/settle',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify({ invalid: 'body' }),
+    });
+    expect(res.statusCode).toBe(400);
+
+    const input = audit.__buildAuditSpy.mock.calls[0]![0] as {
+      statusCode: number;
+      errorCode?: string;
+    };
+    expect(input.statusCode).toBe(400);
+    expect(input.errorCode).toBe('INVALID_PAYLOAD');
+  });
+
+  it('T-AR-4 / AC-13: adapter-throw path populates errorCode=TRANSACTION_FAILED + idempotencyKey present', async () => {
+    const adapter = makeFakeAdapter(2368, async () => {
+      throw new Error('adapter exploded');
+    });
+    app = await buildAppWithAdapter(adapter);
+    const audit = (await import('../../core/audit.js')) as unknown as {
+      __buildAuditSpy: ReturnType<typeof vi.fn>;
+    };
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/settle',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify(VALID_BODY),
+    });
+    expect(res.statusCode).toBe(500);
+
+    const input = audit.__buildAuditSpy.mock.calls[0]![0] as {
+      statusCode: number;
+      errorCode?: string;
+      idempotencyKey?: string;
+    };
+    expect(input.statusCode).toBe(500);
+    expect(input.errorCode).toBe('TRANSACTION_FAILED');
+    // Auto-Blindaje W4: full prefixed Redis key.
+    expect(input.idempotencyKey).toMatch(/^settle:idempotency:[0-9a-f]{64}$/);
+  });
+
+  it('T-AR-5 / AC-13: adapter result.ok=false propagates error code verbatim', async () => {
+    const adapter = makeFakeAdapter(2368, async () => ({
+      ok: false,
+      error: { code: 'INSUFFICIENT_BALANCE', message: 'no funds', http: 402 },
+    }));
+    app = await buildAppWithAdapter(adapter);
+    const audit = (await import('../../core/audit.js')) as unknown as {
+      __buildAuditSpy: ReturnType<typeof vi.fn>;
+    };
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/settle',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify(VALID_BODY),
+    });
+    expect(res.statusCode).toBe(402);
+
+    const input = audit.__buildAuditSpy.mock.calls[0]![0] as {
+      statusCode: number;
+      errorCode?: string;
+    };
+    expect(input.statusCode).toBe(402);
+    expect(input.errorCode).toBe('INSUFFICIENT_BALANCE');
+  });
+
+  it('T-AR-6 / AC-4: XFF array header first element used', async () => {
+    const adapter = makeFakeAdapter(2368, async () => VALID_SETTLE_RESULT);
+    app = await buildAppWithAdapter(adapter);
+    const audit = (await import('../../core/audit.js')) as unknown as {
+      __buildAuditSpy: ReturnType<typeof vi.fn>;
+    };
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/settle',
+      headers: {
+        'content-type': 'application/json',
+        'x-forwarded-for': ['203.0.113.6, 10.0.0.2'],
+      },
+      payload: JSON.stringify(VALID_BODY),
+    });
+    expect(res.statusCode).toBe(200);
+
+    const input = audit.__buildAuditSpy.mock.calls[0]![0] as { ipRaw: string | null };
+    expect(input.ipRaw).toBe('203.0.113.6');
+  });
+
+  it('T-AR-7 / AC-5: no XFF → falls back to request.ip', async () => {
+    const adapter = makeFakeAdapter(2368, async () => VALID_SETTLE_RESULT);
+    app = await buildAppWithAdapter(adapter);
+    const audit = (await import('../../core/audit.js')) as unknown as {
+      __buildAuditSpy: ReturnType<typeof vi.fn>;
+    };
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/settle',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify(VALID_BODY),
+    });
+    expect(res.statusCode).toBe(200);
+
+    const input = audit.__buildAuditSpy.mock.calls[0]![0] as { ipRaw: string | null };
+    expect(input.ipRaw).not.toBeNull();
+    // request.ip under light-my-request is typically 127.0.0.1.
+    expect(typeof input.ipRaw).toBe('string');
+  });
+
+  it('T-AR-8 / AC-8: empty user-agent header → userAgentRaw=null', async () => {
+    const adapter = makeFakeAdapter(2368, async () => VALID_SETTLE_RESULT);
+    app = await buildAppWithAdapter(adapter);
+    const audit = (await import('../../core/audit.js')) as unknown as {
+      __buildAuditSpy: ReturnType<typeof vi.fn>;
+    };
+
+    // Auto-Blindaje W4: light-my-request injects default 'lightMyRequest' UA when
+    // headers.user-agent is absent. Override with '' to exercise the empty→null
+    // branch. True header-absence is covered by the pure builder unit tests.
+    const res = await app.inject({
+      method: 'POST',
+      url: '/settle',
+      headers: { 'content-type': 'application/json', 'user-agent': '' },
+      payload: JSON.stringify(VALID_BODY),
+    });
+    expect(res.statusCode).toBe(200);
+
+    const input = audit.__buildAuditSpy.mock.calls[0]![0] as { userAgentRaw: string | null };
+    expect(input.userAgentRaw).toBeNull();
+  });
+
+  it('T-AR-9 / AC-9: persistAuditEntry rejection is swallowed by Fastify — response still 200', async () => {
+    const adapter = makeFakeAdapter(2368, async () => VALID_SETTLE_RESULT);
+    app = await buildAppWithAdapter(adapter);
+    const audit = (await import('../../core/audit.js')) as unknown as {
+      __persistAuditSpy: ReturnType<typeof vi.fn>;
+    };
+    audit.__persistAuditSpy.mockRejectedValueOnce(new Error('boom'));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/settle',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify(VALID_BODY),
+    });
+    // onResponse hook runs AFTER the reply is already flushed. A thrown
+    // audit error cannot flip the status back to 5xx — the client sees 200.
+    expect(res.statusCode).toBe(200);
   });
 });

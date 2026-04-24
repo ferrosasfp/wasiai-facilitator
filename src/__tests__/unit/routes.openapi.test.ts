@@ -31,7 +31,7 @@
  * exists.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -39,6 +39,19 @@ import type { FastifyInstance } from 'fastify';
 import type { EnvConfig } from '../../infra/env.js';
 import { HTTP_BY_CODE } from '../../core/errors.js';
 import type { X402ErrorCode } from '../../core/types.js';
+
+// ─── core/audit.js mock (WFAC-33 W4) ───────────────────────────────────────
+vi.mock('../../core/audit.js', () => {
+  const persistAuditSpy = vi.fn(async () => undefined);
+  const buildAuditSpy = vi.fn((input: unknown) => ({ __auditInput: input }));
+  return {
+    __esModule: true,
+    buildAuditEntry: buildAuditSpy,
+    persistAuditEntry: persistAuditSpy,
+    __persistAuditSpy: persistAuditSpy,
+    __buildAuditSpy: buildAuditSpy,
+  };
+});
 
 /** Shape of the parsed OpenAPI document relevant to these tests. */
 interface OpenAPIDoc {
@@ -317,6 +330,22 @@ describe('GET /openapi.json', () => {
     expect(props.uptime!.type).toBe('number');
     expect(props.timestamp!.type).toBe('string');
     expect(props.timestamp!.format).toBe('date-time');
+  });
+
+  // ─── WFAC-33 W4 — audit hook exclusion ────────────────────────────────
+
+  it('T-AO-1 / AC-2: /openapi.json is NOT audited (listed in AUDIT_EXCLUDED_PATHS)', async () => {
+    const audit = (await import('../../core/audit.js')) as unknown as {
+      __persistAuditSpy: ReturnType<typeof vi.fn>;
+      __buildAuditSpy: ReturnType<typeof vi.fn>;
+    };
+    audit.__persistAuditSpy.mockClear();
+    audit.__buildAuditSpy.mockClear();
+
+    const res = await app.inject({ method: 'GET', url: '/openapi.json' });
+    expect(res.statusCode).toBe(200);
+    expect(audit.__persistAuditSpy).not.toHaveBeenCalled();
+    expect(audit.__buildAuditSpy).not.toHaveBeenCalled();
   });
 });
 

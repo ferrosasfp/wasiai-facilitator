@@ -55,6 +55,30 @@ en runtime desde `src/methods/<method>/`:
 4. Documentarse **explícitamente** en esta matriz como excepción (nueva
    nota `[N]`). Si no está aquí, AR la marca BLOQUEANTE.
 
+### [2] `src/core/audit.ts` — observabilidad HTTP (WFAC-33)
+
+`src/core/audit.ts` sigue el mismo boundary que `src/core/ledger.ts`:
+
+- **MAY import**: `src/infra/supabase.ts` (runtime, solo `getSupabaseClient`),
+  `pino` (type-only), `fastify` (side-effect import que sostiene el
+  `declare module 'fastify'` que augmenta `FastifyRequest.auditMeta`),
+  `src/core/types.ts` (type-only, para `X402ErrorCode`).
+- **MUST NOT import**: `@supabase/supabase-js` directo (acceso vía wrapper),
+  `src/chains/*`, `src/methods/*`, `src/routes/*`.
+- **Consumido desde**: `src/app.ts` (hook global `onResponse`). Las rutas
+  `src/routes/settle.ts` y `src/routes/verify.ts` **NO** importan
+  `audit.ts` directamente — solo setean el decorator opcional
+  `request.auditMeta` (cuya firma vive en `audit.ts` vía la declaración
+  `declare module 'fastify'`). Esta es la única forma de cruzar metadata
+  route → hook sin romper el boundary `routes ↛ core/audit`.
+- **Contratos clave**: `persistAuditEntry` es fail-open (CD-1 — nunca
+  propaga al caller); `buildAuditEntry` es pure function (CD-7) con
+  truncation `ip→45` / `user_agent→512` (CD-8); el objeto INSERT no
+  incluye `timestamp` (CD-13 — DB genera vía `DEFAULT NOW()`); PII (ip,
+  user_agent) nunca se loguea en stdout, solo se persiste en DB (CD-4).
+
+Origen: **WFAC-33**.
+
 ---
 
 ## Reglas de boundary
