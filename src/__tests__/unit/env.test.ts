@@ -44,9 +44,13 @@ describe('parseEnv', () => {
   });
 
   it('returns REDIS_URL when present in production env (WFAC-5 AC-1)', () => {
+    // WFAC-50: superRefine now requires OPERATOR_PRIVATE_KEY + KITE_USDC_ADDRESS
+    // in non-test NODE_ENV. Fixture updated; assertion focus unchanged.
     const result = parseEnv({
       NODE_ENV: 'production',
       REDIS_URL: 'redis://host:6379/0',
+      OPERATOR_PRIVATE_KEY: '0x' + 'a'.repeat(64),
+      KITE_USDC_ADDRESS: '0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9',
     });
     expect(result.REDIS_URL).toBe('redis://host:6379/0');
     expect(result.REDIS_DB).toBe(0); // default
@@ -78,9 +82,12 @@ describe('parseEnv', () => {
 
   // ─── WFAC-32 — SUPABASE vars (T1-T3) ─────────────────────────────────────
   it('T1: accepts both SUPABASE_URL and SUPABASE_SERVICE_KEY in production (WFAC-32 AC-6)', () => {
+    // WFAC-50: prod fixtures need OPERATOR_PRIVATE_KEY + KITE_USDC_ADDRESS.
     const result = parseEnv({
       NODE_ENV: 'production',
       REDIS_URL: 'redis://host:6379/0',
+      OPERATOR_PRIVATE_KEY: '0x' + 'a'.repeat(64),
+      KITE_USDC_ADDRESS: '0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9',
       SUPABASE_URL: 'https://foo.supabase.co',
       SUPABASE_SERVICE_KEY: 'sb_secret_xyz',
     });
@@ -150,9 +157,12 @@ describe('parseEnv', () => {
     }) as never);
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
 
+    // WFAC-50: prod fixtures need OPERATOR_PRIVATE_KEY + KITE_USDC_ADDRESS.
     const result = parseEnv({
       NODE_ENV: 'production',
       REDIS_URL: 'redis://host:6379/0',
+      OPERATOR_PRIVATE_KEY: '0x' + 'a'.repeat(64),
+      KITE_USDC_ADDRESS: '0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9',
     });
     expect(result.SUPABASE_URL).toBeUndefined();
     expect(result.SUPABASE_SERVICE_KEY).toBeUndefined();
@@ -312,5 +322,88 @@ describe('parseEnv', () => {
     expect(exitSpy).toHaveBeenCalledWith(1);
     const allWrites = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
     expect(allWrites).toContain('CB_ENABLED');
+  });
+
+  // ─── WFAC-50 — OPERATOR_PRIVATE_KEY + KITE_USDC_ADDRESS (T-ENV-WFAC50-*) ──
+  // Coverage: AC-16 (OPERATOR_PRIVATE_KEY missing/invalid in non-test),
+  //           AC-17 (KITE_USDC_ADDRESS missing/invalid in non-test).
+  it('T-ENV-WFAC50-1 (AC-16 missing): exits with code 1 when OPERATOR_PRIVATE_KEY missing in production', () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((_code?: number) => {
+      throw new Error('__exit__');
+    }) as never);
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    expect(() =>
+      parseEnv({
+        NODE_ENV: 'production',
+        REDIS_URL: 'redis://host:6379/0',
+        KITE_USDC_ADDRESS: '0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9',
+      }),
+    ).toThrow('__exit__');
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const allOutput = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(allOutput).toContain('OPERATOR_PRIVATE_KEY');
+  });
+
+  it('T-ENV-WFAC50-2 (AC-16 invalid): exits with code 1 when OPERATOR_PRIVATE_KEY has invalid format', () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((_code?: number) => {
+      throw new Error('__exit__');
+    }) as never);
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    expect(() =>
+      parseEnv({
+        NODE_ENV: 'production',
+        REDIS_URL: 'redis://host:6379/0',
+        OPERATOR_PRIVATE_KEY: '0xdeadbeef', // too short
+        KITE_USDC_ADDRESS: '0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9',
+      }),
+    ).toThrow('__exit__');
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const allOutput = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(allOutput).toContain('OPERATOR_PRIVATE_KEY');
+  });
+
+  it('T-ENV-WFAC50-3 (AC-17 missing): exits with code 1 when KITE_USDC_ADDRESS missing in production', () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((_code?: number) => {
+      throw new Error('__exit__');
+    }) as never);
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    expect(() =>
+      parseEnv({
+        NODE_ENV: 'production',
+        REDIS_URL: 'redis://host:6379/0',
+        OPERATOR_PRIVATE_KEY: '0x' + 'a'.repeat(64),
+      }),
+    ).toThrow('__exit__');
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const allOutput = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(allOutput).toContain('KITE_USDC_ADDRESS');
+  });
+
+  it('T-ENV-WFAC50-4 (AC-17 invalid): exits with code 1 when KITE_USDC_ADDRESS has invalid format', () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((_code?: number) => {
+      throw new Error('__exit__');
+    }) as never);
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    expect(() =>
+      parseEnv({
+        NODE_ENV: 'production',
+        REDIS_URL: 'redis://host:6379/0',
+        OPERATOR_PRIVATE_KEY: '0x' + 'a'.repeat(64),
+        KITE_USDC_ADDRESS: '0xTOOSHORT',
+      }),
+    ).toThrow('__exit__');
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const allOutput = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(allOutput).toContain('KITE_USDC_ADDRESS');
+  });
+
+  it('T-ENV-WFAC50-5 (superRefine test bypass): NODE_ENV=test accepts both WFAC-50 optional keys as undefined', () => {
+    const result = parseEnv({ NODE_ENV: 'test' });
+    expect(result.OPERATOR_PRIVATE_KEY).toBeUndefined();
+    expect(result.KITE_USDC_ADDRESS).toBeUndefined();
   });
 });

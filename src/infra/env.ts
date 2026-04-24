@@ -59,6 +59,22 @@ export const EnvSchema = z
     CB_FAILURE_THRESHOLD: z.coerce.number().int().min(1).default(5),
     CB_ROLLING_WINDOW_MS: z.coerce.number().int().min(1).default(30000),
     CB_RESET_TIMEOUT_MS: z.coerce.number().int().min(1).default(10000),
+
+    // WFAC-50 — Kite adapter real (SDD DT-G). OPERATOR_PRIVATE_KEY is optional
+    // at Zod level; the .superRefine below enforces presence for non-test env.
+    // Regex guards format (0x + 64 hex chars). Never logged — see
+    // src/infra/wallet.ts security note.
+    OPERATOR_PRIVATE_KEY: z
+      .string()
+      .regex(/^0x[0-9a-fA-F]{64}$/, { message: 'must be 0x + 64 hex chars' })
+      .optional(),
+
+    // WFAC-50 — Kite Testnet PYUSD/USDC token address. Required at boot for
+    // non-test env. Validated as 20-byte hex. Consumed by KiteAdapter constructor.
+    KITE_USDC_ADDRESS: z
+      .string()
+      .regex(/^0x[0-9a-fA-F]{40}$/, { message: 'must be 0x + 40 hex chars' })
+      .optional(),
   })
   .superRefine((data, ctx) => {
     if (!data.REDIS_URL && data.NODE_ENV !== 'test') {
@@ -66,6 +82,22 @@ export const EnvSchema = z
         code: z.ZodIssueCode.custom,
         path: ['REDIS_URL'],
         message: 'REDIS_URL is required when NODE_ENV is not "test"',
+      });
+    }
+    // WFAC-50 — OPERATOR_PRIVATE_KEY required outside test.
+    if (!data.OPERATOR_PRIVATE_KEY && data.NODE_ENV !== 'test') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['OPERATOR_PRIVATE_KEY'],
+        message: 'OPERATOR_PRIVATE_KEY is required when NODE_ENV is not "test"',
+      });
+    }
+    // WFAC-50 — KITE_USDC_ADDRESS required outside test.
+    if (!data.KITE_USDC_ADDRESS && data.NODE_ENV !== 'test') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['KITE_USDC_ADDRESS'],
+        message: 'KITE_USDC_ADDRESS is required when NODE_ENV is not "test"',
       });
     }
   });
