@@ -147,6 +147,13 @@ Formato `TD-NN-NN`: primer NN = épica afectada, segundo NN = secuencial dentro 
 | TD-05-01 | Multi-sig operator wallet (Safe) — elimina single-key SPOF | V2 | WFAC-TBD |
 | TD-05-02 | Wallet key rotation protocol (zero-downtime) | V2 | WFAC-TBD |
 | TD-06-01 | Solana / non-EVM chain adapters | V2 | WFAC-TBD |
+| **TD-06-02** | **[WFAC-52] Extract sanitize() to src/infra/error-sanitizer.ts (kite + avalanche duplication)** | **V1.1 after WFAC-54** | **WFAC-TBD** |
+| **TD-06-03** | **[WFAC-52] Breaker defaults extraction (failures=5, window=30s, reset=10s) duplication** | **V1.1 WFAC-60** | **WFAC-TBD** |
+| **TD-06-04** | **[WFAC-52] Chain adapter abstraction audit (extract base if 3+ chains, currently 2)** | **V1.1 after Polygon** | **WFAC-TBD** |
+| **TD-06-05** | **[WFAC-52] metadata.tokens length assert (AC-3)** | **V1.1 nice-to-have** | **WFAC-TBD** |
+| **TD-06-06** | **[WFAC-52] Happy-path behavioral tests for Avalanche (post-WFAC-54)** | **V1.1 after WFAC-54** | **WFAC-TBD** |
+| **TD-06-07** | **[WFAC-52] JSDoc type/runtime clarity (asChainId)** | **V1.1 doc-only** | **WFAC-TBD** |
+| **PROCESS-01** | **[CRITICAL WFAC-52] Enforce nexus-analyst entry point for all future HUs (AB-WFAC-52-1 violation)** | **IMMEDIATE** | **META** |
 | TD-09-01 | wasiai-a2a migration from Pieverse → facilitator | Post-V1 | WFAC-80 |
 | TD-09-02 | wasiai-v2 migration from internal `usdcSettler.ts` → facilitator | Post-V1 | WFAC-81 |
 | TD-12-01 | Fee model opcional (0.1-1% protocol fee) | V2 | WFAC-TBD |
