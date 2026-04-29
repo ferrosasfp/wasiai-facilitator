@@ -16,11 +16,18 @@
 
 import { chainRegistry } from './registry.js';
 import { kiteTestnetAdapter, kiteMainnetAdapter } from './kite.js';
-import { avalancheFujiAdapter } from './avalanche.js';
+import { avalancheFujiAdapter, avalancheMainnetAdapter } from './avalanche.js';
 
 chainRegistry.register(kiteTestnetAdapter);
-// Optional adapters — registered only if their env vars are set.
-// Each adapter module returns `null` when its required env is missing,
-// letting the facilitator boot successfully with just testnet in V1 MVP.
+// Optional adapters — registered only when fully configured.
+//
+// Testnets (Fuji): registered if their RPC env var is set. This is the
+// historical behavior — present before the mainnet flags landed.
+//
+// Mainnets (Kite Mainnet, Avalanche C-Chain): require BOTH an explicit
+// `*_ENABLED=true` flag AND the corresponding RPC + token-address env vars.
+// Each adapter module returns `null` when those preconditions are not met,
+// so existing testnet-only deployments boot identically to before this PR.
 if (kiteMainnetAdapter !== null) chainRegistry.register(kiteMainnetAdapter);
 if (avalancheFujiAdapter !== null) chainRegistry.register(avalancheFujiAdapter);
+if (avalancheMainnetAdapter !== null) chainRegistry.register(avalancheMainnetAdapter);

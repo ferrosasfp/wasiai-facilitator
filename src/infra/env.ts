@@ -76,6 +76,34 @@ export const EnvSchema = z
       .regex(/^0x[0-9a-fA-F]{40}$/, { message: 'must be 0x + 40 hex chars' })
       .optional(),
 
+    // ---- Mainnet feature flags + per-chain config (public mainnet support) -
+    // Each mainnet chain is OPT-IN via a discrete enabled flag. Defaults are
+    // `false` so existing testnet-only deployments are unaffected. Same enum
+    // pattern as RATE_LIMIT_ENABLED / CB_ENABLED — z.coerce.boolean() is
+    // PROHIBITED (would interpret 'false' as truthy).
+    //
+    // For each chain, registration in src/chains/index.ts requires:
+    //   1. The `*_ENABLED` flag === true.
+    //   2. The chain's RPC URL env var to be present.
+    //   3. The chain's token address env var (where applicable) to be present.
+    // If any of those fail, the chain is silently NOT registered — boot
+    // succeeds with whatever testnet+enabled-mainnets the operator configured.
+    KITE_MAINNET_ENABLED: z
+      .enum(['true', 'false'])
+      .default('false')
+      .transform((v) => v === 'true'),
+    AVALANCHE_MAINNET_ENABLED: z
+      .enum(['true', 'false'])
+      .default('false')
+      .transform((v) => v === 'true'),
+    // Kite Mainnet USDC.e address (chain 2366). Optional at the schema level —
+    // required at adapter construction iff KITE_MAINNET_ENABLED=true (enforced
+    // by KiteAdapter constructor via readUsdcAddress).
+    KITE_MAINNET_USDC_ADDRESS: z
+      .string()
+      .regex(/^0x[0-9a-fA-F]{40}$/, { message: 'must be 0x + 40 hex chars' })
+      .optional(),
+
     // ---- Anti-abuse caps (public-sharing hardening) ------------------------
     // Per-settle max authorized amount (atomic units; uint256 decimal string).
     // Default 100 PYUSD at 18 decimals = 100 * 1e18.
