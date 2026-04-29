@@ -172,19 +172,36 @@ describe('ChainRegistry', () => {
 });
 
 describe('ChainRegistry — module-load integration (AC-9)', () => {
+  // PR feat/mainnet — keys we mutate in setup/teardown of this suite.
+  const SUITE_ENV_KEYS = [
+    'KITE_TESTNET_RPC_URL',
+    'KITE_MAINNET_RPC_URL',
+    'KITE_MAINNET_ENABLED',
+    'KITE_MAINNET_USDC_ADDRESS',
+    'AVALANCHE_FUJI_RPC_URL',
+    'AVALANCHE_MAINNET_RPC_URL',
+    'AVALANCHE_MAINNET_ENABLED',
+    'OPERATOR_PRIVATE_KEY',
+    'KITE_USDC_ADDRESS',
+  ] as const;
+
+  /* eslint-disable security/detect-object-injection -- tuple of hardcoded env-var names, not user input. */
+  function snap(): Record<string, string | undefined> {
+    const out: Record<string, string | undefined> = {};
+    for (const k of SUITE_ENV_KEYS) out[k] = process.env[k];
+    return out;
+  }
+  function restore(s: Record<string, string | undefined>): void {
+    for (const k of SUITE_ENV_KEYS) {
+      if (s[k] === undefined) delete process.env[k];
+      else process.env[k] = s[k];
+    }
+  }
+  /* eslint-enable security/detect-object-injection */
+
   it('registers at least one chain when src/chains/index.ts is imported with env vars set', async () => {
-    // isolate module cache
     vi.resetModules();
-    const prev = {
-      testnet: process.env['KITE_TESTNET_RPC_URL'],
-      mainnet: process.env['KITE_MAINNET_RPC_URL'],
-      fuji: process.env['AVALANCHE_FUJI_RPC_URL'],
-      // WFAC-50 — kite.ts module-load now calls readUsdcAddress + the
-      // singleton wallet init (via verify/settle later); the env vars must
-      // be present during import too. Snapshot + restore to avoid leakage.
-      operatorKey: process.env['OPERATOR_PRIVATE_KEY'],
-      usdc: process.env['KITE_USDC_ADDRESS'],
-    };
+    const prev = snap();
     process.env['KITE_TESTNET_RPC_URL'] = 'https://rpc-testnet.gokite.ai';
     process.env['KITE_MAINNET_RPC_URL'] = 'https://rpc-mainnet.gokite.ai';
     process.env['AVALANCHE_FUJI_RPC_URL'] = 'https://api.avax-test.network/ext/bc/C/rpc';
@@ -197,16 +214,93 @@ describe('ChainRegistry — module-load integration (AC-9)', () => {
       const { chainRegistry } = await import('../../chains/registry.js');
       expect(chainRegistry.getSupportedChainIds().length).toBeGreaterThanOrEqual(1);
     } finally {
-      if (prev.testnet === undefined) delete process.env['KITE_TESTNET_RPC_URL'];
-      else process.env['KITE_TESTNET_RPC_URL'] = prev.testnet;
-      if (prev.mainnet === undefined) delete process.env['KITE_MAINNET_RPC_URL'];
-      else process.env['KITE_MAINNET_RPC_URL'] = prev.mainnet;
-      if (prev.fuji === undefined) delete process.env['AVALANCHE_FUJI_RPC_URL'];
-      else process.env['AVALANCHE_FUJI_RPC_URL'] = prev.fuji;
-      if (prev.operatorKey === undefined) delete process.env['OPERATOR_PRIVATE_KEY'];
-      else process.env['OPERATOR_PRIVATE_KEY'] = prev.operatorKey;
-      if (prev.usdc === undefined) delete process.env['KITE_USDC_ADDRESS'];
-      else process.env['KITE_USDC_ADDRESS'] = prev.usdc;
+      restore(prev);
+    }
+  });
+
+  it('PR feat/mainnet: with mainnet flags OFF, only testnet chains register (default behavior)', async () => {
+    vi.resetModules();
+    const prev = snap();
+    // Both mainnets are set up (RPC + token addr) but the ENABLED flags are
+    // explicitly absent. Default-deny gating MUST exclude them from the registry.
+    process.env['KITE_TESTNET_RPC_URL'] = 'https://rpc-testnet.gokite.ai';
+    process.env['KITE_MAINNET_RPC_URL'] = 'https://rpc-mainnet.gokite.ai';
+    process.env['KITE_MAINNET_USDC_ADDRESS'] = '0x7aB6f3ed87C42eF0aDb67Ed95090f8bF5240149e';
+    process.env['AVALANCHE_FUJI_RPC_URL'] = 'https://api.avax-test.network/ext/bc/C/rpc';
+    process.env['AVALANCHE_MAINNET_RPC_URL'] = 'https://api.avax.network/ext/bc/C/rpc';
+    delete process.env['KITE_MAINNET_ENABLED'];
+    delete process.env['AVALANCHE_MAINNET_ENABLED'];
+    process.env['OPERATOR_PRIVATE_KEY'] =
+      '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
+    process.env['KITE_USDC_ADDRESS'] = '0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9';
+
+    try {
+      const { chainRegistry } = await import('../../chains/registry.js');
+      chainRegistry._resetForTesting();
+      await import('../../chains/index.js');
+      const ids = chainRegistry
+        .getSupportedChainIds()
+        .map(Number)
+        .sort((a, b) => a - b);
+      expect(ids).toEqual([2368, 43113]);
+    } finally {
+      restore(prev);
+    }
+  });
+
+  it('PR feat/mainnet: with KITE_MAINNET_ENABLED=true + RPC + token, Kite Mainnet registers', async () => {
+    vi.resetModules();
+    const prev = snap();
+    process.env['KITE_TESTNET_RPC_URL'] = 'https://rpc-testnet.gokite.ai';
+    process.env['KITE_MAINNET_RPC_URL'] = 'https://rpc-mainnet.gokite.ai';
+    process.env['KITE_MAINNET_ENABLED'] = 'true';
+    process.env['KITE_MAINNET_USDC_ADDRESS'] = '0x7aB6f3ed87C42eF0aDb67Ed95090f8bF5240149e';
+    process.env['AVALANCHE_FUJI_RPC_URL'] = 'https://api.avax-test.network/ext/bc/C/rpc';
+    delete process.env['AVALANCHE_MAINNET_ENABLED'];
+    process.env['OPERATOR_PRIVATE_KEY'] =
+      '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
+    process.env['KITE_USDC_ADDRESS'] = '0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9';
+
+    try {
+      const { chainRegistry } = await import('../../chains/registry.js');
+      chainRegistry._resetForTesting();
+      await import('../../chains/index.js');
+      const ids = chainRegistry
+        .getSupportedChainIds()
+        .map(Number)
+        .sort((a, b) => a - b);
+      expect(ids).toContain(2366);
+      expect(ids).toEqual([2366, 2368, 43113]);
+    } finally {
+      restore(prev);
+    }
+  });
+
+  it('PR feat/mainnet: all 4 chains register when both mainnet flags are true', async () => {
+    vi.resetModules();
+    const prev = snap();
+    process.env['KITE_TESTNET_RPC_URL'] = 'https://rpc-testnet.gokite.ai';
+    process.env['KITE_MAINNET_RPC_URL'] = 'https://rpc-mainnet.gokite.ai';
+    process.env['KITE_MAINNET_ENABLED'] = 'true';
+    process.env['KITE_MAINNET_USDC_ADDRESS'] = '0x7aB6f3ed87C42eF0aDb67Ed95090f8bF5240149e';
+    process.env['AVALANCHE_FUJI_RPC_URL'] = 'https://api.avax-test.network/ext/bc/C/rpc';
+    process.env['AVALANCHE_MAINNET_RPC_URL'] = 'https://api.avax.network/ext/bc/C/rpc';
+    process.env['AVALANCHE_MAINNET_ENABLED'] = 'true';
+    process.env['OPERATOR_PRIVATE_KEY'] =
+      '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
+    process.env['KITE_USDC_ADDRESS'] = '0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9';
+
+    try {
+      const { chainRegistry } = await import('../../chains/registry.js');
+      chainRegistry._resetForTesting();
+      await import('../../chains/index.js');
+      const ids = chainRegistry
+        .getSupportedChainIds()
+        .map(Number)
+        .sort((a, b) => a - b);
+      expect(ids).toEqual([2366, 2368, 43113, 43114]);
+    } finally {
+      restore(prev);
     }
   });
 });

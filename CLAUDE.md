@@ -162,3 +162,29 @@ Labels transversales (heredados del ecosistema):
 - `blocked-upstream`, `security`, `production`, `hackathon-must-have`
 - `chain:kite`, `chain:avalanche` — por chain afectada
 - `method:eip3009`, `method:permit2`, `method:erc7710` — por método
+
+---
+
+## Mainnet chain flags (PR feat/mainnet-support-kite-avalanche)
+
+El facilitator soporta 4 chains hoy. Las dos testnets (Kite Testnet 2368, Avalanche Fuji 43113) están siempre activas si su RPC está configurado. Las dos mainnets (Kite Mainnet 2366, Avalanche C-Chain 43114) son **opt-in con doble llave**:
+
+| Chain | Enabled flag | RPC env | Token addr env | Gas token |
+|-------|-------------|---------|----------------|-----------|
+| Kite Testnet (2368) | (always on) | `KITE_TESTNET_RPC_URL` | `KITE_USDC_ADDRESS` (PYUSD) | KITE testnet |
+| Avalanche Fuji (43113) | (RPC presence) | `AVALANCHE_FUJI_RPC_URL` | hardcoded USDC | AVAX testnet |
+| Kite Mainnet (2366) | `KITE_MAINNET_ENABLED=true` | `KITE_MAINNET_RPC_URL` | `KITE_MAINNET_USDC_ADDRESS` (USDC.e, 6 dec) | KITE |
+| Avalanche C-Chain (43114) | `AVALANCHE_MAINNET_ENABLED=true` | `AVALANCHE_MAINNET_RPC_URL` | hardcoded USDC native | AVAX |
+
+**Default**: ambos `*_ENABLED` flags están en `false`. El facilitator boot-ea testnet-only y `/supported` devuelve sólo Kite Testnet + Avalanche Fuji.
+
+**Para activar una mainnet en producción**:
+1. Confirmar que el operator wallet tiene saldo de gas suficiente en esa chain (`KITE` para Kite Mainnet, `AVAX` para Avalanche).
+2. Setear el flag `*_ENABLED=true` + RPC URL + token address (donde aplique) en Railway.
+3. Redeploy. El registry registra el adapter en boot — `/supported` lo expone, `/verify` y `/settle` rutean por `network`.
+4. Monitor: el circuit breaker per-chain protege RPC outages independientemente; un fallo en Kite Mainnet no afecta a Avalanche ni a las testnets.
+
+**Reglas de seguridad**:
+- Mainnet flags → AR obligatorio (igual que cualquier money-moving change).
+- Nunca commitear el `OPERATOR_PRIVATE_KEY` ni rotarlo sin migración planificada.
+- El cap diario `SETTLE_DAILY_GLOBAL_CAP` aplica cross-chain; ajustar según el TVL esperado al sumar mainnets.

@@ -1,14 +1,22 @@
 /**
- * Avalanche Fuji testnet adapter (chainId 43113).
+ * Avalanche adapters (Fuji testnet 43113, C-Chain mainnet 43114).
  *
  * Exposes:
- *   - avalancheFujiAdapter: ChainAdapter — chainId 43113, env AVALANCHE_FUJI_RPC_URL.
+ *   - avalancheFujiAdapter: ChainAdapter | null — chainId 43113, env AVALANCHE_FUJI_RPC_URL.
+ *   - avalancheMainnetAdapter: ChainAdapter | null — chainId 43114, env AVALANCHE_MAINNET_RPC_URL.
+ *     Opt-in: requires AVALANCHE_MAINNET_ENABLED=true AND AVALANCHE_MAINNET_RPC_URL.
  *
  * WFAC-52: `_verifyRaw` / `_settleRaw` implement the full EIP-3009 flow against
- * Fuji RPC (real signature recovery + simulate/write/waitReceipt) using the
- * canonical Circle USDC at 0x5425890298…Bc65. The outer `verify()` / `settle()`
- * wrappers preserve the WFAC-41 circuit breaker accounting (BusinessFailureError
- * pattern, AR-BLQ-ALTO-1).
+ * Avalanche RPC (real signature recovery + simulate/write/waitReceipt) using
+ * the canonical Circle USDC. The outer `verify()` / `settle()` wrappers
+ * preserve the WFAC-41 circuit breaker accounting (BusinessFailureError pattern,
+ * AR-BLQ-ALTO-1).
+ *
+ * PR feat/mainnet: the AvalancheAdapter class is parametrized so the same code
+ * serves Fuji (USDC, 6 decimals, eip712 'USD Coin' v2) AND mainnet (native
+ * Circle USDC at 0xB97E…8a6E, same shape with a different verifying contract
+ * address). Mainnet is opt-in via AVALANCHE_MAINNET_ENABLED=true so existing
+ * deployments remain testnet-only by default.
  *
  * Boundaries:
  *   - imports ./types.js, ./abi/*, ./circuit-breaker.js, ../infra/wallet.js, viem, viem/chains.
@@ -24,8 +32,8 @@ import {
   recoverTypedDataAddress,
   getAddress,
 } from 'viem';
-import type { PublicClient, WalletClient, Address } from 'viem';
-import { avalancheFuji } from 'viem/chains';
+import type { PublicClient, WalletClient, Address, Chain } from 'viem';
+import { avalanche, avalancheFuji } from 'viem/chains';
 import type { Logger } from 'pino';
 import {
   ChainAdapterInitError,
@@ -67,8 +75,9 @@ function sanitize(e: unknown): string {
 }
 
 const FUJI_CHAIN_ID = 43113;
+const AVALANCHE_MAINNET_CHAIN_ID = 43114;
 
-// Canonical USDC on Avalanche Fuji — documented in
+// Canonical USDC on Avalanche Fuji testnet — documented in
 // https://docs.avax.network/ (public, stable address).
 // Kept as a module-level constant (NOT in env) per SDD DT-10 rationale.
 const USDC_FUJI: EIP3009Token = {
@@ -80,32 +89,67 @@ const USDC_FUJI: EIP3009Token = {
   eip712Version: '2',
 };
 
-function readRpcUrl(): string {
-  const value = process.env['AVALANCHE_FUJI_RPC_URL'];
+// Canonical native Circle USDC on Avalanche C-Chain mainnet (43114). Same
+// EIP-712 shape as Fuji (Circle's contract template) — only the verifying
+// contract address differs. Source: Circle docs (https://www.circle.com/usdc).
+const USDC_AVALANCHE_MAINNET: EIP3009Token = {
+  address: '0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E',
+  symbol: 'USDC',
+  decimals: 6,
+  name: 'USD Coin',
+  eip712Name: 'USD Coin',
+  eip712Version: '2',
+};
+
+function readRpcUrl(envVarName: string, chainIdNum: number): string {
+  // eslint-disable-next-line security/detect-object-injection -- caller-controlled literal env-var name (AVALANCHE_FUJI_RPC_URL or AVALANCHE_MAINNET_RPC_URL), not user input.
+  const value = process.env[envVarName];
   if (!value || value.trim() === '') {
-    throw new ChainAdapterInitError('AVALANCHE_FUJI_RPC_URL', FUJI_CHAIN_ID);
+    throw new ChainAdapterInitError(envVarName, chainIdNum);
   }
   return value;
 }
 
-class AvalancheFujiAdapter implements ChainAdapter {
+/**
+ * Read the boolean enabled flag for a mainnet chain. Default = false so the
+ * facilitator preserves testnet-only behavior unless the operator opts in.
+ * Mirrors kite.ts:readEnabledFlag (PR feat/mainnet — both adapters use the
+ * same gating contract).
+ */
+function readEnabledFlag(envVarName: string): boolean {
+  // eslint-disable-next-line security/detect-object-injection -- caller-controlled literal env-var name, not user input.
+  const v = process.env[envVarName];
+  return v === 'true';
+}
+
+class AvalancheAdapter implements ChainAdapter {
   public readonly metadata: ChainMetadata;
   private readonly _rpcUrl: string;
+  private readonly _viemChain: Chain;
   private _publicClient: PublicClient | null = null;
   private _walletClient: WalletClient | null = null;
   private readonly _breaker: ChainCircuitBreaker;
 
-  constructor() {
-    this._rpcUrl = readRpcUrl();
+  constructor(opts: {
+    chainIdNum: number;
+    envVarName: string;
+    name: string;
+    network: 'mainnet' | 'testnet';
+    blockExplorer?: string;
+    token: EIP3009Token;
+    viemChain: Chain;
+  }) {
+    this._rpcUrl = readRpcUrl(opts.envVarName, opts.chainIdNum);
+    this._viemChain = opts.viemChain;
     this.metadata = {
-      chainId: asChainId(FUJI_CHAIN_ID),
-      name: 'Avalanche Fuji',
-      network: 'testnet',
-      networkId: `eip155:${FUJI_CHAIN_ID}`,
+      chainId: asChainId(opts.chainIdNum),
+      name: opts.name,
+      network: opts.network,
+      networkId: `eip155:${opts.chainIdNum}`,
       rpcUrl: this._rpcUrl,
-      blockExplorer: 'https://testnet.snowtrace.io',
+      ...(opts.blockExplorer ? { blockExplorer: opts.blockExplorer } : {}),
       nativeCurrency: { name: 'Avalanche', symbol: 'AVAX', decimals: 18 },
-      tokens: [USDC_FUJI],
+      tokens: [opts.token],
     };
 
     // WFAC-41 — per-chain circuit breaker. Defaults mirror the Zod schema
@@ -113,8 +157,8 @@ class AvalancheFujiAdapter implements ChainAdapter {
     // import env.ts (OWNERS); readCbNumber/readCbBool reuse the exact
     // same fallbacks.
     this._breaker = new ChainCircuitBreaker({
-      chainId: FUJI_CHAIN_ID,
-      chainName: 'Avalanche Fuji',
+      chainId: opts.chainIdNum,
+      chainName: opts.name,
       failureThreshold: readCbNumber('CB_FAILURE_THRESHOLD', 5),
       rollingWindowMs: readCbNumber('CB_ROLLING_WINDOW_MS', 30000),
       resetTimeoutMs: readCbNumber('CB_RESET_TIMEOUT_MS', 10000),
@@ -125,7 +169,7 @@ class AvalancheFujiAdapter implements ChainAdapter {
   getPublicClient(): PublicClient {
     if (!this._publicClient) {
       this._publicClient = createPublicClient({
-        chain: avalancheFuji,
+        chain: this._viemChain,
         transport: http(this._rpcUrl),
       }) as PublicClient;
     }
@@ -137,7 +181,7 @@ class AvalancheFujiAdapter implements ChainAdapter {
       // WFAC-52 — inject operator account for signing (mirror kite.ts:159).
       this._walletClient = createWalletClient({
         account: getOperatorAccount(),
-        chain: avalancheFuji,
+        chain: this._viemChain,
         transport: http(this._rpcUrl),
       }) as WalletClient;
     }
@@ -518,10 +562,40 @@ class AvalancheFujiAdapter implements ChainAdapter {
 }
 
 // Fuji adapter is opt-in: only instantiated if AVALANCHE_FUJI_RPC_URL is set.
-// WFAC-52 will deliver full mainnet + fuji real support.
+// WFAC-52 delivered full real EIP-3009 settle + verify against Fuji RPC.
 export const avalancheFujiAdapter: ChainAdapter | null = (() => {
   try {
-    return new AvalancheFujiAdapter();
+    return new AvalancheAdapter({
+      chainIdNum: FUJI_CHAIN_ID,
+      envVarName: 'AVALANCHE_FUJI_RPC_URL',
+      name: 'Avalanche Fuji',
+      network: 'testnet',
+      blockExplorer: 'https://testnet.snowtrace.io',
+      token: USDC_FUJI,
+      viemChain: avalancheFuji,
+    });
+  } catch {
+    return null;
+  }
+})();
+
+// Avalanche C-Chain mainnet adapter (PR feat/mainnet) — opt-in:
+//   1. AVALANCHE_MAINNET_ENABLED=true (explicit operator opt-in).
+//   2. AVALANCHE_MAINNET_RPC_URL set.
+// Default behavior (any flag missing or false) → adapter is null and never
+// registered. Existing testnet-only deployments see no change.
+export const avalancheMainnetAdapter: ChainAdapter | null = (() => {
+  if (!readEnabledFlag('AVALANCHE_MAINNET_ENABLED')) return null;
+  try {
+    return new AvalancheAdapter({
+      chainIdNum: AVALANCHE_MAINNET_CHAIN_ID,
+      envVarName: 'AVALANCHE_MAINNET_RPC_URL',
+      name: 'Avalanche',
+      network: 'mainnet',
+      blockExplorer: 'https://snowtrace.io',
+      token: USDC_AVALANCHE_MAINNET,
+      viemChain: avalanche,
+    });
   } catch {
     return null;
   }

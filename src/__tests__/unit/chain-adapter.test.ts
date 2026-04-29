@@ -15,13 +15,21 @@ import type { VerifyParams } from '../../chains/types.js';
 const ENV_KEYS = [
   'KITE_TESTNET_RPC_URL',
   'KITE_MAINNET_RPC_URL',
+  'KITE_MAINNET_ENABLED',
+  'KITE_MAINNET_USDC_ADDRESS',
   'AVALANCHE_FUJI_RPC_URL',
+  'AVALANCHE_MAINNET_RPC_URL',
+  'AVALANCHE_MAINNET_ENABLED',
   'OPERATOR_PRIVATE_KEY',
   'KITE_USDC_ADDRESS',
 ] as const;
 
+// Kite Mainnet USDC.e address — distinct from testnet PYUSD (decimals 6 vs 18,
+// eip712 'USD Coin' v2 vs 'PYUSD' v1). Used by mainnet adapter tests below.
+const TEST_KITE_MAINNET_USDC = '0x7aB6f3ed87C42eF0aDb67Ed95090f8bF5240149e' as `0x${string}`;
+
 /* eslint-disable security/detect-object-injection -- `k` is constrained to the
- * const tuple ENV_KEYS literal (5 hardcoded env-var names). Not user input; the
+ * const tuple ENV_KEYS literal (hardcoded env-var names). Not user input; the
  * security/detect-object-injection heuristic cannot narrow tuple element types. */
 function snapshotEnv(): Record<string, string | undefined> {
   const out: Record<string, string | undefined> = {};
@@ -156,6 +164,9 @@ describe('kite.ts adapters', () => {
     snapshot = snapshotEnv();
     process.env['KITE_TESTNET_RPC_URL'] = 'https://rpc-testnet.gokite.ai';
     process.env['KITE_MAINNET_RPC_URL'] = 'https://rpc-mainnet.gokite.ai';
+    // PR feat/mainnet — explicit opt-in flag + dedicated mainnet token addr.
+    process.env['KITE_MAINNET_ENABLED'] = 'true';
+    process.env['KITE_MAINNET_USDC_ADDRESS'] = TEST_KITE_MAINNET_USDC;
     // WFAC-50 — wallet singleton + token address env vars.
     process.env['OPERATOR_PRIVATE_KEY'] = TEST_PRIVATE_KEY;
     process.env['KITE_USDC_ADDRESS'] = TEST_USDC;
@@ -174,11 +185,26 @@ describe('kite.ts adapters', () => {
     expect(mod.kiteTestnetAdapter.metadata.networkId).toBe('eip155:2368');
   });
 
-  it('AC-12: kiteMainnetAdapter has chainId 2366 and mainnet network', async () => {
+  it('AC-12: kiteMainnetAdapter has chainId 2366 and mainnet network when enabled', async () => {
     const mod = await import('../../chains/kite.js');
-    expect(mod.kiteMainnetAdapter.metadata.chainId).toBe(2366);
-    expect(mod.kiteMainnetAdapter.metadata.network).toBe('mainnet');
-    expect(mod.kiteMainnetAdapter.metadata.networkId).toBe('eip155:2366');
+    expect(mod.kiteMainnetAdapter).not.toBeNull();
+    expect(mod.kiteMainnetAdapter!.metadata.chainId).toBe(2366);
+    expect(mod.kiteMainnetAdapter!.metadata.network).toBe('mainnet');
+    expect(mod.kiteMainnetAdapter!.metadata.networkId).toBe('eip155:2366');
+  });
+
+  it('PR feat/mainnet: kiteMainnetAdapter exposes USDC.e (6 decimals, eip712 USD Coin v2)', async () => {
+    const mod = await import('../../chains/kite.js');
+    expect(mod.kiteMainnetAdapter).not.toBeNull();
+    const tokens = mod.kiteMainnetAdapter!.metadata.tokens;
+    expect(tokens).toHaveLength(1);
+    const t = tokens[0]!;
+    expect(t.address.toLowerCase()).toBe(TEST_KITE_MAINNET_USDC.toLowerCase());
+    expect(t.symbol).toBe('USDC.e');
+    expect(t.decimals).toBe(6);
+    expect(t.name).toBe('USD Coin');
+    expect(t.eip712Name).toBe('USD Coin');
+    expect(t.eip712Version).toBe('2');
   });
 
   it('AC-13: throws ChainAdapterInitError when KITE_TESTNET_RPC_URL missing', async () => {
@@ -188,8 +214,29 @@ describe('kite.ts adapters', () => {
     await expect(import('../../chains/kite.js')).rejects.toThrow(/KITE_TESTNET_RPC_URL/);
   });
 
-  it('kiteMainnetAdapter is null when KITE_MAINNET_RPC_URL missing (opt-in via IIFE, PR #28)', async () => {
+  it('kiteMainnetAdapter is null when KITE_MAINNET_ENABLED is missing (default opt-out)', async () => {
+    delete process.env['KITE_MAINNET_ENABLED'];
+    vi.resetModules();
+    const mod = await import('../../chains/kite.js');
+    expect(mod.kiteMainnetAdapter).toBeNull();
+  });
+
+  it('kiteMainnetAdapter is null when KITE_MAINNET_ENABLED=false (explicit opt-out)', async () => {
+    process.env['KITE_MAINNET_ENABLED'] = 'false';
+    vi.resetModules();
+    const mod = await import('../../chains/kite.js');
+    expect(mod.kiteMainnetAdapter).toBeNull();
+  });
+
+  it('kiteMainnetAdapter is null when enabled=true but KITE_MAINNET_RPC_URL missing', async () => {
     delete process.env['KITE_MAINNET_RPC_URL'];
+    vi.resetModules();
+    const mod = await import('../../chains/kite.js');
+    expect(mod.kiteMainnetAdapter).toBeNull();
+  });
+
+  it('kiteMainnetAdapter is null when enabled=true but KITE_MAINNET_USDC_ADDRESS missing', async () => {
+    delete process.env['KITE_MAINNET_USDC_ADDRESS'];
     vi.resetModules();
     const mod = await import('../../chains/kite.js');
     expect(mod.kiteMainnetAdapter).toBeNull();
@@ -577,6 +624,137 @@ describe('avalanche.ts adapter', () => {
     } as never);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.code).toBe('EXPIRED_AUTHORIZATION');
+  });
+});
+
+// ─── PR feat/mainnet — Avalanche C-Chain mainnet adapter (43114) ──────────
+const AVAX_MAINNET_USDC = '0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E' as const;
+
+describe('avalanche.ts mainnet adapter (PR feat/mainnet)', () => {
+  let snapshot: Record<string, string | undefined>;
+
+  beforeEach(() => {
+    snapshot = snapshotEnv();
+    process.env['AVALANCHE_FUJI_RPC_URL'] = 'https://api.avax-test.network/ext/bc/C/rpc';
+    process.env['AVALANCHE_MAINNET_RPC_URL'] = 'https://api.avax.network/ext/bc/C/rpc';
+    process.env['AVALANCHE_MAINNET_ENABLED'] = 'true';
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    restoreEnv(snapshot);
+    vi.resetModules();
+  });
+
+  it('avalancheMainnetAdapter has chainId 43114 and mainnet network when enabled', async () => {
+    const mod = await import('../../chains/avalanche.js');
+    expect(mod.avalancheMainnetAdapter).not.toBeNull();
+    expect(mod.avalancheMainnetAdapter!.metadata.chainId).toBe(43114);
+    expect(mod.avalancheMainnetAdapter!.metadata.network).toBe('mainnet');
+    expect(mod.avalancheMainnetAdapter!.metadata.networkId).toBe('eip155:43114');
+    expect(mod.avalancheMainnetAdapter!.metadata.name).toBe('Avalanche');
+  });
+
+  it('avalancheMainnetAdapter exposes USDC native (6 decimals, eip712 USD Coin v2)', async () => {
+    const mod = await import('../../chains/avalanche.js');
+    expect(mod.avalancheMainnetAdapter).not.toBeNull();
+    const tokens = mod.avalancheMainnetAdapter!.metadata.tokens;
+    expect(tokens).toHaveLength(1);
+    const usdc = tokens[0]!;
+    expect(usdc.address.toLowerCase()).toBe(AVAX_MAINNET_USDC.toLowerCase());
+    expect(usdc.symbol).toBe('USDC');
+    expect(usdc.decimals).toBe(6);
+    expect(usdc.eip712Name).toBe('USD Coin');
+    expect(usdc.eip712Version).toBe('2');
+  });
+
+  it('avalancheMainnetAdapter is null when AVALANCHE_MAINNET_ENABLED missing (default opt-out)', async () => {
+    delete process.env['AVALANCHE_MAINNET_ENABLED'];
+    vi.resetModules();
+    const mod = await import('../../chains/avalanche.js');
+    expect(mod.avalancheMainnetAdapter).toBeNull();
+  });
+
+  it('avalancheMainnetAdapter is null when AVALANCHE_MAINNET_ENABLED=false (explicit opt-out)', async () => {
+    process.env['AVALANCHE_MAINNET_ENABLED'] = 'false';
+    vi.resetModules();
+    const mod = await import('../../chains/avalanche.js');
+    expect(mod.avalancheMainnetAdapter).toBeNull();
+  });
+
+  it('avalancheMainnetAdapter is null when enabled=true but AVALANCHE_MAINNET_RPC_URL missing', async () => {
+    delete process.env['AVALANCHE_MAINNET_RPC_URL'];
+    vi.resetModules();
+    const mod = await import('../../chains/avalanche.js');
+    expect(mod.avalancheMainnetAdapter).toBeNull();
+  });
+
+  it('avalancheMainnetAdapter does not affect Fuji adapter (independent registration)', async () => {
+    const mod = await import('../../chains/avalanche.js');
+    // Both should be present — fuji RPC + mainnet flag+RPC are all set.
+    expect(mod.avalancheFujiAdapter).not.toBeNull();
+    expect(mod.avalancheMainnetAdapter).not.toBeNull();
+    expect(mod.avalancheFujiAdapter!.metadata.chainId).toBe(43113);
+    expect(mod.avalancheMainnetAdapter!.metadata.chainId).toBe(43114);
+  });
+
+  it('verify rejects mismatched network on mainnet adapter', async () => {
+    const mod = await import('../../chains/avalanche.js');
+    expect(mod.avalancheMainnetAdapter).not.toBeNull();
+    const result = await mod.avalancheMainnetAdapter!.verify({
+      accepted: {
+        network: 'eip155:1', // wrong — not 43114
+        asset: AVAX_MAINNET_USDC,
+        amount: '1000000',
+        payTo: '0x0000000000000000000000000000000000000001',
+      },
+      payload: {
+        signature: '0x' + '00'.repeat(65),
+        authorization: {
+          from: '0x0000000000000000000000000000000000000002',
+          to: '0x0000000000000000000000000000000000000001',
+          value: '1000000',
+          validAfter: '0',
+          validBefore: String(Math.floor(Date.now() / 1000) + 3600),
+          nonce: ('0x' + '00'.repeat(32)) as `0x${string}`,
+        },
+      },
+    } as never);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe('NETWORK_MISMATCH');
+  });
+
+  it('settle rejects expired authorization on mainnet adapter', async () => {
+    const mod = await import('../../chains/avalanche.js');
+    expect(mod.avalancheMainnetAdapter).not.toBeNull();
+    const result = await mod.avalancheMainnetAdapter!.settle({
+      accepted: {
+        network: 'eip155:43114',
+        asset: AVAX_MAINNET_USDC,
+        amount: '1000000',
+        payTo: '0x0000000000000000000000000000000000000001',
+      },
+      payload: {
+        signature: '0x' + '00'.repeat(65),
+        authorization: {
+          from: '0x0000000000000000000000000000000000000002',
+          to: '0x0000000000000000000000000000000000000001',
+          value: '1000000',
+          validAfter: '0',
+          validBefore: '1', // expired
+          nonce: ('0x' + '00'.repeat(32)) as `0x${string}`,
+        },
+      },
+    } as never);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe('EXPIRED_AUTHORIZATION');
+  });
+
+  it('mainnet adapter exposes circuit breaker (CB integration parity with Fuji)', async () => {
+    const mod = await import('../../chains/avalanche.js');
+    expect(mod.avalancheMainnetAdapter).not.toBeNull();
+    expect(typeof mod.avalancheMainnetAdapter!.getBreakerState).toBe('function');
+    expect(mod.avalancheMainnetAdapter!.getBreakerState!()).toBe('CLOSED');
   });
 });
 

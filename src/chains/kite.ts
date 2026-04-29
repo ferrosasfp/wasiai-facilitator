@@ -90,6 +90,20 @@ class KiteAdapter implements ChainAdapter {
     network: 'mainnet' | 'testnet';
     blockExplorer?: string;
     usdcAddress: Address;
+    /**
+     * Token + EIP-712 domain overrides (mainnet support, PR feat/mainnet).
+     *
+     * Defaults preserve the original testnet PYUSD shape exactly so the
+     * Kite Testnet adapter's metadata is byte-identical to PR #29 (no
+     * regression on existing chain). Mainnet callers MUST pass:
+     *   tokenSymbol='USDC.e', tokenName='USD Coin', tokenDecimals=6,
+     *   eip712Name='USD Coin', eip712Version='2'.
+     */
+    tokenSymbol?: string;
+    tokenName?: string;
+    tokenDecimals?: number;
+    eip712Name?: string;
+    eip712Version?: string;
   }) {
     this._rpcUrl = readEnv(opts.envVarName, opts.chainIdNum);
     this._usdcAddress = opts.usdcAddress;
@@ -105,6 +119,14 @@ class KiteAdapter implements ChainAdapter {
       testnet: opts.network === 'testnet',
     });
 
+    // Default token metadata = Kite Testnet PYUSD (PR #29 shape preserved).
+    // Mainnet adapter overrides each field — see `kiteMainnetAdapter` below.
+    const tokenSymbol = opts.tokenSymbol ?? 'PYUSD';
+    const tokenName = opts.tokenName ?? 'PYUSD';
+    const tokenDecimals = opts.tokenDecimals ?? 18;
+    const eip712Name = opts.eip712Name ?? 'PYUSD';
+    const eip712Version = opts.eip712Version ?? '1';
+
     this.metadata = {
       chainId: asChainId(opts.chainIdNum),
       name: opts.name,
@@ -114,17 +136,20 @@ class KiteAdapter implements ChainAdapter {
       ...(opts.blockExplorer ? { blockExplorer: opts.blockExplorer } : {}),
       nativeCurrency: { name: 'Kite', symbol: 'KITE', decimals: 18 },
       // WFAC-50 — populated from KITE_USDC_ADDRESS env (injected by caller).
+      // PR feat/mainnet: token + domain fields are now constructor inputs so
+      // the same KiteAdapter class can serve PYUSD (testnet) AND USDC.e
+      // (mainnet) without forking the class.
       tokens: [
         {
           // Kite Testnet payment token is PYUSD (verified against live contract
           // DOMAIN_SEPARATOR on chain 2368 @ 0x8E04…ec9).
           // `version()` function reverts on-chain → hardcoded to '1'.
           address: opts.usdcAddress,
-          symbol: 'PYUSD',
-          decimals: 18,
-          name: 'PYUSD',
-          eip712Name: 'PYUSD',
-          eip712Version: '1',
+          symbol: tokenSymbol,
+          decimals: tokenDecimals,
+          name: tokenName,
+          eip712Name,
+          eip712Version,
         },
       ],
     };
@@ -550,17 +575,34 @@ class KiteAdapter implements ChainAdapter {
 }
 
 /**
- * Read + validate the Kite PYUSD/USDC token address at module load.
+ * Read + validate a Kite token address from a named env var at module load.
  *
  * WFAC-50: throws ChainAdapterInitError if missing/invalid. Regex is
  * defense-in-depth over EnvSchema (non-test env already enforces presence).
+ *
+ * Testnet uses `KITE_USDC_ADDRESS` (PYUSD on Kite Testnet, 18 decimals).
+ * Mainnet uses `KITE_MAINNET_USDC_ADDRESS` (USDC.e on Kite Mainnet, 6 decimals).
  */
-function readUsdcAddress(chainIdNum: number): Address {
-  const v = process.env['KITE_USDC_ADDRESS'];
+function readUsdcAddress(envVarName: string, chainIdNum: number): Address {
+  // eslint-disable-next-line security/detect-object-injection -- `envVarName` is a caller-controlled literal (one of KITE_USDC_ADDRESS / KITE_MAINNET_USDC_ADDRESS), not user input.
+  const v = process.env[envVarName];
   if (!v || !/^0x[0-9a-fA-F]{40}$/.test(v)) {
-    throw new ChainAdapterInitError('KITE_USDC_ADDRESS', chainIdNum);
+    throw new ChainAdapterInitError(envVarName, chainIdNum);
   }
   return v as Address;
+}
+
+/**
+ * Read the boolean enabled flag for a mainnet chain. Default = false so the
+ * facilitator preserves testnet-only behavior unless the operator explicitly
+ * opts in. Mirrors the enum-string pattern used in src/infra/env.ts (the
+ * Zod schema cannot be imported here per OWNERS — chains/* must not depend
+ * on infra/* runtime).
+ */
+function readEnabledFlag(envVarName: string): boolean {
+  // eslint-disable-next-line security/detect-object-injection -- caller-controlled literal env-var name, not user input.
+  const v = process.env[envVarName];
+  return v === 'true';
 }
 
 export const kiteTestnetAdapter: ChainAdapter = new KiteAdapter({
@@ -568,20 +610,34 @@ export const kiteTestnetAdapter: ChainAdapter = new KiteAdapter({
   envVarName: 'KITE_TESTNET_RPC_URL',
   name: 'Kite Testnet',
   network: 'testnet',
-  usdcAddress: readUsdcAddress(2368),
+  usdcAddress: readUsdcAddress('KITE_USDC_ADDRESS', 2368),
 });
 
-// Mainnet adapter is opt-in: only registered if KITE_MAINNET_RPC_URL is set.
-// V1 MVP ships testnet-only. Consumers who configure mainnet env get it
-// auto-registered in chains/index.ts.
+// Mainnet adapter is opt-in: only registered if BOTH conditions hold:
+//   1. KITE_MAINNET_ENABLED=true (explicit operator opt-in)
+//   2. KITE_MAINNET_RPC_URL + KITE_MAINNET_USDC_ADDRESS are present
+//
+// Default behavior (any flag missing or false) → adapter is null and never
+// registered. Existing testnet-only deployments see no behavioral change.
+//
+// Token: USDC.e on Kite Mainnet (6 decimals, separate from testnet PYUSD).
+// EIP-712 domain name = 'USD Coin' / version = '2' — matches Circle's
+// canonical bridged USDC.e contract metadata (verified against on-chain
+// DOMAIN_SEPARATOR for Kite Mainnet 2366).
 export const kiteMainnetAdapter: ChainAdapter | null = (() => {
+  if (!readEnabledFlag('KITE_MAINNET_ENABLED')) return null;
   try {
     return new KiteAdapter({
       chainIdNum: 2366,
       envVarName: 'KITE_MAINNET_RPC_URL',
       name: 'Kite Mainnet',
       network: 'mainnet',
-      usdcAddress: readUsdcAddress(2366),
+      usdcAddress: readUsdcAddress('KITE_MAINNET_USDC_ADDRESS', 2366),
+      tokenSymbol: 'USDC.e',
+      tokenName: 'USD Coin',
+      tokenDecimals: 6,
+      eip712Name: 'USD Coin',
+      eip712Version: '2',
     });
   } catch {
     return null;
