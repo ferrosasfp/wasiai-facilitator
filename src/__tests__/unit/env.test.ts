@@ -406,4 +406,63 @@ describe('parseEnv', () => {
     expect(result.OPERATOR_PRIVATE_KEY).toBeUndefined();
     expect(result.KITE_USDC_ADDRESS).toBeUndefined();
   });
+
+  // ─── PR feat/mainnet — KITE_MAINNET_ENABLED + AVALANCHE_MAINNET_ENABLED ──
+
+  it('PR feat/mainnet: KITE_MAINNET_ENABLED defaults to false when missing', () => {
+    const result = parseEnv({ NODE_ENV: 'test' });
+    expect(result.KITE_MAINNET_ENABLED).toBe(false);
+  });
+
+  it('PR feat/mainnet: AVALANCHE_MAINNET_ENABLED defaults to false when missing', () => {
+    const result = parseEnv({ NODE_ENV: 'test' });
+    expect(result.AVALANCHE_MAINNET_ENABLED).toBe(false);
+  });
+
+  it('PR feat/mainnet: KITE_MAINNET_ENABLED transforms "true" to boolean true', () => {
+    const result = parseEnv({ NODE_ENV: 'test', KITE_MAINNET_ENABLED: 'true' });
+    expect(result.KITE_MAINNET_ENABLED).toBe(true);
+  });
+
+  it('PR feat/mainnet: KITE_MAINNET_ENABLED transforms "false" to boolean false (no truthy coerce)', () => {
+    const result = parseEnv({ NODE_ENV: 'test', KITE_MAINNET_ENABLED: 'false' });
+    expect(result.KITE_MAINNET_ENABLED).toBe(false);
+  });
+
+  it('PR feat/mainnet: AVALANCHE_MAINNET_ENABLED transforms "true" to boolean true', () => {
+    const result = parseEnv({ NODE_ENV: 'test', AVALANCHE_MAINNET_ENABLED: 'true' });
+    expect(result.AVALANCHE_MAINNET_ENABLED).toBe(true);
+  });
+
+  it('PR feat/mainnet: KITE_MAINNET_ENABLED rejects non-enum strings (exit 1)', () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((_code?: number) => {
+      throw new Error('__exit__');
+    }) as never);
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    expect(() => parseEnv({ NODE_ENV: 'test', KITE_MAINNET_ENABLED: 'yes' })).toThrow('__exit__');
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const allOutput = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(allOutput).toContain('KITE_MAINNET_ENABLED');
+  });
+
+  it('PR feat/mainnet: KITE_MAINNET_USDC_ADDRESS validates 20-byte hex format', () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((_code?: number) => {
+      throw new Error('__exit__');
+    }) as never);
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    expect(() =>
+      parseEnv({ NODE_ENV: 'test', KITE_MAINNET_USDC_ADDRESS: 'not-an-address' }),
+    ).toThrow('__exit__');
+    expect(exitSpy).toHaveBeenCalledWith(1);
+  });
+
+  it('PR feat/mainnet: KITE_MAINNET_USDC_ADDRESS accepts well-formed addr', () => {
+    const result = parseEnv({
+      NODE_ENV: 'test',
+      KITE_MAINNET_USDC_ADDRESS: '0x7aB6f3ed87C42eF0aDb67Ed95090f8bF5240149e',
+    });
+    expect(result.KITE_MAINNET_USDC_ADDRESS).toBe('0x7aB6f3ed87C42eF0aDb67Ed95090f8bF5240149e');
+  });
 });
