@@ -13,6 +13,16 @@
   - V1: Scheduled balance monitoring + alerts (low balance = possible drain)
   - Never log the private key — `Pino` redaction config
   - ESLint `no-secrets` plugin prevents hardcoding
+  - **V1 — single hot key per chain (WFAC-53 FIX-3):** the facilitator uses a
+    single `OPERATOR_PRIVATE_KEY` env var across all 4 enabled chains. Blast
+    radius of a key compromise = all 4 chains drained simultaneously.
+  - **V2 recommendation:** separate hot keys per chain (e.g.
+    `OPERATOR_PRIVATE_KEY_KITE`, `OPERATOR_PRIVATE_KEY_AVAX`) so a single-chain
+    compromise does not drain the full operator fleet.
+  - **Env vars that MUST NOT be logged** (Pino redaction list, enforced via
+    `no-console` + log redaction config):
+      - `OPERATOR_PRIVATE_KEY`
+      - `SUPABASE_SERVICE_KEY`
 
 ### 2. Signature replay / double-spend
 - **Threat:** attacker submits same signed authorization twice → double transfer
@@ -119,3 +129,72 @@ These are exportable for compliance/accounting/dispute resolution.
 - Bug bounty program
 - OFAC sanctioned address screening
 - Chainanalysis / elliptic integration for AML
+
+## Failure modes (WFAC-53 FIX-3)
+
+The facilitator integrates 3 dependencies whose outage degrades security
+posture in different ways. This section documents the graceful-degradation
+choices and how to tighten them in production.
+
+### Redis outage → rate-limit bypass
+- **Mechanism:** `@fastify/rate-limit` is configured with `skipOnError: true`
+  (`src/app.ts` line ~127, WFAC-40 DT-10). If Redis is unreachable or throws on
+  `INCR`, the plugin allows the request through (fail-open).
+- **Surface:** during a Redis outage, per-IP rate limits are not enforced.
+  Burst-from-single-IP attacks become viable until Redis recovers.
+- **Why fail-open here:** rate-limit is a defense-in-depth signal, not the
+  authoritative budget. The authoritative budget (operator wallet balance)
+  is enforced by `SETTLE_DAILY_GLOBAL_CAP` (see below).
+- **Mitigation:** operators that need strict per-IP enforcement during Redis
+  outages can swap to a `failOpen: false` rate-limit config in V2.
+
+### Redis outage → SETTLE_DAILY_GLOBAL_CAP fail-open (default) or fail-closed (opt-in)
+- **Mechanism:** `incrementAndCheckDailyCap` in `src/core/settle-cap.ts` does
+  `client.incr(key)` to enforce a global daily settle cap. The behavior on
+  Redis throw is configurable via `SETTLE_CAP_FAIL_MODE` (WFAC-53 FIX-6):
+    - `SETTLE_CAP_FAIL_MODE=open` (default, preserves V1 behavior): request
+      allowed through. Surface = unbounded settle count until Redis recovers.
+    - `SETTLE_CAP_FAIL_MODE=closed` (opt-in): HTTP 503 SERVICE_UNAVAILABLE.
+      Surface = service degrades protectively; legitimate clients see 503 but
+      operator wallet is safe.
+- **Recommendation:** set `SETTLE_CAP_FAIL_MODE=closed` in any production
+  deployment where the operator wallet balance is significant (>$1k).
+- **Trade-off:** fail-closed degrades availability during Redis outages; fail-
+  open trades availability for protection against budget overrun. There is no
+  free lunch — operators choose.
+
+### EIP-712 Domain separator drift → boot refused (WFAC-53 FIX-2)
+- **Mechanism:** at boot, `initDomainCheck` (`src/chains/init-domain-check.ts`)
+  calls `DOMAIN_SEPARATOR()` on each chain's token contract and compares with
+  the locally computed EIP-712 separator. If they differ on a chain with a
+  reachable RPC, the process logs FATAL and exits(1).
+- **Why fatal:** a separator mismatch means the metadata in
+  `src/chains/<chain>.ts` (`eip712Name`, `eip712Version`, token `address`) has
+  drifted from the live token contract — every signature the facilitator
+  verifies would be against the wrong domain → silent acceptance of
+  cross-chain replays or forged signatures. Refusing to boot is the only safe
+  outcome.
+- **RPC unreachable handling:** if a chain's RPC is unreachable or times out,
+  the check logs WARN and allows boot to continue (non-blocking — the check
+  retries implicitly on the next deployment).
+
+## Reporting (WFAC-53 FIX-3)
+
+If you discover a vulnerability affecting wasiai-facilitator, please disclose
+responsibly via:
+
+- **Email:** `security@wasiai.io`
+- **Acknowledgement SLA:** 48 hours for first response (business days).
+- **Public disclosure:** coordinated, after a fix is shipped (90-day default
+  embargo).
+- **Scope:** signature verification, settle execution, idempotency, audit log,
+  rate limiting, circuit breaker, domain separator drift, dependency CVEs,
+  any reachable secret leak.
+- **Out of scope:** social-engineering of operators, DoS by overwhelming a
+  third-party RPC, theoretical attacks requiring control of the chain itself.
+
+For non-security bug reports use GitHub Issues; for security reports use email
+only (do NOT open public Issues for unpatched vulnerabilities).
+
+> **TO-VERIFY-PRE-MERGE:** confirm `security@wasiai.io` mailbox + 48h SLA with
+> operator before merging to `main`. Provisional values per Story File AC-11.
