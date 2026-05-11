@@ -51,11 +51,7 @@ export interface AuditMeta {
   //   - 'RATE_LIMITED'        (per-IP or global daily cap hits, WFAC-40 + anti-abuse)
   //   - 'SERVICE_UNAVAILABLE' (WFAC-53 FIX-6 DT-O — settle-cap Redis throw in
   //                            fail-closed mode; observability of the new path)
-  readonly errorCode?:
-    | X402ErrorCode
-    | 'INVALID_PAYLOAD'
-    | 'RATE_LIMITED'
-    | 'SERVICE_UNAVAILABLE';
+  readonly errorCode?: X402ErrorCode | 'INVALID_PAYLOAD' | 'RATE_LIMITED' | 'SERVICE_UNAVAILABLE';
   readonly idempotencyKey?: string;
 }
 

@@ -120,9 +120,7 @@ export async function initDomainCheck(logger: Logger): Promise<void> {
   // fulfilled. Map back into a flat list of TaggedOutcome — the 'rejected'
   // arm is unreachable but typed defensively.
   const tagged: readonly TaggedOutcome[] = settled.map((s) =>
-    s.status === 'fulfilled'
-      ? s.value
-      : ({ kind: 'err', chainId: -1, error: s.reason } as const),
+    s.status === 'fulfilled' ? s.value : ({ kind: 'err', chainId: -1, error: s.reason } as const),
   );
 
   let anyMismatch = false;

@@ -121,7 +121,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     .map((o) => o.trim())
     .filter((o) => o.length > 0);
 
-  const corsOriginPolicy: true | ((origin: string | undefined, cb: (err: Error | null, allow: boolean) => void) => void) =
+  const corsOriginPolicy:
+    | true
+    | ((origin: string | undefined, cb: (err: Error | null, allow: boolean) => void) => void) =
     corsAllowedOrigins.length === 0
       ? true
       : (origin, cb) => {
