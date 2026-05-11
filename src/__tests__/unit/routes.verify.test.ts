@@ -206,6 +206,7 @@ async function buildAppWithAdapter(
   return buildApp({
     env,
     loggerDestination: opts.capture,
+    skipDomainCheck: true, // WFAC-53 CD-16 — fake adapter, no real readContract mock
   });
 }
 

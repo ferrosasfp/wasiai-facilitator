@@ -465,4 +465,45 @@ describe('parseEnv', () => {
     });
     expect(result.KITE_MAINNET_USDC_ADDRESS).toBe('0x7aB6f3ed87C42eF0aDb67Ed95090f8bF5240149e');
   });
+
+  // ─── WFAC-53 FIX-1 — CORS_ALLOWED_ORIGINS ────────────────────────────────
+
+  it('T-ENV-CORS-1 (FIX-1 AC-2): CORS_ALLOWED_ORIGINS defaults undefined when missing', () => {
+    const result = parseEnv({ NODE_ENV: 'test' });
+    expect(result.CORS_ALLOWED_ORIGINS).toBeUndefined();
+  });
+
+  it('T-ENV-CORS-2 (FIX-1 AC-1, CD-11): parses CSV string as-is (no Zod transform)', () => {
+    const result = parseEnv({
+      NODE_ENV: 'test',
+      CORS_ALLOWED_ORIGINS: 'https://a2a.wasiai.io,https://app.wasiai.io',
+    });
+    expect(result.CORS_ALLOWED_ORIGINS).toBe('https://a2a.wasiai.io,https://app.wasiai.io');
+    expect(typeof result.CORS_ALLOWED_ORIGINS).toBe('string'); // raw, not transformed
+  });
+
+  // ─── WFAC-53 FIX-6 — SETTLE_CAP_FAIL_MODE ────────────────────────────────
+
+  it('T-ENV-FAIL-1 (FIX-6 AC-16, CD-8): SETTLE_CAP_FAIL_MODE defaults "open"', () => {
+    const result = parseEnv({ NODE_ENV: 'test' });
+    expect(result.SETTLE_CAP_FAIL_MODE).toBe('open');
+  });
+
+  it('T-ENV-FAIL-2 (FIX-6 AC-15): SETTLE_CAP_FAIL_MODE accepts "closed"', () => {
+    const result = parseEnv({ NODE_ENV: 'test', SETTLE_CAP_FAIL_MODE: 'closed' });
+    expect(result.SETTLE_CAP_FAIL_MODE).toBe('closed');
+  });
+
+  it('T-ENV-FAIL-3 (CD-8 defense): SETTLE_CAP_FAIL_MODE rejects arbitrary strings → exit 1', () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((_code?: number) => {
+      throw new Error('__exit__');
+    }) as never);
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    expect(() => parseEnv({ NODE_ENV: 'test', SETTLE_CAP_FAIL_MODE: 'maybe' })).toThrow('__exit__');
+
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const allWrites = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(allWrites).toContain('SETTLE_CAP_FAIL_MODE');
+  });
 });

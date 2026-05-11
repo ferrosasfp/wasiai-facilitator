@@ -101,9 +101,22 @@ const USDC_AVALANCHE_MAINNET: EIP3009Token = {
   eip712Version: '2',
 };
 
-function readRpcUrl(envVarName: string, chainIdNum: number): string {
-  // eslint-disable-next-line security/detect-object-injection -- caller-controlled literal env-var name (AVALANCHE_FUJI_RPC_URL or AVALANCHE_MAINNET_RPC_URL), not user input.
-  const value = process.env[envVarName];
+/**
+ * WFAC-53 FIX-4 — switch over literal union (DT-H). Removes the previous
+ * `security/detect-object-injection` disable (CD-10, CD-13).
+ */
+type AvalancheRpcEnvName = 'AVALANCHE_FUJI_RPC_URL' | 'AVALANCHE_MAINNET_RPC_URL';
+
+function readRpcUrl(envVarName: AvalancheRpcEnvName, chainIdNum: number): string {
+  let value: string | undefined;
+  switch (envVarName) {
+    case 'AVALANCHE_FUJI_RPC_URL':
+      value = process.env.AVALANCHE_FUJI_RPC_URL;
+      break;
+    case 'AVALANCHE_MAINNET_RPC_URL':
+      value = process.env.AVALANCHE_MAINNET_RPC_URL;
+      break;
+  }
   if (!value || value.trim() === '') {
     throw new ChainAdapterInitError(envVarName, chainIdNum);
   }
@@ -116,9 +129,21 @@ function readRpcUrl(envVarName: string, chainIdNum: number): string {
  * Mirrors kite.ts:readEnabledFlag (PR feat/mainnet — both adapters use the
  * same gating contract).
  */
-function readEnabledFlag(envVarName: string): boolean {
-  // eslint-disable-next-line security/detect-object-injection -- caller-controlled literal env-var name, not user input.
-  const v = process.env[envVarName];
+/**
+ * WFAC-53 FIX-4 — single-case switch over the only literal currently
+ * consumed in avalanche.ts. Eliminates the `security/detect-object-injection`
+ * disable (CD-10, CD-13). If a new mainnet flag is added, extend the
+ * union and add a case.
+ */
+type AvalancheEnabledFlagEnvName = 'AVALANCHE_MAINNET_ENABLED';
+
+function readEnabledFlag(envVarName: AvalancheEnabledFlagEnvName): boolean {
+  let v: string | undefined;
+  switch (envVarName) {
+    case 'AVALANCHE_MAINNET_ENABLED':
+      v = process.env.AVALANCHE_MAINNET_ENABLED;
+      break;
+  }
   return v === 'true';
 }
 
@@ -132,7 +157,7 @@ class AvalancheAdapter implements ChainAdapter {
 
   constructor(opts: {
     chainIdNum: number;
-    envVarName: string;
+    envVarName: AvalancheRpcEnvName;
     name: string;
     network: 'mainnet' | 'testnet';
     blockExplorer?: string;

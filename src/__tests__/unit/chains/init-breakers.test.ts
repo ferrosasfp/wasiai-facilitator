@@ -132,7 +132,7 @@ describe('initChainBreakers (WFAC-41)', () => {
     const { resetRedisClientForTests } = await import('../../../infra/redis.js');
     resetRedisClientForTests();
     const { buildApp } = await import('../../../app.js');
-    app = await buildApp({ env: makeEnv() });
+    app = await buildApp({ env: makeEnv(), skipDomainCheck: true }); // WFAC-53 CD-16
 
     expect(kite.adapter.getBreakerState()).toBe('CLOSED');
     expect(avax.adapter.getBreakerState()).toBe('CLOSED');
@@ -145,7 +145,7 @@ describe('initChainBreakers (WFAC-41)', () => {
     const { resetRedisClientForTests } = await import('../../../infra/redis.js');
     resetRedisClientForTests();
     const { buildApp } = await import('../../../app.js');
-    app = await buildApp({ env: makeEnv() });
+    app = await buildApp({ env: makeEnv(), skipDomainCheck: true }); // WFAC-53 CD-16
 
     expect(kite.setLoggerSpy).toHaveBeenCalledTimes(1);
     const loggerArg = kite.setLoggerSpy.mock.calls[0]![0];

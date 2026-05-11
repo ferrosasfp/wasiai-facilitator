@@ -50,7 +50,8 @@ type SettleRouteErrorCode =
   | 'DELEGATION_INVALID'
   | 'CHAIN_UNAVAILABLE' // WFAC-41
   | 'INVALID_PAYLOAD'
-  | 'RATE_LIMITED';
+  | 'RATE_LIMITED'
+  | 'SERVICE_UNAVAILABLE'; // WFAC-53 FIX-6 (CD-15 — route-local, NOT in X402ErrorCode)
 
 interface ErrorBody {
   readonly error: {
@@ -127,9 +128,37 @@ export const settleRoute: FastifyPluginAsync = async (app) => {
         app.log.warn({ request_id: requestId }, 'idempotency cache miss — Redis unavailable');
       }
 
-      // Step 2.5 — global daily settle cap (anti-abuse). Fail-open if Redis is down.
-      const dailyCap = await incrementAndCheckDailyCap(env.SETTLE_DAILY_GLOBAL_CAP, app.log);
+      // Step 2.5 — global daily settle cap (anti-abuse). WFAC-53 FIX-6:
+      // SETTLE_CAP_FAIL_MODE controls Redis-throw behavior (open=fail-open,
+      // closed=HTTP 503 SERVICE_UNAVAILABLE).
+      const dailyCap = await incrementAndCheckDailyCap(
+        env.SETTLE_DAILY_GLOBAL_CAP,
+        env.SETTLE_CAP_FAIL_MODE,
+        app.log,
+      );
       if (!dailyCap.ok) {
+        if (dailyCap.reason === 'redis_error_failclosed') {
+          // WFAC-53 FIX-6 fail-closed → HTTP 503 SERVICE_UNAVAILABLE.
+          const body: ErrorBody = {
+            error: {
+              code: 'SERVICE_UNAVAILABLE',
+              message: 'Settlement cap check failed — service unavailable',
+              http: 503,
+            },
+          };
+          app.log.warn(
+            {
+              request_id: requestId,
+              error_code: 'SERVICE_UNAVAILABLE',
+              http_status: 503,
+              duration_ms: Date.now() - startMs,
+            },
+            'settle failed — fail-closed',
+          );
+          request.auditMeta = { ...request.auditMeta, errorCode: 'SERVICE_UNAVAILABLE' };
+          return reply.code(503).send(body);
+        }
+        // dailyCap.reason === 'cap_exceeded' — original RATE_LIMITED branch.
         const body: ErrorBody = {
           error: {
             code: 'RATE_LIMITED',

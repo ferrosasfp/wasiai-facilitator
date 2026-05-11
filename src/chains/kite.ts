@@ -65,9 +65,23 @@ function sanitize(e: unknown): string {
   return raw.slice(0, 200);
 }
 
-function readEnv(name: string, chainId: number): string {
-  // eslint-disable-next-line security/detect-object-injection -- `name` is a caller-controlled literal (one of KITE_TESTNET_RPC_URL / KITE_MAINNET_RPC_URL), not user input.
-  const value = process.env[name];
+/**
+ * WFAC-53 FIX-4 — switch over literal union (DT-H) eliminates the
+ * `security/detect-object-injection` warning that previously required an
+ * inline eslint-disable on `process.env[name]` (CD-10, CD-13).
+ */
+type KiteRpcEnvName = 'KITE_TESTNET_RPC_URL' | 'KITE_MAINNET_RPC_URL';
+
+function readEnv(name: KiteRpcEnvName, chainId: number): string {
+  let value: string | undefined;
+  switch (name) {
+    case 'KITE_TESTNET_RPC_URL':
+      value = process.env.KITE_TESTNET_RPC_URL;
+      break;
+    case 'KITE_MAINNET_RPC_URL':
+      value = process.env.KITE_MAINNET_RPC_URL;
+      break;
+  }
   if (!value || value.trim() === '') {
     throw new ChainAdapterInitError(name, chainId);
   }
@@ -85,7 +99,7 @@ class KiteAdapter implements ChainAdapter {
 
   constructor(opts: {
     chainIdNum: number;
-    envVarName: string;
+    envVarName: KiteRpcEnvName;
     name: string;
     network: 'mainnet' | 'testnet';
     blockExplorer?: string;
@@ -583,9 +597,22 @@ class KiteAdapter implements ChainAdapter {
  * Testnet uses `KITE_USDC_ADDRESS` (PYUSD on Kite Testnet, 18 decimals).
  * Mainnet uses `KITE_MAINNET_USDC_ADDRESS` (USDC.e on Kite Mainnet, 6 decimals).
  */
-function readUsdcAddress(envVarName: string, chainIdNum: number): Address {
-  // eslint-disable-next-line security/detect-object-injection -- `envVarName` is a caller-controlled literal (one of KITE_USDC_ADDRESS / KITE_MAINNET_USDC_ADDRESS), not user input.
-  const v = process.env[envVarName];
+/**
+ * WFAC-53 FIX-4 — switch over literal union (DT-H). Removes the previous
+ * `security/detect-object-injection` disable (CD-10, CD-13).
+ */
+type KiteUsdcEnvName = 'KITE_USDC_ADDRESS' | 'KITE_MAINNET_USDC_ADDRESS';
+
+function readUsdcAddress(envVarName: KiteUsdcEnvName, chainIdNum: number): Address {
+  let v: string | undefined;
+  switch (envVarName) {
+    case 'KITE_USDC_ADDRESS':
+      v = process.env.KITE_USDC_ADDRESS;
+      break;
+    case 'KITE_MAINNET_USDC_ADDRESS':
+      v = process.env.KITE_MAINNET_USDC_ADDRESS;
+      break;
+  }
   if (!v || !/^0x[0-9a-fA-F]{40}$/.test(v)) {
     throw new ChainAdapterInitError(envVarName, chainIdNum);
   }
@@ -599,9 +626,21 @@ function readUsdcAddress(envVarName: string, chainIdNum: number): Address {
  * Zod schema cannot be imported here per OWNERS — chains/* must not depend
  * on infra/* runtime).
  */
-function readEnabledFlag(envVarName: string): boolean {
-  // eslint-disable-next-line security/detect-object-injection -- caller-controlled literal env-var name, not user input.
-  const v = process.env[envVarName];
+/**
+ * WFAC-53 FIX-4 — single-case switch over the only literal currently
+ * consumed in kite.ts. Eliminates the `security/detect-object-injection`
+ * disable (CD-10, CD-13). If a new mainnet flag is added, extend the
+ * union and add a case.
+ */
+type KiteEnabledFlagEnvName = 'KITE_MAINNET_ENABLED';
+
+function readEnabledFlag(envVarName: KiteEnabledFlagEnvName): boolean {
+  let v: string | undefined;
+  switch (envVarName) {
+    case 'KITE_MAINNET_ENABLED':
+      v = process.env.KITE_MAINNET_ENABLED;
+      break;
+  }
   return v === 'true';
 }
 

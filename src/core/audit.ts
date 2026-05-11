@@ -47,9 +47,11 @@ declare module 'fastify' {
 
 export interface AuditMeta {
   // Route-local literals allowed besides X402ErrorCode:
-  //   - 'INVALID_PAYLOAD' (Zod validation failures, WFAC-20 DT-7)
-  //   - 'RATE_LIMITED'    (per-IP or global daily cap hits, WFAC-40 + anti-abuse)
-  readonly errorCode?: X402ErrorCode | 'INVALID_PAYLOAD' | 'RATE_LIMITED';
+  //   - 'INVALID_PAYLOAD'     (Zod validation failures, WFAC-20 DT-7)
+  //   - 'RATE_LIMITED'        (per-IP or global daily cap hits, WFAC-40 + anti-abuse)
+  //   - 'SERVICE_UNAVAILABLE' (WFAC-53 FIX-6 DT-O — settle-cap Redis throw in
+  //                            fail-closed mode; observability of the new path)
+  readonly errorCode?: X402ErrorCode | 'INVALID_PAYLOAD' | 'RATE_LIMITED' | 'SERVICE_UNAVAILABLE';
   readonly idempotencyKey?: string;
 }
 

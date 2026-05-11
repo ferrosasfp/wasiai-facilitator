@@ -81,7 +81,7 @@ async function makeApp(
     ...overrides,
   };
   const { buildApp } = await import('../../app.js');
-  return buildApp({ rawEnv, loggerDestination: capture });
+  return buildApp({ rawEnv, loggerDestination: capture, skipDomainCheck: true });
 }
 
 /** Arbitrary malformed payload — triggers 400 before rate-limit? No: rate-limit

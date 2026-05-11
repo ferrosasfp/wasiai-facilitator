@@ -173,6 +173,7 @@ async function buildAppWithAdapters(
   return buildApp({
     env,
     loggerDestination: opts.capture,
+    skipDomainCheck: true, // WFAC-53 CD-16 — no real chain adapters wired in this test
   });
 }
 

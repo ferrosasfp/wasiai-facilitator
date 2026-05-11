@@ -68,6 +68,13 @@ export const FIAT_TOKEN_ABI = [
     ],
     outputs: [],
   },
+  {
+    type: 'function',
+    name: 'DOMAIN_SEPARATOR',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ type: 'bytes32' }],
+  },
 ] as const;
 
 /**

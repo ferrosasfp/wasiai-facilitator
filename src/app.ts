@@ -15,6 +15,7 @@ import { settleRoute } from './routes/settle.js';
 import { supportedRoute } from './routes/supported.js';
 import { openapiRoute } from './routes/openapi.js';
 import { initChainBreakers } from './chains/init-breakers.js';
+import { initDomainCheck } from './chains/init-domain-check.js';
 // Side-effect import: registers built-in chain adapters (kite, avalanche) in chainRegistry.
 // MUST be imported at app bootstrap — without this, chainRegistry stays empty and
 // GET /supported returns { chains: [], methods: [] }.
@@ -53,6 +54,16 @@ export interface BuildAppOptions {
   rawEnv?: NodeJS.ProcessEnv;
   /** Pino destination stream for log capture (for tests). Default: undefined (stdout). */
   loggerDestination?: DestinationStream;
+  /**
+   * WFAC-53 FIX-2 — opt-out flag for tests that build the app without
+   * configuring chain adapters with real RPC mocks. When true, the
+   * DOMAIN_SEPARATOR() boot-time drift check is skipped entirely.
+   *
+   * Default `false`: production code path always runs the check.
+   * Test files that register fake adapters without `readContract` mock
+   * MUST set this to true to avoid spurious warn/fatal logs (CD-16).
+   */
+  skipDomainCheck?: boolean;
 }
 
 /**
@@ -99,11 +110,37 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     crossOriginEmbedderPolicy: false,
   });
 
-  // CORS — permissive origin: true (reflects Origin header) so integrators
-  // from any marketplace/wallet can call /verify, /settle, /supported.
-  // Server-to-server calls (wasiai-a2a) ignore CORS. Tighten via env if needed.
+  // WFAC-53 FIX-1 — CORS origin policy.
+  //   - CORS_ALLOWED_ORIGINS absent or empty → origin: true (legacy permissive
+  //     — reflects any Origin so wasiai-a2a / wasiai-v2 dev keeps working).
+  //   - CORS_ALLOWED_ORIGINS = "https://a,https://b" → callback whitelist;
+  //     non-whitelisted origins get 403 with no Access-Control-Allow-Origin.
+  // CD-11: manual CSV parse (split + trim + filter), NO Zod transform.
+  const corsAllowedOrigins: readonly string[] = (env.CORS_ALLOWED_ORIGINS ?? '')
+    .split(',')
+    .map((o) => o.trim())
+    .filter((o) => o.length > 0);
+
+  const corsOriginPolicy:
+    | true
+    | ((origin: string | undefined, cb: (err: Error | null, allow: boolean) => void) => void) =
+    corsAllowedOrigins.length === 0
+      ? true
+      : (origin, cb) => {
+          // CORS spec: same-origin requests have no Origin header → reflect (cb true).
+          if (!origin) {
+            cb(null, true);
+            return;
+          }
+          if (corsAllowedOrigins.includes(origin)) {
+            cb(null, true);
+            return;
+          }
+          cb(null, false); // @fastify/cors emits 403 + omits ACAO header
+        };
+
   await app.register(cors, {
-    origin: true,
+    origin: corsOriginPolicy,
     credentials: false,
     methods: ['GET', 'POST', 'OPTIONS'],
     maxAge: 86400,
@@ -185,6 +222,13 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   // Cast: FastifyBaseLogger is structurally compatible with pino.Logger at
   // runtime; the missing `msgPrefix` field is an unused pino internal.
   initChainBreakers(app.log as unknown as Logger);
+
+  // WFAC-53 FIX-2 — boot-time DOMAIN_SEPARATOR() drift assertion (DT-I, CD-14).
+  // Test-only opt-out via skipDomainCheck (CD-16). Production path always runs.
+  // Cast pattern matches initChainBreakers above (AB-WFAC-41-3).
+  if (!options.skipDomainCheck) {
+    await initDomainCheck(app.log as unknown as Logger);
+  }
 
   await app.register(healthRoute);
   await app.register(verifyRoute);

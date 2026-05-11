@@ -29,7 +29,15 @@ export type AmountCapResult = { ok: true } | { ok: false; limit: bigint };
 
 export type DailyCapResult =
   | { ok: true; count: number; cap: number }
-  | { ok: false; count: number; cap: number; retryAfterSeconds: number };
+  | {
+      ok: false;
+      reason: 'cap_exceeded';
+      count: number;
+      cap: number;
+      retryAfterSeconds: number;
+    }
+  // WFAC-53 FIX-6 — fail-closed path: route surfaces HTTP 503 SERVICE_UNAVAILABLE.
+  | { ok: false; reason: 'redis_error_failclosed' };
 
 /**
  * Synchronous amount check. Rejects if `amountAtomic` > `capAtomic`.
@@ -62,10 +70,14 @@ export function checkSettleAmountCap(amountAtomic: string, capAtomic: string): A
  * (fail-open). Never throws.
  *
  * @param cap — configured global daily cap. If <= 0, all requests pass (disabled).
- * @param logger — for warn-level logging on fail-open paths.
+ * @param failMode — WFAC-53 FIX-6. 'open' (default, V1) → Redis throw → fail-open;
+ *                   'closed' → Redis throw → return `{ ok: false, reason: 'redis_error_failclosed' }`
+ *                   so the /settle route can respond HTTP 503 SERVICE_UNAVAILABLE (CD-8, CD-15).
+ * @param logger — for warn-level logging on fail-open/fail-closed paths.
  */
 export async function incrementAndCheckDailyCap(
   cap: number,
+  failMode: 'open' | 'closed',
   logger: Pick<Logger, 'warn' | 'debug'>,
 ): Promise<DailyCapResult> {
   if (cap <= 0) return { ok: true, count: 0, cap: 0 };
@@ -85,10 +97,16 @@ export async function incrementAndCheckDailyCap(
     }
     if (count > cap) {
       const retryAfterSeconds = secondsUntilNextUtcMidnight(now);
-      return { ok: false, count, cap, retryAfterSeconds };
+      return { ok: false, reason: 'cap_exceeded', count, cap, retryAfterSeconds };
     }
     return { ok: true, count, cap };
   } catch (err) {
+    if (failMode === 'closed') {
+      // WFAC-53 FIX-6 fail-closed — route surfaces HTTP 503 SERVICE_UNAVAILABLE.
+      logger.warn({ err, cap }, 'settle daily cap check failed — fail-closed');
+      return { ok: false, reason: 'redis_error_failclosed' };
+    }
+    // failMode === 'open' (default, CD-8 preserves V1 fail-open behavior).
     logger.warn({ err, cap }, 'settle daily cap check failed — fail-open');
     return { ok: true, count: 0, cap };
   }
