@@ -127,6 +127,17 @@ export const EnvSchema = z
      * Example: 'https://a2a.wasiai.io,https://app.wasiai.io'.
      */
     CORS_ALLOWED_ORIGINS: z.string().optional(),
+
+    /**
+     * WFAC-53 FIX-6 — failure mode for incrementAndCheckDailyCap.
+     *   - 'open'   (default, V1 backward-compatible): Redis throw → allow
+     *              request through (fail-open).
+     *   - 'closed' (opt-in hardening): Redis throw → returns
+     *              { ok: false, reason: 'redis_error_failclosed' } →
+     *              /settle route returns HTTP 503 SERVICE_UNAVAILABLE.
+     * CD-8: default 'open' preserves V1 behavior exactly.
+     */
+    SETTLE_CAP_FAIL_MODE: z.enum(['open', 'closed']).default('open'),
   })
   .superRefine((data, ctx) => {
     if (!data.REDIS_URL && data.NODE_ENV !== 'test') {
