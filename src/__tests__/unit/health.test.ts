@@ -48,12 +48,12 @@ describe('buildApp', () => {
   });
 
   it('returns a Fastify instance without calling listen', async () => {
-    app = await buildApp();
+    app = await buildApp({ skipDomainCheck: true }); // WFAC-53 CD-16
     expect(app.server.listening).toBe(false);
   });
 
   it('listens on 0.0.0.0 when index.ts binds', async () => {
-    app = await buildApp();
+    app = await buildApp({ skipDomainCheck: true }); // WFAC-53 CD-16
     await app.listen({ port: 0, host: '0.0.0.0' });
     const addresses = app.addresses();
     expect(addresses.length).toBeGreaterThan(0);
@@ -67,6 +67,7 @@ describe('buildApp', () => {
     app = await buildApp({
       rawEnv: { ...process.env, LOG_LEVEL: 'info' },
       loggerDestination: capture,
+      skipDomainCheck: true, // WFAC-53 CD-16
     });
 
     // In index.ts, this log is emitted AFTER `app.listen(...)`. Here we do
@@ -102,6 +103,7 @@ describe('buildApp', () => {
     app = await buildApp({
       rawEnv: { ...process.env, LOG_LEVEL: 'info' },
       loggerDestination: capture,
+      skipDomainCheck: true, // WFAC-53 CD-16
     });
 
     // Mirror the BLQ-BAJO-1 fix applied in src/index.ts: Fastify v5 calls
@@ -166,7 +168,7 @@ describe('GET /health', () => {
   });
 
   it('returns 200 with exact shape {status, version, uptime, timestamp}', async () => {
-    app = await buildApp();
+    app = await buildApp({ skipDomainCheck: true }); // WFAC-53 CD-16
     const res = await app.inject({ method: 'GET', url: '/health' });
     expect(res.statusCode).toBe(200);
     expect(res.headers['content-type']).toMatch(/^application\/json/);
@@ -183,7 +185,7 @@ describe('GET /health', () => {
   });
 
   it('version matches package.json', async () => {
-    app = await buildApp();
+    app = await buildApp({ skipDomainCheck: true }); // WFAC-53 CD-16
     const res = await app.inject({ method: 'GET', url: '/health' });
     const body = JSON.parse(res.body) as { version: string };
 
@@ -195,7 +197,7 @@ describe('GET /health', () => {
   });
 
   it('responds under 50ms (p99 localhost)', async () => {
-    app = await buildApp();
+    app = await buildApp({ skipDomainCheck: true }); // WFAC-53 CD-16
     // Warm-up inject (JIT).
     await app.inject({ method: 'GET', url: '/health' });
 
@@ -237,6 +239,7 @@ describe('GET /health', () => {
     app = await buildApp({
       rawEnv: { ...process.env, LOG_LEVEL: 'info' },
       loggerDestination: capture,
+      skipDomainCheck: true, // WFAC-53 CD-16
     });
 
     const res = await app.inject({ method: 'GET', url: '/health' });
@@ -258,7 +261,7 @@ describe('GET /health', () => {
   });
 
   it('can be tested via inject() without binding a real port', async () => {
-    app = await buildApp();
+    app = await buildApp({ skipDomainCheck: true }); // WFAC-53 CD-16
     const res = await app.inject({ method: 'GET', url: '/health' });
     expect(res.statusCode).toBe(200);
     expect(app.server.listening).toBe(false);
@@ -267,7 +270,7 @@ describe('GET /health', () => {
   // ─── WFAC-33 W4 — audit hook exclusion ────────────────────────────────
 
   it('T-AH-1 / AC-2: /health is NOT audited (listed in AUDIT_EXCLUDED_PATHS)', async () => {
-    app = await buildApp();
+    app = await buildApp({ skipDomainCheck: true }); // WFAC-53 CD-16
     const audit = (await import('../../core/audit.js')) as unknown as {
       __persistAuditSpy: ReturnType<typeof vi.fn>;
       __buildAuditSpy: ReturnType<typeof vi.fn>;

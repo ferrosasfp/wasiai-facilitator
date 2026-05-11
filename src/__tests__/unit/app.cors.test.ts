@@ -5,12 +5,7 @@
  * src/__tests__/unit/rate-limiting.test.ts. Each test exercises a different
  * CORS_ALLOWED_ORIGINS configuration end-to-end through @fastify/cors.
  *
- * Refs: AC-1, AC-2, AC-3, CD-11.
- *
- * NOTE (Story §C2 trade-off): `BuildAppOptions.skipDomainCheck` is introduced
- * in C3 (FIX-2). In C2 the chain registry is empty by default in tests →
- * `initDomainCheck` (when wired in C3) will iterate 0 adapters → no-op. The
- * flag will be added to these `buildApp` callers as part of C3's R-4 migration.
+ * Refs: AC-1, AC-2, AC-3, CD-11, CD-16.
  */
 
 import { describe, it, expect, afterEach, beforeEach } from 'vitest';
@@ -41,6 +36,7 @@ describe('CORS_ALLOWED_ORIGINS — FIX-1 (WFAC-53)', () => {
         // RATE_LIMIT_ENABLED=false to isolate CORS-only path:
         RATE_LIMIT_ENABLED: 'false',
       },
+      skipDomainCheck: true, // WFAC-53 CD-16 — no chain adapters configured here
     });
 
     const res = await app.inject({
@@ -64,6 +60,7 @@ describe('CORS_ALLOWED_ORIGINS — FIX-1 (WFAC-53)', () => {
         CORS_ALLOWED_ORIGINS: 'https://a2a.wasiai.io',
         RATE_LIMIT_ENABLED: 'false',
       },
+      skipDomainCheck: true, // WFAC-53 CD-16 — no chain adapters configured here
     });
 
     const res = await app.inject({
@@ -89,6 +86,7 @@ describe('CORS_ALLOWED_ORIGINS — FIX-1 (WFAC-53)', () => {
         // CORS_ALLOWED_ORIGINS intentionally absent
         RATE_LIMIT_ENABLED: 'false',
       },
+      skipDomainCheck: true, // WFAC-53 CD-16 — no chain adapters configured here
     });
 
     const res = await app.inject({

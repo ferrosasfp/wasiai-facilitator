@@ -286,6 +286,7 @@ describe('buildApp onClose integration (AC-10, AC-11)', () => {
 
     const app = await buildApp({
       env: makeEnv({ REDIS_URL: 'redis://host:6379/0' }),
+      skipDomainCheck: true, // WFAC-53 CD-16
     });
     // Force client creation.
     getRedisClient();
@@ -303,6 +304,7 @@ describe('buildApp onClose integration (AC-10, AC-11)', () => {
 
     const app = await buildApp({
       env: makeEnv({ REDIS_URL: 'redis://host:6379/0' }),
+      skipDomainCheck: true, // WFAC-53 CD-16
     });
     getRedisClient();
 
@@ -316,6 +318,7 @@ describe('buildApp onClose integration (AC-10, AC-11)', () => {
 
     const app = await buildApp({
       env: makeEnv({ NODE_ENV: 'test', REDIS_URL: undefined }),
+      skipDomainCheck: true, // WFAC-53 CD-16
     });
     // No getRedisClient() call → singleton stays null.
 

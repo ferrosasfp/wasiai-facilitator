@@ -76,7 +76,7 @@ function makeEnv(overrides: Partial<EnvConfig> = {}): EnvConfig {
 
 async function buildTestApp(): Promise<FastifyInstance> {
   const { buildApp } = await import('../../app.js');
-  return buildApp({ env: makeEnv() });
+  return buildApp({ env: makeEnv(), skipDomainCheck: true }); // WFAC-53 CD-16
 }
 
 describe('GET /openapi.json', () => {

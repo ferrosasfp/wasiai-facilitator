@@ -15,6 +15,7 @@ import { settleRoute } from './routes/settle.js';
 import { supportedRoute } from './routes/supported.js';
 import { openapiRoute } from './routes/openapi.js';
 import { initChainBreakers } from './chains/init-breakers.js';
+import { initDomainCheck } from './chains/init-domain-check.js';
 // Side-effect import: registers built-in chain adapters (kite, avalanche) in chainRegistry.
 // MUST be imported at app bootstrap — without this, chainRegistry stays empty and
 // GET /supported returns { chains: [], methods: [] }.
@@ -53,6 +54,16 @@ export interface BuildAppOptions {
   rawEnv?: NodeJS.ProcessEnv;
   /** Pino destination stream for log capture (for tests). Default: undefined (stdout). */
   loggerDestination?: DestinationStream;
+  /**
+   * WFAC-53 FIX-2 — opt-out flag for tests that build the app without
+   * configuring chain adapters with real RPC mocks. When true, the
+   * DOMAIN_SEPARATOR() boot-time drift check is skipped entirely.
+   *
+   * Default `false`: production code path always runs the check.
+   * Test files that register fake adapters without `readContract` mock
+   * MUST set this to true to avoid spurious warn/fatal logs (CD-16).
+   */
+  skipDomainCheck?: boolean;
 }
 
 /**
@@ -209,6 +220,13 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   // Cast: FastifyBaseLogger is structurally compatible with pino.Logger at
   // runtime; the missing `msgPrefix` field is an unused pino internal.
   initChainBreakers(app.log as unknown as Logger);
+
+  // WFAC-53 FIX-2 — boot-time DOMAIN_SEPARATOR() drift assertion (DT-I, CD-14).
+  // Test-only opt-out via skipDomainCheck (CD-16). Production path always runs.
+  // Cast pattern matches initChainBreakers above (AB-WFAC-41-3).
+  if (!options.skipDomainCheck) {
+    await initDomainCheck(app.log as unknown as Logger);
+  }
 
   await app.register(healthRoute);
   await app.register(verifyRoute);

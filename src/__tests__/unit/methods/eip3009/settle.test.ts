@@ -395,16 +395,22 @@ describe('settleEip3009', () => {
 
   describe('AC-11 — ABI shape matches v/r/s overload', () => {
     it('FIAT_TOKEN_ABI has transferWithAuthorization with 9 inputs ending in v,r,s', () => {
-      expect(FIAT_TOKEN_ABI).toHaveLength(1);
-      const fn = FIAT_TOKEN_ABI[0];
-      expect(fn.name).toBe('transferWithAuthorization');
-      expect(fn.inputs).toHaveLength(9);
-      expect(fn.inputs[6]?.name).toBe('v');
-      expect(fn.inputs[6]?.type).toBe('uint8');
-      expect(fn.inputs[7]?.name).toBe('r');
-      expect(fn.inputs[7]?.type).toBe('bytes32');
-      expect(fn.inputs[8]?.name).toBe('s');
-      expect(fn.inputs[8]?.type).toBe('bytes32');
+      // WFAC-53 FIX-2 — FIAT_TOKEN_ABI was extended with a 2nd entry
+      // (`DOMAIN_SEPARATOR()` view) for the boot-time drift assertion.
+      // Length is now 2; this test continues to validate the original
+      // transferWithAuthorization entry by `name` rather than positional [0]
+      // (defensive against future entry order changes).
+      expect(FIAT_TOKEN_ABI).toHaveLength(2);
+      const fn = FIAT_TOKEN_ABI.find((e) => e.name === 'transferWithAuthorization');
+      expect(fn).toBeDefined();
+      expect(fn?.name).toBe('transferWithAuthorization');
+      expect(fn?.inputs).toHaveLength(9);
+      expect(fn?.inputs[6]?.name).toBe('v');
+      expect(fn?.inputs[6]?.type).toBe('uint8');
+      expect(fn?.inputs[7]?.name).toBe('r');
+      expect(fn?.inputs[7]?.type).toBe('bytes32');
+      expect(fn?.inputs[8]?.name).toBe('s');
+      expect(fn?.inputs[8]?.type).toBe('bytes32');
     });
   });
 
