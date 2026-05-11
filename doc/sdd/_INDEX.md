@@ -20,6 +20,7 @@
 | 016 | 2026-04-24 | Circuit breaker per chain RPC (WFAC-41) | resiliency | QUALITY | DONE | main (cdbeb34) |
 | 017 | 2026-04-24 | Kite Testnet adapter REAL — stub → on-chain (WFAC-50) | chain-impl | QUALITY | DONE | main (d32ad48) |
 | 018 | 2026-04-24 | Avalanche Fuji adapter REAL — verify+settle on-chain (WFAC-52) | chain-impl | QUALITY | DONE (retroactive — code merged in PR #33 before pipeline ran; F0–F4 closed post-hoc) | main (070875c) PR #33 |
+| 019 | 2026-05-11 | Post-review hardening — multi-chain, multi-consumer (WFAC-53) | security-hardening | QUALITY | DONE | fix/wfac-53-post-review-hardening |
 
 <!--
 Formato por entrada:
