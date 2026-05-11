@@ -465,4 +465,20 @@ describe('parseEnv', () => {
     });
     expect(result.KITE_MAINNET_USDC_ADDRESS).toBe('0x7aB6f3ed87C42eF0aDb67Ed95090f8bF5240149e');
   });
+
+  // ─── WFAC-53 FIX-1 — CORS_ALLOWED_ORIGINS ────────────────────────────────
+
+  it('T-ENV-CORS-1 (FIX-1 AC-2): CORS_ALLOWED_ORIGINS defaults undefined when missing', () => {
+    const result = parseEnv({ NODE_ENV: 'test' });
+    expect(result.CORS_ALLOWED_ORIGINS).toBeUndefined();
+  });
+
+  it('T-ENV-CORS-2 (FIX-1 AC-1, CD-11): parses CSV string as-is (no Zod transform)', () => {
+    const result = parseEnv({
+      NODE_ENV: 'test',
+      CORS_ALLOWED_ORIGINS: 'https://a2a.wasiai.io,https://app.wasiai.io',
+    });
+    expect(result.CORS_ALLOWED_ORIGINS).toBe('https://a2a.wasiai.io,https://app.wasiai.io');
+    expect(typeof result.CORS_ALLOWED_ORIGINS).toBe('string'); // raw, not transformed
+  });
 });

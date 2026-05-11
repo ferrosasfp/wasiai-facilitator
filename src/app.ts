@@ -99,11 +99,35 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     crossOriginEmbedderPolicy: false,
   });
 
-  // CORS — permissive origin: true (reflects Origin header) so integrators
-  // from any marketplace/wallet can call /verify, /settle, /supported.
-  // Server-to-server calls (wasiai-a2a) ignore CORS. Tighten via env if needed.
+  // WFAC-53 FIX-1 — CORS origin policy.
+  //   - CORS_ALLOWED_ORIGINS absent or empty → origin: true (legacy permissive
+  //     — reflects any Origin so wasiai-a2a / wasiai-v2 dev keeps working).
+  //   - CORS_ALLOWED_ORIGINS = "https://a,https://b" → callback whitelist;
+  //     non-whitelisted origins get 403 with no Access-Control-Allow-Origin.
+  // CD-11: manual CSV parse (split + trim + filter), NO Zod transform.
+  const corsAllowedOrigins: readonly string[] = (env.CORS_ALLOWED_ORIGINS ?? '')
+    .split(',')
+    .map((o) => o.trim())
+    .filter((o) => o.length > 0);
+
+  const corsOriginPolicy: true | ((origin: string | undefined, cb: (err: Error | null, allow: boolean) => void) => void) =
+    corsAllowedOrigins.length === 0
+      ? true
+      : (origin, cb) => {
+          // CORS spec: same-origin requests have no Origin header → reflect (cb true).
+          if (!origin) {
+            cb(null, true);
+            return;
+          }
+          if (corsAllowedOrigins.includes(origin)) {
+            cb(null, true);
+            return;
+          }
+          cb(null, false); // @fastify/cors emits 403 + omits ACAO header
+        };
+
   await app.register(cors, {
-    origin: true,
+    origin: corsOriginPolicy,
     credentials: false,
     methods: ['GET', 'POST', 'OPTIONS'],
     maxAge: 86400,

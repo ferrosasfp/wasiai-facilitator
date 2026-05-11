@@ -118,6 +118,15 @@ export const EnvSchema = z
     // Set to 0 to disable (useful for stress-testing or after re-fueling).
     // Fail-open on Redis outage (never blocks due to infra).
     SETTLE_DAILY_GLOBAL_CAP: z.coerce.number().int().min(0).default(1000),
+
+    /**
+     * WFAC-53 FIX-1 — CORS origin whitelist. Raw CSV string (NO Zod transform
+     * per CD-11). When absent or empty → @fastify/cors uses `origin: true`
+     * (reflect any origin). When non-empty → callback returns true only for
+     * listed origins; non-whitelisted origins receive 403 (no ACAO header).
+     * Example: 'https://a2a.wasiai.io,https://app.wasiai.io'.
+     */
+    CORS_ALLOWED_ORIGINS: z.string().optional(),
   })
   .superRefine((data, ctx) => {
     if (!data.REDIS_URL && data.NODE_ENV !== 'test') {
