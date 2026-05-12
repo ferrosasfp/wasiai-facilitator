@@ -183,7 +183,7 @@ choices and how to tighten them in production.
 If you discover a vulnerability affecting wasiai-facilitator, please disclose
 responsibly via:
 
-- **Email:** `security@wasiai.io`
+- **Email:** `fernando@wasiai.io` _(temporary direct contact; will migrate to `security@wasiai.io` group inbox in V1.1)_
 - **Acknowledgement SLA:** 48 hours for first response (business days).
 - **Public disclosure:** coordinated, after a fix is shipped (90-day default
   embargo).
@@ -196,5 +196,6 @@ responsibly via:
 For non-security bug reports use GitHub Issues; for security reports use email
 only (do NOT open public Issues for unpatched vulnerabilities).
 
-> **TO-VERIFY-PRE-MERGE:** confirm `security@wasiai.io` mailbox + 48h SLA with
-> operator before merging to `main`. Provisional values per Story File AC-11.
+> **Status (2026-05-12):** `fernando@wasiai.io` confirmed as temporary contact
+> by operator. Migration to `security@wasiai.io` group inbox tracked as V1.1
+> (no specific ticket — operational, not code).
