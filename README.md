@@ -2,6 +2,23 @@
 
 > Self-hosted x402 facilitator for EVM chains. Part of the WasiAI ecosystem.
 
+## 🏆 Kite Hackathon 2026 submission
+
+The wasiai-facilitator is the self-hosted x402 relayer that powers gasless settlement on Kite and Avalanche for the **WasiAI A2A** agent commerce gateway. Together with [`wasiai-a2a`](https://github.com/ferrosasfp/wasiai-a2a) (the gateway) and [`wasiai-agentshop`](https://github.com/ferrosasfp/wasiai-agentshop) (the use case demo), it forms our Kite Hackathon 2026 submission.
+
+| Resource | Link |
+|---|---|
+| 🌐 **Use case demo** | https://wasiai-agentshop.vercel.app/ |
+| 🎬 **Demo video (3 min)** | https://www.youtube.com/watch?v=Ydh_sEJXgt4 |
+| 🔗 **Sample on-chain tx** | [`0xf3eaa00a…0f1d674`](https://testnet.kitescan.ai/tx/0xf3eaa00a7e83c41b2b9d8247e39d32f564b36cd8745f91e3c080ff23f0f1d674) — PYUSD settle on Kite Ozone via this facilitator |
+| 📦 **A2A gateway repo** | https://github.com/ferrosasfp/wasiai-a2a |
+| 📦 **Use case repo** | https://github.com/ferrosasfp/wasiai-agentshop |
+| 🎤 **Pitch deck** | https://wasiai.io/pitch-v6/ |
+
+Built by Fernando Rosas and Elizabeth Palacios.
+
+---
+
 ## What is this?
 
 A [HTTP 402 Payment Required](https://docs.x402.org) protocol facilitator — verifies payment signatures off-chain and settles EIP-3009 `transferWithAuthorization` transactions on-chain, enabling gasless stablecoin micropayments between autonomous agents.
@@ -10,16 +27,17 @@ A [HTTP 402 Payment Required](https://docs.x402.org) protocol facilitator — ve
 
 **👉 Integrating as a client?** See **[doc/HACKATHON.md](doc/HACKATHON.md)** for a full guide with code examples, error codes, and limits.
 
-**Currently supported (V1):**
+**Currently supported chains:**
 | Chain              | chainId | Token | Status |
 |--------------------|---------|-------|--------|
-| Kite Testnet       | 2368    | PYUSD (18 dec) | ✅ Live + E2E tested |
-| Kite Mainnet       | 2366    | —     | Opt-in (env-gated) |
-| Avalanche Fuji     | 43113   | USDC  | Stub (WFAC-52 pending) |
+| Kite Ozone Testnet  | 2368    | PYUSD (18 dec) | ✅ Live + E2E tested |
+| Kite Mainnet       | 2366    | USDC.e | Staged (env-gated) |
+| Avalanche Fuji     | 43113   | USDC  | ✅ Live |
+| Avalanche C-Chain Mainnet | 43114 | USDC | ✅ Live (mainnet hybrid mode) |
 
 **Method:** EIP-3009 `TransferWithAuthorization`
 
-**Roadmap:** Permit2, ERC-7710 delegations, Solana/Aptos/Stellar, Avalanche real.
+**Roadmap:** Permit2, ERC-7710 delegations, Solana, Aptos, Stellar.
 
 ---
 
@@ -99,7 +117,8 @@ See `doc/architecture/SECURITY.md` for threat model.
 
 ## Ecosystem
 
-- [`wasiai-a2a`](https://github.com/ferrosasfp/wasiai-a2a) — A2A Protocol gateway (consumes facilitator)
+- [`wasiai-a2a`](https://github.com/ferrosasfp/wasiai-a2a) — A2A Protocol gateway (consumes this facilitator)
+- [`wasiai-agentshop`](https://github.com/ferrosasfp/wasiai-agentshop) — first use case on the stack (LATAM remittances on Kite, settled via this facilitator)
 - [`wasiai-v2`](https://github.com/ferrosasfp/wasiai-v2) — Agent marketplace
 - [WasiAI](https://wasiai.io) — Landing
 
