@@ -17,6 +17,7 @@
 import { chainRegistry } from './registry.js';
 import { kiteTestnetAdapter, kiteMainnetAdapter } from './kite.js';
 import { avalancheFujiAdapter, avalancheMainnetAdapter } from './avalanche.js';
+import { baseSepoliaAdapter, baseMainnetAdapter } from './base.js';
 
 chainRegistry.register(kiteTestnetAdapter);
 // Optional adapters — registered only when fully configured.
@@ -24,10 +25,16 @@ chainRegistry.register(kiteTestnetAdapter);
 // Testnets (Fuji): registered if their RPC env var is set. This is the
 // historical behavior — present before the mainnet flags landed.
 //
-// Mainnets (Kite Mainnet, Avalanche C-Chain): require BOTH an explicit
-// `*_ENABLED=true` flag AND the corresponding RPC + token-address env vars.
-// Each adapter module returns `null` when those preconditions are not met,
-// so existing testnet-only deployments boot identically to before this PR.
+// Mainnets (Kite Mainnet, Avalanche C-Chain, Base Mainnet) AND Base Sepolia:
+// require BOTH an explicit `*_ENABLED=true` flag AND the corresponding RPC
+// (+ token-address where applicable) env vars. Each adapter module returns
+// `null` when those preconditions are not met, so existing deployments boot
+// identically to before this PR.
+//
+// WKH-105: Base Sepolia is opt-in too (NOT auto-registered on RPC presence
+// like Fuji) — CD-2 of the work-item requires default OFF on Base Sepolia.
 if (kiteMainnetAdapter !== null) chainRegistry.register(kiteMainnetAdapter);
 if (avalancheFujiAdapter !== null) chainRegistry.register(avalancheFujiAdapter);
 if (avalancheMainnetAdapter !== null) chainRegistry.register(avalancheMainnetAdapter);
+if (baseSepoliaAdapter !== null) chainRegistry.register(baseSepoliaAdapter);
+if (baseMainnetAdapter !== null) chainRegistry.register(baseMainnetAdapter);
