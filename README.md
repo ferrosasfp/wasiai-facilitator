@@ -34,6 +34,8 @@ A [HTTP 402 Payment Required](https://docs.x402.org) protocol facilitator — ve
 | Kite Mainnet       | 2366    | USDC.e | Staged (env-gated) |
 | Avalanche Fuji     | 43113   | USDC  | ✅ Live |
 | Avalanche C-Chain Mainnet | 43114 | USDC | ✅ Live (mainnet hybrid mode) |
+| Base Sepolia       | 84532   | USDC (6 dec) | Staged (env-gated, WKH-105) |
+| Base Mainnet       | 8453    | USDC (6 dec) | Staged (env-gated, WKH-105) |
 
 **Method:** EIP-3009 `TransferWithAuthorization`
 
@@ -58,6 +60,42 @@ curl https://wasiai-facilitator-production.up.railway.app/supported
 ```
 
 Full integration guide: **[doc/HACKATHON.md](doc/HACKATHON.md)**.
+
+---
+
+## Supported Networks: Base
+
+Base support (WKH-105) is implemented as an opt-in chain adapter pair following the same chain-adaptive pattern as Avalanche and Kite. Both Base networks are **disabled by default** — operators must explicitly opt in.
+
+### Base Sepolia (chainId 84532)
+
+Testnet — Circle USDC at `0x036CbD53842c5426634e7929541eC2318f3dCF7e` (6 decimals, EIP-712 domain `name="USDC"` v2). Use this for integration testing without spending real funds.
+
+To enable on Railway / local:
+
+```bash
+BASE_SEPOLIA_ENABLED=true
+BASE_SEPOLIA_RPC_URL=https://sepolia.base.org   # or your Alchemy/Infura endpoint
+```
+
+Operator wallet must hold Base Sepolia ETH for gas — [Coinbase faucet](https://www.coinbase.com/faucets/base-sepolia-faucet).
+
+### Base Mainnet (chainId 8453)
+
+Production — native Circle USDC at `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` (6 decimals, EIP-712 domain `name="USD Coin"` v2). Mainnet moves real money — only enable after Sepolia validation and explicit operator approval.
+
+```bash
+BASE_MAINNET_ENABLED=true
+BASE_MAINNET_RPC_URL=https://mainnet.base.org
+```
+
+Operator wallet must hold Base ETH (L2 native gas) before flipping the flag.
+
+### Notes
+
+- The EIP-712 `name` field on **Base Sepolia USDC literally returns `"USDC"`** (not `"USD Coin"` like the other Circle USDC deployments). This is verified on-chain via `cast call ... "name()(string)"`. The adapter encodes both variants — boot-time `initDomainCheck` (WFAC-53) will refuse to start if the local domain separator drifts from the on-chain `DOMAIN_SEPARATOR()`.
+- Both Base networks reuse the existing per-chain `ChainCircuitBreaker` (CB_FAILURE_THRESHOLD, CB_ROLLING_WINDOW_MS, etc.) — RPC outages on one chain do not affect the others.
+- A single `OPERATOR_PRIVATE_KEY` signs across all chains today (V1 multi-key story is a separate epic).
 
 ---
 
