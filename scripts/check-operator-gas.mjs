@@ -21,12 +21,16 @@
 import { privateKeyToAccount } from 'viem/accounts';
 import { createPublicClient, http, formatEther } from 'viem';
 
-const THRESHOLD_WEI = 100_000_000_000_000_000n; // 0.1 KITE/AVAX
+const THRESHOLD_WEI = 100_000_000_000_000_000n; // 0.1 KITE/AVAX/ETH
 
 const CHAINS = [
   { name: 'Kite Testnet', envVar: 'KITE_TESTNET_RPC_URL', chainId: 2368, symbol: 'KITE' },
   { name: 'Kite Mainnet', envVar: 'KITE_MAINNET_RPC_URL', chainId: 2366, symbol: 'KITE' },
   { name: 'Avalanche Fuji', envVar: 'AVALANCHE_FUJI_RPC_URL', chainId: 43113, symbol: 'AVAX' },
+  // WKH-105: Base operator gas. Skipped automatically (see loop) when the
+  // RPC env var is unset, so this is inert until Base is activated.
+  { name: 'Base Sepolia', envVar: 'BASE_SEPOLIA_RPC_URL', chainId: 84532, symbol: 'ETH' },
+  { name: 'Base Mainnet', envVar: 'BASE_MAINNET_RPC_URL', chainId: 8453, symbol: 'ETH' },
 ];
 
 const pk = process.env.OPERATOR_PRIVATE_KEY;
