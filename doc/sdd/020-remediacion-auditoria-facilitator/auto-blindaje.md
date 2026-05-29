@@ -17,3 +17,9 @@
 - **Causa raíz**: estos archivos no estaban en el Scope IN explícito, pero codificaban el comportamiento exacto (parseo de XFF crudo) que AC-2 elimina por seguridad. El cambio en `network.ts` (en scope) los invalida.
 - **Fix**: re-expresar las assertions (familia R-1) para el nuevo contrato single-source: `extractClientIp` y el audit log registran el `request.ip` resuelto, no el XFF forjado. Tests con `remoteAddress` para fijar el peer y asertar que el XFF crudo ya NO lo sobreescribe. Cambio intencional documentado, no regresión.
 - **Aplicar en**: cualquier test que asuma "primer XFF = client IP" debe re-expresarse al nuevo modelo; nunca relajar la propiedad de seguridad.
+
+### [2026-05-29] Wave 3 — target T18 "<100 LOC por adapter" no alcanzable sin perder lógica
+- **Error/observación**: tras extraer `BaseEip3009Adapter`, los wrappers quedan kite=~178, avalanche=151, base=178 líneas (con comentarios); incluso sin comentarios kite=117, avalanche=102, base=106. El target T18 del Story File es <100 c/u.
+- **Causa raíz**: cada wrapper RETIENE lógica irreducible: 2-3 env-readers (readEnv/readRpcUrl/readUsdcAddress/readEnabledFlag, con switch sobre union por seguridad), constantes de token (USDC_*), el constructor que arma viemChain/token y llama super(), y los exports. Eso por sí solo supera 100 líneas no-comentario.
+- **Fix/decisión**: AC-5 DoD real = "lógica compartida UNA sola vez + ~591 tests verdes sin tocar assertions + T16 intacto", todo cumplido (base-adapter.ts = 519 líneas que antes estaban triplicadas ~1590). El <100 es target blando (T18), no CD bloqueante. Se redujeron comentarios donde no costaba claridad; no se sacrificó lógica de env/seguridad por llegar al número.
+- **Aplicar en**: cuando un target de LOC choca con lógica necesaria, priorizar la dedup real (DRY de la lógica compleja) y documentar la desviación; no inflar/comprimir artificialmente.
