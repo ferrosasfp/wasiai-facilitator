@@ -222,6 +222,9 @@ export const SETTLE_IDEMPOTENCY_TTL_SEC = 120;
 /** Distinct prefix from VERIFY_IDEMPOTENCY_KEY_PREFIX (CD-6, CD-11 SDD nuevo). */
 export const SETTLE_IDEMPOTENCY_KEY_PREFIX = 'settle:idempotency:';
 
+/** Prefix for in-flight settle locks (distinct from idempotency entries). */
+export const SETTLE_INFLIGHT_KEY_PREFIX = 'settle:inflight:';
+
 /**
  * Cached settle success — 7 spec-literal fields of SettleResult.
  * NOTE: structural (no `SettleResult` import from src/chains/types.ts) to
@@ -326,6 +329,64 @@ export async function setCachedSettleResponse(
     await client.set(key, JSON.stringify(payload), 'EX', SETTLE_IDEMPOTENCY_TTL_SEC);
   } catch {
     // Swallow — graceful degradation.
+  }
+}
+
+/**
+ * Map an idempotency key to its in-flight lock key (same canonical hash, a
+ * distinct prefix so a lock never collides with a cached response entry).
+ */
+function toInflightKey(idempotencyKey: string): string {
+  // idempotencyKey = `${SETTLE_IDEMPOTENCY_KEY_PREFIX}${hash}`
+  return idempotencyKey.startsWith(SETTLE_IDEMPOTENCY_KEY_PREFIX)
+    ? `${SETTLE_INFLIGHT_KEY_PREFIX}${idempotencyKey.slice(SETTLE_IDEMPOTENCY_KEY_PREFIX.length)}`
+    : `${SETTLE_INFLIGHT_KEY_PREFIX}${idempotencyKey}`;
+}
+
+/**
+ * Acquire an in-flight lock for a settle request (WFAC-AUDIT AC-3).
+ *
+ * Returns:
+ *   - 'acquired' → lock set (SET NX OK) → caller dispatches settleCore.
+ *   - 'held'     → lock already exists (concurrent identical request in-flight)
+ *                  → caller responds HTTP 409.
+ *   - 'skipped'  → Redis unavailable / error → caller proceeds WITHOUT lock.
+ *
+ * SAFETY: This lock is a BEST-EFFORT server-side optimization. The ULTIMATE
+ * double-spend safeguard is the EIP-3009 on-chain nonce — a second
+ * transferWithAuthorization with the same nonce reverts on-chain. That is why
+ * fail-open on Redis outage (CD-7) is safe here: the chain is the source of truth.
+ */
+export async function setInflightSettleLock(
+  idempotencyKey: string,
+): Promise<'acquired' | 'held' | 'skipped'> {
+  const client = getRedisClient();
+  if (!client) return 'skipped';
+  try {
+    const res = await client.set(
+      toInflightKey(idempotencyKey),
+      '1',
+      'EX',
+      SETTLE_IDEMPOTENCY_TTL_SEC,
+      'NX',
+    );
+    return res !== null ? 'acquired' : 'held';
+  } catch {
+    return 'skipped'; // fail-open (CD-7)
+  }
+}
+
+/**
+ * Release an in-flight settle lock. Swallow-on-error — the TTL (120s) is the
+ * backstop if the del races/fails.
+ */
+export async function releaseInflightSettleLock(idempotencyKey: string): Promise<void> {
+  const client = getRedisClient();
+  if (!client) return;
+  try {
+    await client.del(toInflightKey(idempotencyKey));
+  } catch {
+    // swallow — TTL (120s) is the backstop.
   }
 }
 

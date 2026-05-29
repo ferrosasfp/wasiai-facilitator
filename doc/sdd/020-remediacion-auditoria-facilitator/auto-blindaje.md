@@ -23,3 +23,10 @@
 - **Causa raíz**: cada wrapper RETIENE lógica irreducible: 2-3 env-readers (readEnv/readRpcUrl/readUsdcAddress/readEnabledFlag, con switch sobre union por seguridad), constantes de token (USDC_*), el constructor que arma viemChain/token y llama super(), y los exports. Eso por sí solo supera 100 líneas no-comentario.
 - **Fix/decisión**: AC-5 DoD real = "lógica compartida UNA sola vez + ~591 tests verdes sin tocar assertions + T16 intacto", todo cumplido (base-adapter.ts = 519 líneas que antes estaban triplicadas ~1590). El <100 es target blando (T18), no CD bloqueante. Se redujeron comentarios donde no costaba claridad; no se sacrificó lógica de env/seguridad por llegar al número.
 - **Aplicar en**: cuando un target de LOC choca con lógica necesaria, priorizar la dedup real (DRY de la lógica compleja) y documentar la desviación; no inflar/comprimir artificialmente.
+
+### [2026-05-29] Wave 5 — release del lock en todos los paths via try/finally + audit type CONFLICT
+- **Error/decisión**: el Story File lista 3+ paths terminales para liberar el lock (catch del adapter, error de negocio, éxito) pero también el daily-cap (503/429) queda DESPUÉS del lock. Liberar en cada `return` a mano era frágil.
+- **Causa raíz**: múltiples returns terminales tras la adquisición del lock.
+- **Fix**: envolver TODO el pipeline post-lock (Step 2.5 → Step 5) en una función interna `runSettle()` y `try { return await runSettle() } finally { if (lockAcquired) await releaseInflightSettleLock(...) }`. Cubre TODOS los paths (incluido daily-cap) sin duplicar la liberación. `releaseInflightSettleLock` es swallow-on-error → seguro en finally.
+- **Fix 2**: `request.auditMeta.errorCode` (en `src/core/audit.ts`, fuera de Scope IN explícito) tiene un union cerrado; agregar `'CONFLICT'` fue obligatorio (mismo precedente que SERVICE_UNAVAILABLE de WFAC-53). El 409 escribe errorCode='CONFLICT' al audit row.
+- **Aplicar en**: cualquier recurso adquirido con N paths de salida → try/finally en vez de liberar por-return. Códigos route-local nuevos → recordar el union de AuditMeta.

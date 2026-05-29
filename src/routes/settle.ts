@@ -27,6 +27,8 @@ import {
   buildSettleIdempotencyKey,
   getCachedSettleResponse,
   setCachedSettleResponse,
+  setInflightSettleLock,
+  releaseInflightSettleLock,
   isRedisAvailable,
   toCacheableSettle,
   type CachedSettleResponse,
@@ -52,7 +54,8 @@ type SettleRouteErrorCode =
   | 'CHAIN_UNAVAILABLE' // WFAC-41
   | 'INVALID_PAYLOAD'
   | 'RATE_LIMITED'
-  | 'SERVICE_UNAVAILABLE'; // WFAC-53 FIX-6 (CD-15 — route-local, NOT in X402ErrorCode)
+  | 'SERVICE_UNAVAILABLE' // WFAC-53 FIX-6 (CD-15 — route-local, NOT in X402ErrorCode)
+  | 'CONFLICT'; // WFAC-AUDIT AC-3 — route-local, NOT in X402ErrorCode
 
 interface ErrorBody {
   readonly error: {
@@ -130,6 +133,40 @@ export const settleRoute: FastifyPluginAsync = async (app) => {
         app.log.warn({ request_id: requestId }, 'idempotency cache miss — Redis unavailable');
       }
 
+      // AC-3 — in-flight lock (only when Redis is up). Best-effort; the
+      // on-chain EIP-3009 nonce is the ultimate safeguard (see idempotency.ts).
+      let lockAcquired = false;
+      if (redisUp) {
+        const lock = await setInflightSettleLock(idempotencyKey);
+        if (lock === 'held') {
+          const body: ErrorBody = {
+            error: { code: 'CONFLICT', message: 'Settlement already in-flight', http: 409 },
+          };
+          request.auditMeta = { ...request.auditMeta, errorCode: 'CONFLICT' };
+          return reply.code(409).send(body);
+        }
+        if (lock === 'skipped') {
+          app.log.warn(
+            { request_id: requestId },
+            'in-flight lock skipped — Redis unavailable',
+          );
+        } else {
+          lockAcquired = true;
+        }
+      }
+
+      // R-4: release the in-flight lock on EVERY terminal path so a legitimate
+      // retry is never blocked for the full TTL. `releaseInflightSettleLock` is
+      // swallow-on-error, so calling it in `finally` is always safe.
+      try {
+        return await runSettle();
+      } finally {
+        if (lockAcquired) await releaseInflightSettleLock(idempotencyKey);
+      }
+
+      // ── settle pipeline (Step 2.5 → Step 5), wrapped so the finally above
+      //    releases the lock regardless of which terminal return fires. ──
+      async function runSettle(): Promise<FastifyReply> {
       // Step 2.5 — global daily settle cap (anti-abuse). WFAC-53 FIX-6:
       // SETTLE_CAP_FAIL_MODE controls Redis-throw behavior (open=fail-open,
       // closed=HTTP 503 SERVICE_UNAVAILABLE).
@@ -342,6 +379,7 @@ export const settleRoute: FastifyPluginAsync = async (app) => {
         to: result.to,
         asset: result.asset,
       });
+      } // end runSettle
     },
   );
 };
