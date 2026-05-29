@@ -248,6 +248,30 @@ describe('requireFacilitatorKey preHandler (WFAC-AUDIT AC-1)', () => {
     expect(settleSpy).not.toHaveBeenCalled();
   });
 
+  it('T2b: POST /settle with same-length but different key → 401 (forces timingSafeEqual branch)', async () => {
+    // 'test-secret-key' (15 chars) vs 'test-secret-keX' (15 chars): equal
+    // length means the `a.length !== b.length` pre-check is FALSE, so the
+    // 401 MUST come from `!timingSafeEqual(a, b)`. Guards against a regression
+    // where the comparison is inverted (would let this through as a match).
+    const wrongSameLen = 'test-secret-keX';
+    expect(wrongSameLen.length).toBe(KEY.length);
+
+    const settleSpy = vi.fn(async () => VALID_SETTLE_RESULT);
+    const adapter = makeFakeAdapter(2368, { settle: settleSpy });
+    app = await buildAppWithAdapter(adapter, makeEnv({ FACILITATOR_API_KEY: KEY }));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/settle',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${wrongSameLen}` },
+      payload: JSON.stringify(VALID_BODY),
+    });
+    expect(res.statusCode).toBe(401);
+    const body = JSON.parse(res.body) as { error: { code: string } };
+    expect(body.error.code).toBe('UNAUTHORIZED');
+    expect(settleSpy).not.toHaveBeenCalled();
+  });
+
   it('T3: POST /settle with valid bearer key → passes preHandler into pipeline (not 401)', async () => {
     const settleSpy = vi.fn(async () => VALID_SETTLE_RESULT);
     const adapter = makeFakeAdapter(2368, { settle: settleSpy });
