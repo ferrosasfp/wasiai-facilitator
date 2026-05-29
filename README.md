@@ -144,7 +144,7 @@ railway up
 This facilitator handles signed payment authorizations that move real funds. Security is paramount:
 
 - **Simulate before settle** — every on-chain tx is `simulateContract`ed first
-- **Idempotency cache** — 120s per-payload cache prevents double-spends (x402 spec)
+- **Idempotency cache** — 120s per-payload cache + in-flight lock are best-effort server-side guards that reduce double-dispatch (x402 spec). They are NOT an absolute double-spend prevention: the definitive safeguard is the on-chain EIP-3009 nonce — a second `transferWithAuthorization` with the same nonce reverts on-chain (the 2nd settle fails). See `src/core/idempotency.ts`.
 - **Operator wallet** — single signer per chain; key rotation planned V2
 - **Rate limiting** — per-IP + per-API-key (V1.5)
 - **Security scanning** — Snyk, Dependabot, `eslint-plugin-security` in CI
