@@ -48,14 +48,14 @@ export function checkSettleAmountCap(amountAtomic: string, capAtomic: string): A
   try {
     const amount = BigInt(amountAtomic);
     const cap = BigInt(capAtomic);
+    if (amount <= 0n) return { ok: false, limit: 0n }; // NUEVO (T21)
     if (amount > cap) {
       return { ok: false, limit: cap };
     }
     return { ok: true };
   } catch {
-    // BigInt parse failure → fail-open (Zod earlier validated format; this is
-    // defense-in-depth only).
-    return { ok: true };
+    // fail-closed — un cap (o amount) imparseable/no-positivo es misconfig; bloquear es el default seguro.
+    return { ok: false, limit: 0n };
   }
 }
 

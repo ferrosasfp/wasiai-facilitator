@@ -45,12 +45,14 @@ describe('parseEnv', () => {
 
   it('returns REDIS_URL when present in production env (WFAC-5 AC-1)', () => {
     // WFAC-50: superRefine now requires OPERATOR_PRIVATE_KEY + KITE_USDC_ADDRESS
-    // in non-test NODE_ENV. Fixture updated; assertion focus unchanged.
+    // in non-test NODE_ENV. WFAC-AUDIT: superRefine now also requires
+    // FACILITATOR_API_KEY. Fixture updated; assertion focus unchanged.
     const result = parseEnv({
       NODE_ENV: 'production',
       REDIS_URL: 'redis://host:6379/0',
       OPERATOR_PRIVATE_KEY: '0x' + 'a'.repeat(64),
       KITE_USDC_ADDRESS: '0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9',
+      FACILITATOR_API_KEY: 'test-secret-key',
     });
     expect(result.REDIS_URL).toBe('redis://host:6379/0');
     expect(result.REDIS_DB).toBe(0); // default
@@ -83,11 +85,13 @@ describe('parseEnv', () => {
   // ─── WFAC-32 — SUPABASE vars (T1-T3) ─────────────────────────────────────
   it('T1: accepts both SUPABASE_URL and SUPABASE_SERVICE_KEY in production (WFAC-32 AC-6)', () => {
     // WFAC-50: prod fixtures need OPERATOR_PRIVATE_KEY + KITE_USDC_ADDRESS.
+    // WFAC-AUDIT: prod fixtures also need FACILITATOR_API_KEY.
     const result = parseEnv({
       NODE_ENV: 'production',
       REDIS_URL: 'redis://host:6379/0',
       OPERATOR_PRIVATE_KEY: '0x' + 'a'.repeat(64),
       KITE_USDC_ADDRESS: '0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9',
+      FACILITATOR_API_KEY: 'test-secret-key',
       SUPABASE_URL: 'https://foo.supabase.co',
       SUPABASE_SERVICE_KEY: 'sb_secret_xyz',
     });
@@ -158,11 +162,13 @@ describe('parseEnv', () => {
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
 
     // WFAC-50: prod fixtures need OPERATOR_PRIVATE_KEY + KITE_USDC_ADDRESS.
+    // WFAC-AUDIT: prod fixtures also need FACILITATOR_API_KEY.
     const result = parseEnv({
       NODE_ENV: 'production',
       REDIS_URL: 'redis://host:6379/0',
       OPERATOR_PRIVATE_KEY: '0x' + 'a'.repeat(64),
       KITE_USDC_ADDRESS: '0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9',
+      FACILITATOR_API_KEY: 'test-secret-key',
     });
     expect(result.SUPABASE_URL).toBeUndefined();
     expect(result.SUPABASE_SERVICE_KEY).toBeUndefined();

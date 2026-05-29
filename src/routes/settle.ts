@@ -35,6 +35,7 @@ import {
 // (never imports @supabase/supabase-js nor ../infra/supabase.js). CD-3.
 import { buildLedgerEntry, persistLedgerEntry } from '../core/ledger.js';
 import { incrementAndCheckDailyCap } from '../core/settle-cap.js';
+import { requireFacilitatorKey } from '../middleware/auth.js';
 
 /** Route-local union: X402ErrorCode + 'INVALID_PAYLOAD' + 'RATE_LIMITED' literals. */
 type SettleRouteErrorCode =
@@ -70,6 +71,7 @@ export const settleRoute: FastifyPluginAsync = async (app) => {
   app.post(
     '/settle',
     {
+      preHandler: requireFacilitatorKey, // WFAC-AUDIT AC-1 — caller auth
       config: {
         rateLimit: {
           max: env.RATE_LIMIT_SETTLE_MAX,

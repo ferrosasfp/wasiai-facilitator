@@ -69,6 +69,10 @@ export const EnvSchema = z
       .regex(/^0x[0-9a-fA-F]{64}$/, { message: 'must be 0x + 64 hex chars' })
       .optional(),
 
+    // WFAC-AUDIT — caller auth. Optional at Zod level; .superRefine enforces
+    // presence for non-test env (same pattern as OPERATOR_PRIVATE_KEY). NEVER logged.
+    FACILITATOR_API_KEY: z.string().min(1).optional(),
+
     // WFAC-50 — Kite Testnet PYUSD/USDC token address. Required at boot for
     // non-test env. Validated as 20-byte hex. Consumed by KiteAdapter constructor.
     KITE_USDC_ADDRESS: z
@@ -161,6 +165,14 @@ export const EnvSchema = z
         code: z.ZodIssueCode.custom,
         path: ['KITE_USDC_ADDRESS'],
         message: 'KITE_USDC_ADDRESS is required when NODE_ENV is not "test"',
+      });
+    }
+    // WFAC-AUDIT — FACILITATOR_API_KEY required outside test (caller auth).
+    if (!data.FACILITATOR_API_KEY && data.NODE_ENV !== 'test') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['FACILITATOR_API_KEY'],
+        message: 'FACILITATOR_API_KEY is required when NODE_ENV is not "test"',
       });
     }
   });

@@ -41,8 +41,30 @@ describe('checkSettleAmountCap (synchronous BigInt comparison)', () => {
     expect(checkSettleAmountCap(big, '0')).toEqual({ ok: false, limit: 0n });
   });
 
-  it('fail-opens when BigInt() throws (invalid decimal — defense-in-depth)', () => {
-    expect(checkSettleAmountCap('not-a-number', '10000')).toEqual({ ok: true });
+  // WFAC-AUDIT AC-6 — fail-CLOSED: an unparseable/non-positive amount or cap is a
+  // misconfig; blocking is the safe default (was fail-open before this HU).
+  it('T19: fail-closed on invalid amount decimal', () => {
+    expect(checkSettleAmountCap('abc', '100')).toEqual({ ok: false, limit: 0n });
+  });
+
+  it('T20: fail-closed on invalid cap decimal', () => {
+    expect(checkSettleAmountCap('100', 'abc')).toEqual({ ok: false, limit: 0n });
+  });
+
+  it('T21: fail-closed when amount <= 0 (zero)', () => {
+    expect(checkSettleAmountCap('0', '100')).toEqual({ ok: false, limit: 0n });
+  });
+
+  it('T22: happy path — amount < cap → ok=true (regression)', () => {
+    expect(checkSettleAmountCap('50', '100')).toEqual({ ok: true });
+  });
+
+  it('T19b: fail-closed on fractional amount', () => {
+    expect(checkSettleAmountCap('1.5', '100')).toEqual({ ok: false, limit: 0n });
+  });
+
+  it('T19c: fail-closed on empty amount string', () => {
+    expect(checkSettleAmountCap('', '100')).toEqual({ ok: false, limit: 0n });
   });
 });
 

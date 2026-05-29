@@ -32,6 +32,7 @@ import {
   toCacheable,
   type CachedVerifyResponse,
 } from '../core/idempotency.js';
+import { requireFacilitatorKey } from '../middleware/auth.js';
 
 /** Route-local union: X402ErrorCode + 'INVALID_PAYLOAD' literal (DT-7). */
 type VerifyRouteErrorCode =
@@ -68,6 +69,7 @@ export const verifyRoute: FastifyPluginAsync = async (app) => {
   app.post(
     '/verify',
     {
+      preHandler: requireFacilitatorKey, // WFAC-AUDIT AC-1 — caller auth
       config: {
         rateLimit: {
           max: env.RATE_LIMIT_VERIFY_MAX,
