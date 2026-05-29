@@ -22,7 +22,13 @@
  *   AC-5  → T-RL-6   (X-RateLimit-* headers)
  *   AC-6  → T-RL-7   (RATE_LIMIT_ENABLED=false → bypass)
  *   AC-7  → T-RL-8, T-RL-9 (/health and /openapi.json exempt)
- *   AC-8  → T-RL-10  (XFF keying — two IPs don't share cuota)
+ *   AC-8  → T-RL-10  (per-IP keying — two real peers don't share cuota).
+ *           WFAC-AUDIT R-1: under trustProxy the raw first XFF element no
+ *           longer separates buckets (that was the spoofing vector, AC-2).
+ *           T-RL-10 now uses `remoteAddress` (the real peer) with
+ *           TRUST_PROXY='false' so request.ip = peer. Intentional semantic
+ *           change, NOT a regression. makeApp defaults TRUST_PROXY='false'
+ *           so the XFF noise in T-RL-1..9/T-RL-11 is harmless (peer stable).
  *   AC-9  → T-RL-11  (warn log without PII)
  *   AC-10 → T-RL-12  (boot fail-open LocalStore)
  *   AC-11 → T-RL-14  (audit row captures 429)
@@ -78,6 +84,8 @@ async function makeApp(
     RATE_LIMIT_VERIFY_MAX: '2',
     RATE_LIMIT_SETTLE_MAX: '2',
     RATE_LIMIT_SUPPORTED_MAX: '2',
+    // WFAC-AUDIT R-1: tests do not depend on proxy infra → request.ip = peer.
+    TRUST_PROXY: 'false',
     ...overrides,
   };
   const { buildApp } = await import('../../app.js');
@@ -260,35 +268,44 @@ describe('@fastify/rate-limit integration (WFAC-40)', () => {
     }
   });
 
-  // ─── T-RL-10 (AC-8): XFF keying — two IPs don't share cuota ──────────────
-  it('T-RL-10 / AC-8: distinct XFF IPs consume separate quotas', async () => {
+  // ─── T-RL-10 (AC-8): per-IP keying — two real peers don't share cuota ────
+  // WFAC-AUDIT R-1 (INTENTIONAL semantic change, NOT a regression): under
+  // trustProxy the raw first X-Forwarded-For element no longer separates
+  // rate-limit buckets — rotating XFF WAS the bypass (AC-2). Buckets are now
+  // keyed by the resolved request.ip. With TRUST_PROXY='false' (makeApp
+  // default), request.ip = the real peer (light-my-request `remoteAddress`).
+  // The assertion (two distinct IPs → separate quotas) is preserved; only the
+  // VECTOR changed from spoofable XFF to the real peer address.
+  it('T-RL-10 / AC-8: distinct peer IPs consume separate quotas (remoteAddress)', async () => {
     app = await makeApp({ RATE_LIMIT_VERIFY_MAX: '2' });
 
-    const ip1 = { 'content-type': 'application/json', 'x-forwarded-for': '1.1.1.1' };
-    const ip2 = { 'content-type': 'application/json', 'x-forwarded-for': '2.2.2.2' };
+    const headers = { 'content-type': 'application/json' };
 
     const a1 = await app.inject({
       method: 'POST',
       url: '/verify',
-      headers: ip1,
+      headers,
+      remoteAddress: '1.1.1.1',
       payload: ANY_PAYLOAD,
     });
     const a2 = await app.inject({
       method: 'POST',
       url: '/verify',
-      headers: ip1,
+      headers,
+      remoteAddress: '1.1.1.1',
       payload: ANY_PAYLOAD,
     });
     const b1 = await app.inject({
       method: 'POST',
       url: '/verify',
-      headers: ip2,
+      headers,
+      remoteAddress: '2.2.2.2',
       payload: ANY_PAYLOAD,
     });
 
     expect(a1.statusCode).not.toBe(429);
     expect(a2.statusCode).not.toBe(429);
-    // IP2's first call: should not be 429 — separate quota.
+    // Peer 2.2.2.2's first call: should not be 429 — separate quota.
     expect(b1.statusCode).not.toBe(429);
   });
 

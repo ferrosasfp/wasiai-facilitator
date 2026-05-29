@@ -73,6 +73,11 @@ export const EnvSchema = z
     // presence for non-test env (same pattern as OPERATOR_PRIVATE_KEY). NEVER logged.
     FACILITATOR_API_KEY: z.string().min(1).optional(),
 
+    // WFAC-AUDIT — Fastify trustProxy hop count. Railway = 1 hop ('1').
+    // If Cloudflare sits in front, bump to '2' via env (no code change, CD-3).
+    // In tests set 'false' to avoid depending on proxy infra (R-1).
+    TRUST_PROXY: z.string().default('1'),
+
     // WFAC-50 — Kite Testnet PYUSD/USDC token address. Required at boot for
     // non-test env. Validated as 20-byte hex. Consumed by KiteAdapter constructor.
     KITE_USDC_ADDRESS: z

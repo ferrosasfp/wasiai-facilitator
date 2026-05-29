@@ -5,12 +5,15 @@
  *   - `src/app.ts` audit hook (WFAC-33 — refactored from inline block).
  *   - `src/app.ts` rate-limit plugin keyGenerator (WFAC-40).
  *
- * Precedence (SDD §3.1 DT-8):
- *   1. First element of `X-Forwarded-For` header when present and non-empty
- *      (left-trimmed, comma-split). Handles both string and string[] cases
- *      (Fastify v5 normalizes but defense-in-depth keeps both branches).
- *   2. `request.ip` (Fastify default; respects `trustProxy` config).
- *   3. `null` if neither yields a non-empty string.
+ * Precedence (WFAC-AUDIT AC-2 — single source):
+ *   1. `request.ip` — resolved by Fastify from the correct `X-Forwarded-For`
+ *      hop under `trustProxy`. This is the ONLY source.
+ *   2. `null` if `request.ip` is not a non-empty string.
+ *
+ * The previous behavior (parsing the raw first XFF element BEFORE request.ip)
+ * was the rate-limit bypass vector: an attacker rotating `X-Forwarded-For`
+ * could dodge the per-IP bucket. We now trust Fastify's resolved `request.ip`
+ * exclusively.
  *
  * Boundaries (OWNERS.md):
  *   - MAY import: `fastify` (type-only).
@@ -24,16 +27,9 @@
 import type { FastifyRequest } from 'fastify';
 
 export function extractClientIp(request: FastifyRequest): string | null {
-  const xff = request.headers['x-forwarded-for'];
-  if (typeof xff === 'string' && xff.length > 0) {
-    const first = xff.split(',')[0];
-    const trimmed = first ? first.trim() : '';
-    if (trimmed.length > 0) return trimmed;
-  } else if (Array.isArray(xff) && xff.length > 0 && typeof xff[0] === 'string') {
-    const first = xff[0].split(',')[0];
-    const trimmed = first ? first.trim() : '';
-    if (trimmed.length > 0) return trimmed;
-  }
-  if (typeof request.ip === 'string' && request.ip.length > 0) return request.ip;
-  return null;
+  // WFAC-AUDIT — under trustProxy, Fastify already resolves request.ip from the
+  // correct XFF hop. Parsing the raw first XFF element here WAS the spoofing
+  // vector (an attacker rotates X-Forwarded-For to dodge the rate-limit bucket).
+  // We now trust Fastify's resolved request.ip exclusively.
+  return typeof request.ip === 'string' && request.ip.length > 0 ? request.ip : null;
 }

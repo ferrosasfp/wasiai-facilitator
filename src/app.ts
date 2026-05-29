@@ -39,6 +39,18 @@ declare module 'fastify' {
  */
 const AUDIT_EXCLUDED_PATHS: ReadonlySet<string> = new Set(['/health', '/openapi.json']);
 
+/**
+ * WFAC-AUDIT AC-2 — coerce the raw TRUST_PROXY env string into the value
+ * Fastify's `trustProxy` option accepts:
+ *   'false'/'true' → boolean; numeric string → number (hop count); other → string.
+ */
+function parseTrustProxy(raw: string): boolean | number | string {
+  if (raw === 'false') return false;
+  if (raw === 'true') return true;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 0 ? n : raw;
+}
+
 export interface BuildAppOptions {
   /**
    * Pre-parsed `EnvConfig`. When provided, `parseEnv` is NOT called again
@@ -98,6 +110,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   const app = Fastify({
     loggerInstance: logger,
     disableRequestLogging: false,
+    trustProxy: parseTrustProxy(env.TRUST_PROXY), // WFAC-AUDIT AC-2 — ANTES del rate-limit (CD-5)
   });
 
   app.decorate('env', env);

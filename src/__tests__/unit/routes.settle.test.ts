@@ -934,7 +934,7 @@ describe('POST /settle', () => {
 
   // ─── WFAC-33 W4 — audit hook integration ───────────────────────────────
 
-  it('T-AR-1 / AC-1: success path invokes persistAuditEntry once with XFF + UA + idempotencyKey', async () => {
+  it('T-AR-1 / AC-1: success path invokes persistAuditEntry once with resolved IP + UA + idempotencyKey', async () => {
     const adapter = makeFakeAdapter(2368, async () => VALID_SETTLE_RESULT);
     app = await buildAppWithAdapter(adapter);
     const audit = (await import('../../core/audit.js')) as unknown as {
@@ -942,6 +942,9 @@ describe('POST /settle', () => {
       __buildAuditSpy: ReturnType<typeof vi.fn>;
     };
 
+    // WFAC-AUDIT AC-2 (R-1, intentional): the audit row now records the
+    // resolved request.ip (the peer), NOT the spoofable raw X-Forwarded-For.
+    // With TRUST_PROXY unset → false, the raw XFF is ignored; ipRaw = peer.
     const res = await app.inject({
       method: 'POST',
       url: '/settle',
@@ -950,6 +953,7 @@ describe('POST /settle', () => {
         'x-forwarded-for': '203.0.113.5, 10.0.0.1',
         'user-agent': 'curl/7.88',
       },
+      remoteAddress: '4.4.4.4',
       payload: JSON.stringify(VALID_BODY),
     });
     expect(res.statusCode).toBe(200);
@@ -965,7 +969,8 @@ describe('POST /settle', () => {
     };
     expect(input.path).toBe('/settle');
     expect(input.statusCode).toBe(200);
-    expect(input.ipRaw).toBe('203.0.113.5');
+    // Resolved peer, not the forged XFF first element.
+    expect(input.ipRaw).toBe('4.4.4.4');
     expect(input.userAgentRaw).toBe('curl/7.88');
     // Auto-Blindaje W4: buildSettleIdempotencyKey returns the full Redis key
     // `settle:idempotency:<64-hex>` (length 83). Production stores the prefixed
@@ -1071,13 +1076,15 @@ describe('POST /settle', () => {
     expect(input.errorCode).toBe('INSUFFICIENT_BALANCE');
   });
 
-  it('T-AR-6 / AC-4: XFF array header first element used', async () => {
+  it('T-AR-6 / AC-4: forged array XFF is ignored — resolved request.ip recorded', async () => {
     const adapter = makeFakeAdapter(2368, async () => VALID_SETTLE_RESULT);
     app = await buildAppWithAdapter(adapter);
     const audit = (await import('../../core/audit.js')) as unknown as {
       __buildAuditSpy: ReturnType<typeof vi.fn>;
     };
 
+    // WFAC-AUDIT AC-2 (R-1, intentional): array XFF can no longer override the
+    // resolved peer in the audit row. ipRaw = peer, not '203.0.113.6'.
     const res = await app.inject({
       method: 'POST',
       url: '/settle',
@@ -1085,12 +1092,13 @@ describe('POST /settle', () => {
         'content-type': 'application/json',
         'x-forwarded-for': ['203.0.113.6, 10.0.0.2'],
       },
+      remoteAddress: '6.6.6.6',
       payload: JSON.stringify(VALID_BODY),
     });
     expect(res.statusCode).toBe(200);
 
     const input = audit.__buildAuditSpy.mock.calls[0]![0] as { ipRaw: string | null };
-    expect(input.ipRaw).toBe('203.0.113.6');
+    expect(input.ipRaw).toBe('6.6.6.6');
   });
 
   it('T-AR-7 / AC-5: no XFF → falls back to request.ip', async () => {

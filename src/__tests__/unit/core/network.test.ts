@@ -15,19 +15,25 @@ function makeReq(headers: Record<string, string | string[]>, ip?: string): Fasti
 }
 
 describe('extractClientIp (WFAC-40)', () => {
-  it('T-NET-1 (AC-8 XFF string single): returns the IP from X-Forwarded-For', () => {
+  // WFAC-AUDIT AC-2 (R-1 — INTENTIONAL semantic change, NOT a regression):
+  // extractClientIp no longer parses the raw X-Forwarded-For element (that was
+  // the rate-limit spoofing vector). It now trusts Fastify's resolved
+  // request.ip exclusively. Under trustProxy, request.ip is already derived
+  // from the correct XFF hop, so callers keep getting the real client IP — but
+  // a forged raw XFF can no longer override it here.
+  it('T-NET-1 (AC-2): ignores raw X-Forwarded-For, returns request.ip', () => {
     const req = makeReq({ 'x-forwarded-for': '203.0.113.5' }, '10.0.0.1');
-    expect(extractClientIp(req)).toBe('203.0.113.5');
+    expect(extractClientIp(req)).toBe('10.0.0.1');
   });
 
-  it('T-NET-2 (AC-8 XFF comma list): returns FIRST element, trimmed', () => {
+  it('T-NET-2 (AC-2): a forged XFF list cannot override request.ip', () => {
     const req = makeReq({ 'x-forwarded-for': '203.0.113.5, 10.0.0.1, 172.16.0.1' }, '127.0.0.1');
-    expect(extractClientIp(req)).toBe('203.0.113.5');
+    expect(extractClientIp(req)).toBe('127.0.0.1');
   });
 
-  it('T-NET-3 (AC-8 XFF array variant): handles string[] header, first element trimmed', () => {
+  it('T-NET-3 (AC-2): array XFF variant is likewise ignored in favor of request.ip', () => {
     const req = makeReq({ 'x-forwarded-for': ['203.0.113.6, 10.0.0.2'] }, '127.0.0.1');
-    expect(extractClientIp(req)).toBe('203.0.113.6');
+    expect(extractClientIp(req)).toBe('127.0.0.1');
   });
 
   it('T-NET-4 (AC-8 XFF absent → request.ip fallback)', () => {
