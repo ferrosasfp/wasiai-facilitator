@@ -21,7 +21,7 @@
 | 017 | 2026-04-24 | Kite Testnet adapter REAL — stub → on-chain (WFAC-50) | chain-impl | QUALITY | DONE | main (d32ad48) |
 | 018 | 2026-04-24 | Avalanche Fuji adapter REAL — verify+settle on-chain (WFAC-52) | chain-impl | QUALITY | DONE (retroactive — code merged in PR #33 before pipeline ran; F0–F4 closed post-hoc) | main (070875c) PR #33 |
 | 019 | 2026-05-11 | Post-review hardening — multi-chain, multi-consumer (WFAC-53) | security-hardening | QUALITY | DONE | fix/wfac-53-post-review-hardening |
-| 020 | 2026-05-29 | Remediación auditoría profesional — seguridad de pagos + calidad (WFAC-AUDIT) | security+refactor | QUALITY | in progress | feat/020-wfac-audit-remediation |
+| 020 | 2026-05-29 | Remediación auditoría profesional — seguridad de pagos + calidad (WFAC-AUDIT) | security+refactor | QUALITY | DONE | feat/020-wfac-audit-remediation |
 
 <!--
 Formato por entrada:
