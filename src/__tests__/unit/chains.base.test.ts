@@ -489,3 +489,122 @@ describe('base.ts — baseMainnetAdapter (chainId 8453)', () => {
     expect(mod.baseMainnetAdapter!.metadata.chainId).toBe(8453);
   });
 });
+
+// ─── WFAC-AUDIT AC-4 — new defense-in-depth checks (T11-T15) ──────────────
+// amount>0 / payTo==to / validAfter, in the BaseEip3009Adapter base class.
+// Semantics identical to methods/eip3009/verify.ts (CD-6 read-only).
+describe('base.ts — WFAC-AUDIT AC-4 checks (T11-T15)', () => {
+  let snapshot: Record<string, string | undefined>;
+
+  beforeEach(() => {
+    snapshot = snapshotEnv();
+    process.env['BASE_SEPOLIA_ENABLED'] = 'true';
+    process.env['BASE_SEPOLIA_RPC_URL'] = 'https://sepolia.base.org';
+    process.env['OPERATOR_PRIVATE_KEY'] = TEST_PRIVATE_KEY;
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    restoreEnv(snapshot);
+    vi.resetModules();
+  });
+
+  // T11 — amount must be > 0.
+  it('T11: _verifyRaw rejects accepted.amount = 0 → INVALID_AMOUNT 400', async () => {
+    const mod = await import('../../chains/base.js');
+    const params = await makeBaseSepoliaVerifyParams({ acceptedAmount: '0' });
+    const result = await mod.baseSepoliaAdapter!.verify(params);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('INVALID_AMOUNT');
+      expect(result.error.http).toBe(400);
+      expect(result.error.message).toBe('Accepted amount must be greater than zero');
+    }
+  });
+
+  // T12 — payTo must equal authorization.to.
+  it('T12: _verifyRaw rejects authorization.to != accepted.payTo → INVALID_RECEIVER 400', async () => {
+    const mod = await import('../../chains/base.js');
+    // Sign with a `to` that differs from accepted.payTo (TEST_PAY_TO).
+    const params = await makeBaseSepoliaVerifyParams({
+      message: { to: '0x2222222222222222222222222222222222222222' as `0x${string}` },
+    });
+    const result = await mod.baseSepoliaAdapter!.verify(params);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('INVALID_RECEIVER');
+      expect(result.error.http).toBe(400);
+      expect(result.error.message).toBe('Receiver does not match payTo');
+    }
+  });
+
+  // T13 — validAfter in the future → not yet valid (distinct from expired).
+  it('T13: _verifyRaw rejects validAfter in the future → EXPIRED_AUTHORIZATION "not yet valid" 400', async () => {
+    const mod = await import('../../chains/base.js');
+    const nowSec = Math.floor(Date.now() / 1000);
+    const params = await makeBaseSepoliaVerifyParams({
+      message: {
+        validAfter: BigInt(nowSec + 3600), // not yet valid
+        validBefore: BigInt(nowSec + 7200),
+      },
+    });
+    const result = await mod.baseSepoliaAdapter!.verify(params);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('EXPIRED_AUTHORIZATION');
+      expect(result.error.http).toBe(400);
+      // Distinct from validBefore-expired ('Authorization expired').
+      expect(result.error.message).toBe('Authorization not yet valid');
+    }
+  });
+
+  // T14 — the same 3 checks gate _settleRaw BEFORE simulate (no gas spent).
+  it('T14: _settleRaw rejects amount=0 / to!=payTo / future-validAfter BEFORE simulate', async () => {
+    const mod = await import('../../chains/base.js');
+    const adapter = mod.baseSepoliaAdapter!;
+    const { publicClient, walletClient } = makeMockClients();
+    vi.spyOn(adapter, 'getPublicClient').mockReturnValue(publicClient);
+    vi.spyOn(adapter, 'getWalletClient').mockReturnValue(walletClient);
+
+    // amount = 0 → INVALID_AMOUNT.
+    const r1 = await adapter.settle(await makeBaseSepoliaVerifyParams({ acceptedAmount: '0' }));
+    expect(r1.ok).toBe(false);
+    if (!r1.ok) expect(r1.error.code).toBe('INVALID_AMOUNT');
+
+    // to != payTo → INVALID_RECEIVER.
+    const r2 = await adapter.settle(
+      await makeBaseSepoliaVerifyParams({
+        message: { to: '0x2222222222222222222222222222222222222222' as `0x${string}` },
+      }),
+    );
+    expect(r2.ok).toBe(false);
+    if (!r2.ok) expect(r2.error.code).toBe('INVALID_RECEIVER');
+
+    // future validAfter → EXPIRED_AUTHORIZATION 'not yet valid'.
+    const nowSec = Math.floor(Date.now() / 1000);
+    const r3 = await adapter.settle(
+      await makeBaseSepoliaVerifyParams({
+        message: { validAfter: BigInt(nowSec + 3600), validBefore: BigInt(nowSec + 7200) },
+      }),
+    );
+    expect(r3.ok).toBe(false);
+    if (!r3.ok) {
+      expect(r3.error.code).toBe('EXPIRED_AUTHORIZATION');
+      expect(r3.error.message).toBe('Authorization not yet valid');
+    }
+
+    // NONE of these reached the chain — simulate/write never called.
+    expect(publicClient.simulateContract).not.toHaveBeenCalled();
+    expect(walletClient.writeContract).not.toHaveBeenCalled();
+  });
+
+  // T15 — fully valid params still pass (regression — checks only reject more).
+  it('T15: _verifyRaw success path with all fields valid still passes (regression)', async () => {
+    const mod = await import('../../chains/base.js');
+    const result = await mod.baseSepoliaAdapter!.verify(await makeBaseSepoliaVerifyParams());
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.client.toLowerCase()).toBe(TEST_SIGNER_ADDRESS.toLowerCase());
+    }
+  });
+});

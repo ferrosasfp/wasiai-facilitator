@@ -345,6 +345,60 @@ describe('kite.ts adapters', () => {
         expect(t.eip712Version).toBe('1');
       }
     });
+
+    // ─── WFAC-AUDIT AC-4 — new base-class checks (T11-T13, T15) ───────────
+    // amount>0 / payTo==to / validAfter. Verified through the Kite adapter
+    // (extends BaseEip3009Adapter). Semantics identical to
+    // methods/eip3009/verify.ts (CD-6 read-only).
+    it('T11 (AC-4): accepted.amount = 0 -> INVALID_AMOUNT 400', async () => {
+      const mod = await import('../../chains/kite.js');
+      const result = await mod.kiteTestnetAdapter.verify(
+        await makeValidVerifyParams({ acceptedAmount: '0' }),
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe('INVALID_AMOUNT');
+        expect(result.error.http).toBe(400);
+        expect(result.error.message).toBe('Accepted amount must be greater than zero');
+      }
+    });
+
+    it('T12 (AC-4): authorization.to != accepted.payTo -> INVALID_RECEIVER 400', async () => {
+      const mod = await import('../../chains/kite.js');
+      const result = await mod.kiteTestnetAdapter.verify(
+        await makeValidVerifyParams({
+          message: { to: '0x3333333333333333333333333333333333333333' as `0x${string}` },
+        }),
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe('INVALID_RECEIVER');
+        expect(result.error.http).toBe(400);
+        expect(result.error.message).toBe('Receiver does not match payTo');
+      }
+    });
+
+    it('T13 (AC-4): validAfter in the future -> EXPIRED_AUTHORIZATION "not yet valid" 400', async () => {
+      const mod = await import('../../chains/kite.js');
+      const nowSec = Math.floor(Date.now() / 1000);
+      const result = await mod.kiteTestnetAdapter.verify(
+        await makeValidVerifyParams({
+          message: { validAfter: BigInt(nowSec + 3600), validBefore: BigInt(nowSec + 7200) },
+        }),
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe('EXPIRED_AUTHORIZATION');
+        expect(result.error.http).toBe(400);
+        expect(result.error.message).toBe('Authorization not yet valid');
+      }
+    });
+
+    it('T15 (AC-4 regression): fully valid params still pass after the new checks', async () => {
+      const mod = await import('../../chains/kite.js');
+      const result = await mod.kiteTestnetAdapter.verify(await makeValidVerifyParams());
+      expect(result.ok).toBe(true);
+    });
   });
 
   // ─── WFAC-50 — real EIP-3009 settle (AC-7..AC-13 + AC-15) ────────────────
@@ -532,6 +586,44 @@ describe('kite.ts adapters', () => {
       delete process.env['CB_FAILURE_THRESHOLD'];
       delete process.env['CB_ROLLING_WINDOW_MS'];
       delete process.env['CB_ENABLED'];
+    });
+
+    // ─── WFAC-AUDIT AC-4 — settle gates the 3 new checks BEFORE simulate (T14)
+    it('T14 (AC-4): _settleRaw rejects amount=0 / to!=payTo / future-validAfter BEFORE simulate (no gas)', async () => {
+      const mod = await import('../../chains/kite.js');
+      const { publicClient, walletClient } = makeMockClients();
+      vi.spyOn(mod.kiteTestnetAdapter, 'getPublicClient').mockReturnValue(publicClient);
+      vi.spyOn(mod.kiteTestnetAdapter, 'getWalletClient').mockReturnValue(walletClient);
+
+      const r1 = await mod.kiteTestnetAdapter.settle(
+        await makeValidVerifyParams({ acceptedAmount: '0' }),
+      );
+      expect(r1.ok).toBe(false);
+      if (!r1.ok) expect(r1.error.code).toBe('INVALID_AMOUNT');
+
+      const r2 = await mod.kiteTestnetAdapter.settle(
+        await makeValidVerifyParams({
+          message: { to: '0x3333333333333333333333333333333333333333' as `0x${string}` },
+        }),
+      );
+      expect(r2.ok).toBe(false);
+      if (!r2.ok) expect(r2.error.code).toBe('INVALID_RECEIVER');
+
+      const nowSec = Math.floor(Date.now() / 1000);
+      const r3 = await mod.kiteTestnetAdapter.settle(
+        await makeValidVerifyParams({
+          message: { validAfter: BigInt(nowSec + 3600), validBefore: BigInt(nowSec + 7200) },
+        }),
+      );
+      expect(r3.ok).toBe(false);
+      if (!r3.ok) {
+        expect(r3.error.code).toBe('EXPIRED_AUTHORIZATION');
+        expect(r3.error.message).toBe('Authorization not yet valid');
+      }
+
+      // None reached the chain — simulate/write never invoked.
+      expect(publicClient.simulateContract).not.toHaveBeenCalled();
+      expect(walletClient.writeContract).not.toHaveBeenCalled();
     });
   });
 });

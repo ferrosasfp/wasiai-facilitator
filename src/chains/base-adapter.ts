@@ -231,6 +231,21 @@ export abstract class BaseEip3009Adapter implements ChainAdapter {
     // 3. Amount validation (AC-5). BigInt comparison — value/amount are uint256 strings.
     const authorization = params.payload.authorization;
     const acceptedAmount = BigInt(params.accepted.amount);
+
+    // 4 (WFAC-AUDIT AC-4 — NEW). amount > 0. Semantics copied from
+    // methods/eip3009/verify.ts:98-103 (CD-6 read-only).
+    if (acceptedAmount <= 0n) {
+      return {
+        ok: false,
+        error: {
+          code: 'INVALID_AMOUNT',
+          message: 'Accepted amount must be greater than zero',
+          http: 400,
+        },
+      };
+    }
+
+    // 5. value >= accepted.
     if (BigInt(authorization.value) < acceptedAmount) {
       return {
         ok: false,
@@ -242,7 +257,20 @@ export abstract class BaseEip3009Adapter implements ChainAdapter {
       };
     }
 
-    // 4. Timestamp window (AC-4).
+    // 6 (WFAC-AUDIT AC-4 — NEW). payTo == authorization.to. Semantics copied
+    // from methods/eip3009/verify.ts:112-117 (CD-6 read-only).
+    if (!isAddressEqual(authorization.to as Address, params.accepted.payTo as Address)) {
+      return {
+        ok: false,
+        error: {
+          code: 'INVALID_RECEIVER',
+          message: 'Receiver does not match payTo',
+          http: 400,
+        },
+      };
+    }
+
+    // 7. validBefore — expired (AC-4). BigInt (BLQ-MED-1).
     const nowSec = BigInt(Math.floor(Date.now() / 1000));
     if (BigInt(authorization.validBefore) <= nowSec) {
       return {
@@ -255,7 +283,20 @@ export abstract class BaseEip3009Adapter implements ChainAdapter {
       };
     }
 
-    // 5. Signature normalize (AC-2, AC-6). If fails → return INVALID_SIGNATURE
+    // 8 (WFAC-AUDIT AC-4 — NEW). validAfter — not yet valid. Semantics copied
+    // from methods/eip3009/verify.ts:127-132 (CD-6 read-only).
+    if (BigInt(authorization.validAfter) > nowSec) {
+      return {
+        ok: false,
+        error: {
+          code: 'EXPIRED_AUTHORIZATION',
+          message: 'Authorization not yet valid',
+          http: 400,
+        },
+      };
+    }
+
+    // 9. Signature normalize (AC-2, AC-6). If fails → return INVALID_SIGNATURE
     // WITHOUT calling recoverTypedDataAddress (AC-6).
     const sig = normalizeSignature(params.payload.signature);
     if (!sig.ok) {
@@ -402,12 +443,36 @@ export abstract class BaseEip3009Adapter implements ChainAdapter {
       };
     }
     const acceptedAmount = BigInt(params.accepted.amount);
+
+    // WFAC-AUDIT AC-4 (NEW) — amount > 0 (same order/semantics as _verifyRaw).
+    if (acceptedAmount <= 0n) {
+      return {
+        ok: false,
+        error: {
+          code: 'INVALID_AMOUNT',
+          message: 'Accepted amount must be greater than zero',
+          http: 400,
+        },
+      };
+    }
     if (BigInt(authorization.value) < acceptedAmount) {
       return {
         ok: false,
         error: {
           code: 'INVALID_AMOUNT',
           message: 'Authorized value is below accepted amount',
+          http: 400,
+        },
+      };
+    }
+
+    // WFAC-AUDIT AC-4 (NEW) — payTo == authorization.to.
+    if (!isAddressEqual(authorization.to as Address, params.accepted.payTo as Address)) {
+      return {
+        ok: false,
+        error: {
+          code: 'INVALID_RECEIVER',
+          message: 'Receiver does not match payTo',
           http: 400,
         },
       };
@@ -419,6 +484,18 @@ export abstract class BaseEip3009Adapter implements ChainAdapter {
         error: {
           code: 'EXPIRED_AUTHORIZATION',
           message: 'Authorization expired',
+          http: 400,
+        },
+      };
+    }
+
+    // WFAC-AUDIT AC-4 (NEW) — validAfter — not yet valid.
+    if (BigInt(authorization.validAfter) > nowSec) {
+      return {
+        ok: false,
+        error: {
+          code: 'EXPIRED_AUTHORIZATION',
+          message: 'Authorization not yet valid',
           http: 400,
         },
       };
