@@ -22,6 +22,7 @@
 | 018 | 2026-04-24 | Avalanche Fuji adapter REAL — verify+settle on-chain (WFAC-52) | chain-impl | QUALITY | DONE (retroactive — code merged in PR #33 before pipeline ran; F0–F4 closed post-hoc) | main (070875c) PR #33 |
 | 019 | 2026-05-11 | Post-review hardening — multi-chain, multi-consumer (WFAC-53) | security-hardening | QUALITY | DONE | fix/wfac-53-post-review-hardening |
 | 020 | 2026-05-29 | Remediación auditoría profesional — seguridad de pagos + calidad (WFAC-AUDIT) | security+refactor | QUALITY | DONE | feat/020-wfac-audit-remediation |
+| 021 | 2026-06-10 | Kite testnet token metadata env-configurable (WFAC-12) | chain-config | QUALITY | DONE | feat/021-wfac-12-kite-testnet-token-config |
 
 <!--
 Formato por entrada:

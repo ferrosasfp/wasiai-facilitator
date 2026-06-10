@@ -141,12 +141,33 @@ function readEnabledFlag(envVarName: KiteEnabledFlagEnvName): boolean {
   return v === 'true';
 }
 
+// WFAC-12 — token metadata is env-configurable (opt-in overrides). Literal
+// access to process.env.KITE_TESTNET_TOKEN_* (CD-5: no dynamic bracket) +
+// conditional spread: when a var is absent the opt is omitted, so the
+// KiteAdapter constructor applies its PYUSD default (byte-identical, CD-1).
+// EnvSchema (env.ts) validates KITE_TESTNET_TOKEN_DECIMALS as int≥0 at boot —
+// Number(...) here only converts process.env's string to number (CD-3).
 export const kiteTestnetAdapter: ChainAdapter = new KiteAdapter({
   chainIdNum: 2368,
   envVarName: 'KITE_TESTNET_RPC_URL',
   name: 'Kite Testnet',
   network: 'testnet',
   usdcAddress: readUsdcAddress('KITE_USDC_ADDRESS', 2368),
+  ...(process.env.KITE_TESTNET_TOKEN_SYMBOL
+    ? { tokenSymbol: process.env.KITE_TESTNET_TOKEN_SYMBOL }
+    : {}),
+  ...(process.env.KITE_TESTNET_TOKEN_NAME
+    ? { tokenName: process.env.KITE_TESTNET_TOKEN_NAME }
+    : {}),
+  ...(process.env.KITE_TESTNET_TOKEN_DECIMALS
+    ? { tokenDecimals: Number(process.env.KITE_TESTNET_TOKEN_DECIMALS) }
+    : {}),
+  ...(process.env.KITE_TESTNET_EIP712_NAME
+    ? { eip712Name: process.env.KITE_TESTNET_EIP712_NAME }
+    : {}),
+  ...(process.env.KITE_TESTNET_EIP712_VERSION
+    ? { eip712Version: process.env.KITE_TESTNET_EIP712_VERSION }
+    : {}),
 });
 
 // Mainnet adapter is opt-in: only registered if BOTH conditions hold:
