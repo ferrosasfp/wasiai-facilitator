@@ -118,6 +118,50 @@ describe('parseEnv', () => {
     expect(allWrites).toContain('SUPABASE_URL');
   });
 
+  it('WFAC-12 AC-5c: exits with code 1 when KITE_TESTNET_TOKEN_DECIMALS is non-numeric (abc)', () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((_code?: number) => {
+      throw new Error('__exit__');
+    }) as never);
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    expect(() =>
+      parseEnv({
+        NODE_ENV: 'production',
+        REDIS_URL: 'redis://host:6379/0',
+        OPERATOR_PRIVATE_KEY: '0x' + 'a'.repeat(64),
+        KITE_USDC_ADDRESS: '0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9',
+        FACILITATOR_API_KEY: 'test-secret-key',
+        KITE_TESTNET_TOKEN_DECIMALS: 'abc',
+      }),
+    ).toThrow('__exit__');
+
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const allWrites = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(allWrites).toContain('KITE_TESTNET_TOKEN_DECIMALS');
+  });
+
+  it('WFAC-12 AC-6: exits with code 1 when KITE_TESTNET_TOKEN_DECIMALS is negative (-1)', () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((_code?: number) => {
+      throw new Error('__exit__');
+    }) as never);
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    expect(() =>
+      parseEnv({
+        NODE_ENV: 'production',
+        REDIS_URL: 'redis://host:6379/0',
+        OPERATOR_PRIVATE_KEY: '0x' + 'a'.repeat(64),
+        KITE_USDC_ADDRESS: '0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9',
+        FACILITATOR_API_KEY: 'test-secret-key',
+        KITE_TESTNET_TOKEN_DECIMALS: '-1',
+      }),
+    ).toThrow('__exit__');
+
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const allWrites = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(allWrites).toContain('KITE_TESTNET_TOKEN_DECIMALS');
+  });
+
   it('T2b: rejects SUPABASE_URL with non-http(s) scheme — ftp:// / mailto: (WFAC-32 AR MNR-1)', () => {
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((_code?: number) => {
       throw new Error('__exit__');

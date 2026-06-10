@@ -28,9 +28,26 @@ const KITE_TESTNET_LOCAL_SEP = domainSeparator({
   },
 });
 
+// WFAC-12 — pieUSD domain separator (token metadata override). Same shape as
+// the PYUSD separator above but eip712Name = 'pieUSD' → proves the boot-check
+// validates whatever token metadata the env-configurable adapter exposes.
+const KITE_TESTNET_PIEUSD_SEP = domainSeparator({
+  domain: {
+    name: 'pieUSD',
+    version: '1',
+    chainId: 2368,
+    verifyingContract: KITE_TESTNET_TOKEN_ADDRESS,
+  },
+});
+
 function makeFakeKiteAdapter(opts: {
   readContractImpl: (params: unknown) => Promise<unknown>;
+  // `tokenName` drives all three name-ish fields of the fake token below:
+  // `symbol`, `name`, and `eip712Name` (kept identical so the computed domain
+  // separator matches whatever the test feeds via readContractImpl).
+  tokenName?: string;
 }): ChainAdapter {
+  const tokenName = opts.tokenName ?? 'PYUSD';
   return {
     metadata: {
       chainId: asChainId(2368),
@@ -42,10 +59,10 @@ function makeFakeKiteAdapter(opts: {
       tokens: [
         {
           address: KITE_TESTNET_TOKEN_ADDRESS,
-          symbol: 'PYUSD',
+          symbol: tokenName,
           decimals: 18,
-          name: 'PYUSD',
-          eip712Name: 'PYUSD',
+          name: tokenName,
+          eip712Name: tokenName,
           eip712Version: '1',
         },
       ],
@@ -106,6 +123,23 @@ describe('initDomainCheck — Kite (WFAC-53 FIX-2)', () => {
       expect.objectContaining({ chainId: 2368 }),
       expect.stringContaining('domain separator OK'),
     );
+  });
+
+  it('WFAC-12 AC-4: pieUSD token metadata → boot continues when separator matches', async () => {
+    const adapter = makeFakeKiteAdapter({
+      readContractImpl: async () => KITE_TESTNET_PIEUSD_SEP,
+      tokenName: 'pieUSD',
+    });
+    chainRegistry.register(adapter);
+    const logger = makeStubLogger();
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(((_c?: number) => undefined) as never);
+
+    await initDomainCheck(logger);
+
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(logger.fatal).not.toHaveBeenCalled();
   });
 
   it('T-DOM-KITE-2 (AC-4, AC-7b): mismatch → fatal log + process.exit(1)', async () => {

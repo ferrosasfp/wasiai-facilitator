@@ -22,6 +22,13 @@ const ENV_KEYS = [
   'AVALANCHE_MAINNET_ENABLED',
   'OPERATOR_PRIVATE_KEY',
   'KITE_USDC_ADDRESS',
+  // WFAC-12 — Kite Testnet token metadata overrides (snapshot/restore so the
+  // override test below cannot leak into other tests).
+  'KITE_TESTNET_TOKEN_SYMBOL',
+  'KITE_TESTNET_TOKEN_NAME',
+  'KITE_TESTNET_TOKEN_DECIMALS',
+  'KITE_TESTNET_EIP712_NAME',
+  'KITE_TESTNET_EIP712_VERSION',
 ] as const;
 
 // Kite Mainnet USDC.e address — distinct from testnet PYUSD (decimals 6 vs 18,
@@ -205,6 +212,58 @@ describe('kite.ts adapters', () => {
     expect(t.name).toBe('USD Coin');
     expect(t.eip712Name).toBe('USD Coin');
     expect(t.eip712Version).toBe('2');
+  });
+
+  it('WFAC-12 AC-5a: kiteTestnetAdapter defaults to PYUSD when no token env vars set', async () => {
+    // beforeEach does NOT set any KITE_TESTNET_TOKEN_* var → constructor defaults.
+    const mod = await import('../../chains/kite.js');
+    const tokens = mod.kiteTestnetAdapter.metadata.tokens;
+    expect(tokens).toHaveLength(1);
+    const t = tokens[0]!;
+    expect(t.symbol).toBe('PYUSD');
+    expect(t.decimals).toBe(18);
+    expect(t.name).toBe('PYUSD');
+    expect(t.eip712Name).toBe('PYUSD');
+    expect(t.eip712Version).toBe('1');
+  });
+
+  it('WFAC-12 AC-5b: kiteTestnetAdapter reflects token env overrides (pieUSD)', async () => {
+    process.env['KITE_TESTNET_TOKEN_SYMBOL'] = 'pieUSD';
+    process.env['KITE_TESTNET_TOKEN_NAME'] = 'pieUSD';
+    process.env['KITE_TESTNET_TOKEN_DECIMALS'] = '18';
+    process.env['KITE_TESTNET_EIP712_NAME'] = 'pieUSD';
+    process.env['KITE_TESTNET_EIP712_VERSION'] = '1';
+    vi.resetModules();
+    const mod = await import('../../chains/kite.js');
+    const tokens = mod.kiteTestnetAdapter.metadata.tokens;
+    expect(tokens).toHaveLength(1);
+    const t = tokens[0]!;
+    expect(t.symbol).toBe('pieUSD');
+    expect(t.decimals).toBe(18);
+    expect(t.name).toBe('pieUSD');
+    expect(t.eip712Name).toBe('pieUSD');
+    expect(t.eip712Version).toBe('1');
+  });
+
+  it('WFAC-12 AC-5c: partial override (only EIP712_VERSION set) → that field changes, the other 4 stay PYUSD defaults', async () => {
+    // Set ONLY one of the five KITE_TESTNET_TOKEN_* / EIP712 vars. The
+    // conditional spread in kite.ts:156-170 omits the four absent opts, so
+    // the KiteAdapter constructor applies its PYUSD default per-field. This
+    // proves the override is field-by-field (zero-regression guarantee), not
+    // all-or-nothing.
+    process.env['KITE_TESTNET_EIP712_VERSION'] = '2';
+    vi.resetModules();
+    const mod = await import('../../chains/kite.js');
+    const tokens = mod.kiteTestnetAdapter.metadata.tokens;
+    expect(tokens).toHaveLength(1);
+    const t = tokens[0]!;
+    // Overridden field.
+    expect(t.eip712Version).toBe('2');
+    // Untouched fields remain PYUSD defaults.
+    expect(t.symbol).toBe('PYUSD');
+    expect(t.name).toBe('PYUSD');
+    expect(t.eip712Name).toBe('PYUSD');
+    expect(t.decimals).toBe(18);
   });
 
   it('AC-13: throws ChainAdapterInitError when KITE_TESTNET_RPC_URL missing', async () => {

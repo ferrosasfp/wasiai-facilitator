@@ -85,6 +85,17 @@ export const EnvSchema = z
       .regex(/^0x[0-9a-fA-F]{40}$/, { message: 'must be 0x + 40 hex chars' })
       .optional(),
 
+    // WFAC-12 — Kite Testnet token metadata, env-configurable (opt-in overrides).
+    // ALL optional: when unset, KiteAdapter applies the PYUSD defaults
+    // (symbol/name/eip712Name=PYUSD, decimals=18, version='1') → zero regression.
+    // NOT added to .superRefine (CD-AB-1: optional, NOT required-in-prod). These
+    // are token metadata, not secrets (CD-4). Consumed in kiteTestnetAdapter.
+    KITE_TESTNET_TOKEN_SYMBOL: z.string().min(1).optional(),
+    KITE_TESTNET_TOKEN_NAME: z.string().min(1).optional(),
+    KITE_TESTNET_TOKEN_DECIMALS: z.coerce.number().int().min(0).optional(),
+    KITE_TESTNET_EIP712_NAME: z.string().min(1).optional(),
+    KITE_TESTNET_EIP712_VERSION: z.string().min(1).optional(),
+
     // ---- Mainnet feature flags + per-chain config (public mainnet support) -
     // Each mainnet chain is OPT-IN via a discrete enabled flag. Defaults are
     // `false` so existing testnet-only deployments are unaffected. Same enum
