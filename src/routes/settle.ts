@@ -146,10 +146,7 @@ export const settleRoute: FastifyPluginAsync = async (app) => {
           return reply.code(409).send(body);
         }
         if (lock === 'skipped') {
-          app.log.warn(
-            { request_id: requestId },
-            'in-flight lock skipped — Redis unavailable',
-          );
+          app.log.warn({ request_id: requestId }, 'in-flight lock skipped — Redis unavailable');
         } else {
           lockAcquired = true;
         }
@@ -167,218 +164,221 @@ export const settleRoute: FastifyPluginAsync = async (app) => {
       // ── settle pipeline (Step 2.5 → Step 5), wrapped so the finally above
       //    releases the lock regardless of which terminal return fires. ──
       async function runSettle(): Promise<FastifyReply> {
-      // Step 2.5 — global daily settle cap (anti-abuse). WFAC-53 FIX-6:
-      // SETTLE_CAP_FAIL_MODE controls Redis-throw behavior (open=fail-open,
-      // closed=HTTP 503 SERVICE_UNAVAILABLE).
-      const dailyCap = await incrementAndCheckDailyCap(
-        env.SETTLE_DAILY_GLOBAL_CAP,
-        env.SETTLE_CAP_FAIL_MODE,
-        app.log,
-      );
-      if (!dailyCap.ok) {
-        if (dailyCap.reason === 'redis_error_failclosed') {
-          // WFAC-53 FIX-6 fail-closed → HTTP 503 SERVICE_UNAVAILABLE.
+        // Step 2.5 — global daily settle cap (anti-abuse). WFAC-53 FIX-6:
+        // SETTLE_CAP_FAIL_MODE controls Redis-throw behavior (open=fail-open,
+        // closed=HTTP 503 SERVICE_UNAVAILABLE).
+        const dailyCap = await incrementAndCheckDailyCap(
+          env.SETTLE_DAILY_GLOBAL_CAP,
+          env.SETTLE_CAP_FAIL_MODE,
+          app.log,
+        );
+        if (!dailyCap.ok) {
+          if (dailyCap.reason === 'redis_error_failclosed') {
+            // WFAC-53 FIX-6 fail-closed → HTTP 503 SERVICE_UNAVAILABLE.
+            const body: ErrorBody = {
+              error: {
+                code: 'SERVICE_UNAVAILABLE',
+                message: 'Settlement cap check failed — service unavailable',
+                http: 503,
+              },
+            };
+            app.log.warn(
+              {
+                request_id: requestId,
+                error_code: 'SERVICE_UNAVAILABLE',
+                http_status: 503,
+                duration_ms: Date.now() - startMs,
+              },
+              'settle failed — fail-closed',
+            );
+            request.auditMeta = { ...request.auditMeta, errorCode: 'SERVICE_UNAVAILABLE' };
+            return reply.code(503).send(body);
+          }
+          // dailyCap.reason === 'cap_exceeded' — original RATE_LIMITED branch.
           const body: ErrorBody = {
             error: {
-              code: 'SERVICE_UNAVAILABLE',
-              message: 'Settlement cap check failed — service unavailable',
-              http: 503,
+              code: 'RATE_LIMITED',
+              message: `daily global settle cap reached (${dailyCap.cap}); try again tomorrow`,
+              http: 429,
             },
           };
           app.log.warn(
             {
               request_id: requestId,
-              error_code: 'SERVICE_UNAVAILABLE',
-              http_status: 503,
+              error_code: 'RATE_LIMITED',
+              http_status: 429,
+              daily_count: dailyCap.count,
+              daily_cap: dailyCap.cap,
+              retry_after_seconds: dailyCap.retryAfterSeconds,
               duration_ms: Date.now() - startMs,
             },
-            'settle failed — fail-closed',
+            'settle failed',
           );
-          request.auditMeta = { ...request.auditMeta, errorCode: 'SERVICE_UNAVAILABLE' };
-          return reply.code(503).send(body);
+          request.auditMeta = { ...request.auditMeta, errorCode: 'RATE_LIMITED' };
+          return reply
+            .code(429)
+            .header('Retry-After', String(dailyCap.retryAfterSeconds))
+            .send(body);
         }
-        // dailyCap.reason === 'cap_exceeded' — original RATE_LIMITED branch.
-        const body: ErrorBody = {
-          error: {
-            code: 'RATE_LIMITED',
-            message: `daily global settle cap reached (${dailyCap.cap}); try again tomorrow`,
-            http: 429,
-          },
-        };
-        app.log.warn(
+
+        // Step 3 — dispatch to core
+        let result;
+        try {
+          result = await settleCore(parsed, {
+            maxAmountAtomic: env.SETTLE_MAX_AMOUNT_ATOMIC,
+          });
+        } catch (err: unknown) {
+          // L4 — adapter threw. Defense-in-depth (CD-4 + SDD §DT-8).
+          app.log.error(
+            {
+              request_id: requestId,
+              error_code: 'TRANSACTION_FAILED',
+              http_status: 500,
+              err_type: (err as Error)?.name ?? 'UnknownError',
+              duration_ms: Date.now() - startMs,
+            },
+            'settle adapter threw',
+          );
+          // WFAC-32 H3 — ledger entry for adapter-throw. Synthetic failure result
+          // with TRANSACTION_FAILED / 500. CD-14: await, no .catch() / void.
+          await persistLedgerEntry(
+            buildLedgerEntry({
+              idempotencyKey,
+              durationMs: Date.now() - startMs,
+              method: 'eip3009',
+              network: parsed.accepted.network,
+              parsed,
+              result: {
+                ok: false,
+                error: {
+                  code: 'TRANSACTION_FAILED',
+                  message: 'Internal adapter error',
+                  http: 500,
+                },
+              },
+            }),
+            app.log,
+          );
+          const body: ErrorBody = {
+            error: {
+              code: 'TRANSACTION_FAILED',
+              message: 'Internal adapter error',
+              http: 500,
+            },
+          };
+          // WFAC-33 (CD-11): populate auditMeta.errorCode before reply.send.
+          request.auditMeta = { ...request.auditMeta, errorCode: 'TRANSACTION_FAILED' };
+          return reply.code(500).send(body);
+        }
+
+        // Step 4 — cache (CD-12 filters 5xx inside toCacheableSettle)
+        if (redisUp) {
+          const cacheable = toCacheableSettle(result);
+          if (cacheable) {
+            await setCachedSettleResponse(idempotencyKey, cacheable);
+          }
+        }
+
+        // Step 5 — map Result<SettleResult> → HTTP
+        if (!result.ok) {
+          // L3 — warn
+          app.log.warn(
+            {
+              request_id: requestId,
+              error_code: result.error.code,
+              http_status: result.error.http,
+              duration_ms: Date.now() - startMs,
+            },
+            'settle failed',
+          );
+          // WFAC-32 H2 — ledger entry for adapter-returned x402 error (4xx/5xx).
+          // CD-14: await; no .catch() / void. CD-3: via core/ledger only.
+          await persistLedgerEntry(
+            buildLedgerEntry({
+              idempotencyKey,
+              durationMs: Date.now() - startMs,
+              method: 'eip3009',
+              network: parsed.accepted.network,
+              parsed,
+              result: {
+                ok: false,
+                error: {
+                  code: result.error.code,
+                  message: result.error.message,
+                  http: result.error.http,
+                },
+              },
+            }),
+            app.log,
+          );
+          // WFAC-33 (CD-11): propagate adapter-returned x402 error code to audit row.
+          request.auditMeta = { ...request.auditMeta, errorCode: result.error.code };
+          // WFAC-41 (AC-11, CD-NEW-CB-RETRY-AFTER-INTERNAL) — Retry-After header
+          // for circuit-breaker 503. retryAfterMs lives ONLY on the server-side
+          // error object; it is NOT serialized in the JSON body.
+          if (
+            result.error.code === 'CHAIN_UNAVAILABLE' &&
+            typeof result.error.retryAfterMs === 'number'
+          ) {
+            const secs = Math.max(1, Math.ceil(result.error.retryAfterMs / 1000));
+            reply.header('Retry-After', String(secs));
+          }
+          const bodyError: { code: SettleRouteErrorCode; message: string; http: number } = {
+            code: result.error.code,
+            message: result.error.message,
+            http: result.error.http,
+          };
+          return reply.code(result.error.http).send({ error: bodyError } satisfies ErrorBody);
+        }
+
+        // WFAC-32 H1 — ledger entry for on-chain success. After the cache write,
+        // before the info log + reply.send. CD-14: await; no .catch() / void.
+        // Cache-hit path is handled by `sendCachedSettle` which intentionally
+        // does NOT persist (first request already did; would be a duplicate).
+        await persistLedgerEntry(
+          buildLedgerEntry({
+            idempotencyKey,
+            durationMs: Date.now() - startMs,
+            method: 'eip3009',
+            network: parsed.accepted.network,
+            parsed,
+            result: {
+              ok: true,
+              settled: result.settled,
+              transactionHash: result.transactionHash,
+              blockNumber: result.blockNumber,
+              amount: result.amount,
+              from: result.from,
+              to: result.to,
+              asset: result.asset,
+            },
+          }),
+          app.log,
+        );
+
+        // Success — L1 info with tx_hash (CD-12 nuevo; tx_hash is public on-chain).
+        app.log.info(
           {
             request_id: requestId,
-            error_code: 'RATE_LIMITED',
-            http_status: 429,
-            daily_count: dailyCap.count,
-            daily_cap: dailyCap.cap,
-            retry_after_seconds: dailyCap.retryAfterSeconds,
+            network: parsed.accepted.network,
+            method: 'eip3009',
             duration_ms: Date.now() - startMs,
+            tx_hash: result.transactionHash,
           },
-          'settle failed',
+          'settle ok',
         );
-        request.auditMeta = { ...request.auditMeta, errorCode: 'RATE_LIMITED' };
-        return reply.code(429).header('Retry-After', String(dailyCap.retryAfterSeconds)).send(body);
-      }
 
-      // Step 3 — dispatch to core
-      let result;
-      try {
-        result = await settleCore(parsed, {
-          maxAmountAtomic: env.SETTLE_MAX_AMOUNT_ATOMIC,
+        // CD-2 adaptado: spec-literal 200 body — 7 fields, EXPLICIT object build
+        // (NO rest-spread destructure — WFAC-20 auto-blindaje W1 lesson).
+        return reply.code(200).send({
+          settled: result.settled,
+          transactionHash: result.transactionHash,
+          blockNumber: result.blockNumber,
+          amount: result.amount,
+          from: result.from,
+          to: result.to,
+          asset: result.asset,
         });
-      } catch (err: unknown) {
-        // L4 — adapter threw. Defense-in-depth (CD-4 + SDD §DT-8).
-        app.log.error(
-          {
-            request_id: requestId,
-            error_code: 'TRANSACTION_FAILED',
-            http_status: 500,
-            err_type: (err as Error)?.name ?? 'UnknownError',
-            duration_ms: Date.now() - startMs,
-          },
-          'settle adapter threw',
-        );
-        // WFAC-32 H3 — ledger entry for adapter-throw. Synthetic failure result
-        // with TRANSACTION_FAILED / 500. CD-14: await, no .catch() / void.
-        await persistLedgerEntry(
-          buildLedgerEntry({
-            idempotencyKey,
-            durationMs: Date.now() - startMs,
-            method: 'eip3009',
-            network: parsed.accepted.network,
-            parsed,
-            result: {
-              ok: false,
-              error: {
-                code: 'TRANSACTION_FAILED',
-                message: 'Internal adapter error',
-                http: 500,
-              },
-            },
-          }),
-          app.log,
-        );
-        const body: ErrorBody = {
-          error: {
-            code: 'TRANSACTION_FAILED',
-            message: 'Internal adapter error',
-            http: 500,
-          },
-        };
-        // WFAC-33 (CD-11): populate auditMeta.errorCode before reply.send.
-        request.auditMeta = { ...request.auditMeta, errorCode: 'TRANSACTION_FAILED' };
-        return reply.code(500).send(body);
-      }
-
-      // Step 4 — cache (CD-12 filters 5xx inside toCacheableSettle)
-      if (redisUp) {
-        const cacheable = toCacheableSettle(result);
-        if (cacheable) {
-          await setCachedSettleResponse(idempotencyKey, cacheable);
-        }
-      }
-
-      // Step 5 — map Result<SettleResult> → HTTP
-      if (!result.ok) {
-        // L3 — warn
-        app.log.warn(
-          {
-            request_id: requestId,
-            error_code: result.error.code,
-            http_status: result.error.http,
-            duration_ms: Date.now() - startMs,
-          },
-          'settle failed',
-        );
-        // WFAC-32 H2 — ledger entry for adapter-returned x402 error (4xx/5xx).
-        // CD-14: await; no .catch() / void. CD-3: via core/ledger only.
-        await persistLedgerEntry(
-          buildLedgerEntry({
-            idempotencyKey,
-            durationMs: Date.now() - startMs,
-            method: 'eip3009',
-            network: parsed.accepted.network,
-            parsed,
-            result: {
-              ok: false,
-              error: {
-                code: result.error.code,
-                message: result.error.message,
-                http: result.error.http,
-              },
-            },
-          }),
-          app.log,
-        );
-        // WFAC-33 (CD-11): propagate adapter-returned x402 error code to audit row.
-        request.auditMeta = { ...request.auditMeta, errorCode: result.error.code };
-        // WFAC-41 (AC-11, CD-NEW-CB-RETRY-AFTER-INTERNAL) — Retry-After header
-        // for circuit-breaker 503. retryAfterMs lives ONLY on the server-side
-        // error object; it is NOT serialized in the JSON body.
-        if (
-          result.error.code === 'CHAIN_UNAVAILABLE' &&
-          typeof result.error.retryAfterMs === 'number'
-        ) {
-          const secs = Math.max(1, Math.ceil(result.error.retryAfterMs / 1000));
-          reply.header('Retry-After', String(secs));
-        }
-        const bodyError: { code: SettleRouteErrorCode; message: string; http: number } = {
-          code: result.error.code,
-          message: result.error.message,
-          http: result.error.http,
-        };
-        return reply.code(result.error.http).send({ error: bodyError } satisfies ErrorBody);
-      }
-
-      // WFAC-32 H1 — ledger entry for on-chain success. After the cache write,
-      // before the info log + reply.send. CD-14: await; no .catch() / void.
-      // Cache-hit path is handled by `sendCachedSettle` which intentionally
-      // does NOT persist (first request already did; would be a duplicate).
-      await persistLedgerEntry(
-        buildLedgerEntry({
-          idempotencyKey,
-          durationMs: Date.now() - startMs,
-          method: 'eip3009',
-          network: parsed.accepted.network,
-          parsed,
-          result: {
-            ok: true,
-            settled: result.settled,
-            transactionHash: result.transactionHash,
-            blockNumber: result.blockNumber,
-            amount: result.amount,
-            from: result.from,
-            to: result.to,
-            asset: result.asset,
-          },
-        }),
-        app.log,
-      );
-
-      // Success — L1 info with tx_hash (CD-12 nuevo; tx_hash is public on-chain).
-      app.log.info(
-        {
-          request_id: requestId,
-          network: parsed.accepted.network,
-          method: 'eip3009',
-          duration_ms: Date.now() - startMs,
-          tx_hash: result.transactionHash,
-        },
-        'settle ok',
-      );
-
-      // CD-2 adaptado: spec-literal 200 body — 7 fields, EXPLICIT object build
-      // (NO rest-spread destructure — WFAC-20 auto-blindaje W1 lesson).
-      return reply.code(200).send({
-        settled: result.settled,
-        transactionHash: result.transactionHash,
-        blockNumber: result.blockNumber,
-        amount: result.amount,
-        from: result.from,
-        to: result.to,
-        asset: result.asset,
-      });
       } // end runSettle
     },
   );
