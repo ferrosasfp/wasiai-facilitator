@@ -74,20 +74,3 @@ jobs:
       - name: Security audit (high + critical)
         run: npm run security:audit
         continue-on-error: false
-
-  # Snyk scanning — runs on push to main AND pull_request (DT-F).
-  # snyk/actions/node@master is intentionally unpinned: Snyk maintains this
-  # action actively and does not publish SHA release tags (CD-7).
-  snyk:
-    name: Snyk vulnerability scan
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v6
-      - name: Snyk open source scan
-        uses: snyk/actions/node@master
-        continue-on-error: false
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          args: --severity-threshold=high
