@@ -69,7 +69,10 @@ describe('requireFacilitatorKey — multi-key (additive)', () => {
   });
 
   it('a key from FACILITATOR_API_KEYS authenticates', async () => {
-    const app = appWith({ FACILITATOR_API_KEY: 'old-key', FACILITATOR_API_KEYS: 'new-key-1,new-key-2' });
+    const app = appWith({
+      FACILITATOR_API_KEY: 'old-key',
+      FACILITATOR_API_KEYS: 'new-key-1,new-key-2',
+    });
     const res = await inject(app, 'new-key-2');
     expect(res.statusCode).toBe(200);
     await app.close();
