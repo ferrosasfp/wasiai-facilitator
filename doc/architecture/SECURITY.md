@@ -160,10 +160,23 @@ choices and how to tighten them in production.
   enforcement, **but only with Redis HA** — a sustained outage will then reject
   all rate-limited requests. The app logs a loud `warn` at boot when running in
   production with `RATE_LIMIT_FAIL_OPEN=true`.
-- **Per-key bucketing (AUDIT):** rate limits are now keyed per `(IP, keyId)`
-  where `keyId = sha256(matched FACILITATOR key)[:16]` (non-secret). Distinct
-  rotated keys behind one IP get independent budgets; raw keys are never used as
-  Redis keys nor logged.
+- **Two rate-limit layers (AUDIT / BLQ-MED-1):** the money-path routes
+  (`/verify`, `/settle`) are protected by TWO independent `@fastify/rate-limit`
+  registrations (`src/app.ts`):
+    - **Layer 1 — global, `onRequest`, per-IP.** Runs BEFORE caller auth, so
+      unauthenticated / wrong-bearer floods are throttled per client IP (a bad
+      bearer is counted by this layer, then rejected 401 by auth; once the IP
+      exceeds the cap it gets 429, not unbounded 401s). This is the pre-auth
+      DoS/brute-force guard.
+    - **Layer 2 — per-key, `preHandler`, keyed by `facilitatorKeyId`.** Runs
+      AFTER `requireFacilitatorKey` has matched a caller key and stamped
+      `facilitatorKeyId = sha256(matched key)[:16]` (non-secret). Distinct
+      rotated keys behind one shared IP get independent budgets, so one key
+      cannot exhaust another's allowance. Raw keys are never used as Redis keys
+      nor logged.
+  Both layers read the same per-route cap (`RATE_LIMIT_VERIFY_MAX` /
+  `RATE_LIMIT_SETTLE_MAX`); Layer 2 only ever ADDS a per-key bound and never
+  weakens the per-IP guarantee of Layer 1.
 
 ### Redis outage → SETTLE_DAILY_GLOBAL_CAP fail-closed (default) or fail-open (opt-in)
 - **Mechanism:** `incrementAndCheckDailyCap` in `src/core/settle-cap.ts` does

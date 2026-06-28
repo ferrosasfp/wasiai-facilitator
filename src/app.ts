@@ -1,5 +1,10 @@
-import Fastify, { type FastifyInstance, type FastifyBaseLogger } from 'fastify';
-import rateLimit from '@fastify/rate-limit';
+import Fastify, {
+  type FastifyInstance,
+  type FastifyBaseLogger,
+  type FastifyPluginAsync,
+  type FastifyRequest,
+} from 'fastify';
+import rateLimit, { type errorResponseBuilderContext } from '@fastify/rate-limit';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import type { DestinationStream, Logger } from 'pino';
@@ -49,6 +54,100 @@ function parseTrustProxy(raw: string): boolean | number | string {
   if (raw === 'true') return true;
   const n = Number(raw);
   return Number.isInteger(n) && n >= 0 ? n : raw;
+}
+
+/**
+ * BLQ-MED-1 — shared 429 error body builder for BOTH rate-limit layers
+ * (Layer 1 global per-IP, Layer 2 per-key). Extracted so the two registrations
+ * emit the identical spec-literal body + PII-free warn log.
+ *
+ * @fastify/rate-limit `throw`s the returned object; Fastify's default error
+ * handler reads `statusCode` from the thrown error to set the HTTP code and
+ * then serializes the remaining ENUMERABLE fields as the JSON body
+ * (see fastify/lib/error-handler.js).
+ *
+ * We attach `statusCode: 429` as a NON-enumerable property so Fastify uses it
+ * but it is NOT emitted in the body (CD-3: body must have exactly 3 keys —
+ * code/message/http). The body itself is `{ error: { code, message, http } }`
+ * verbatim (CD-10).
+ */
+function rateLimitErrorResponseBuilder(
+  req: FastifyRequest,
+  context: errorResponseBuilderContext,
+): object {
+  req.log.warn(
+    {
+      request_id: req.id,
+      path: req.routeOptions?.url ?? req.url,
+      rate_limit_max: context.max,
+      rate_limit_ttl_ms: context.ttl,
+    },
+    'rate limit exceeded',
+  );
+  const body = {
+    error: {
+      code: 'RATE_LIMITED',
+      message: 'Too many requests, please try again later',
+      http: 429,
+    },
+  };
+  Object.defineProperty(body, 'statusCode', {
+    value: 429,
+    enumerable: false,
+    writable: false,
+    configurable: false,
+  });
+  return body;
+}
+
+/**
+ * BLQ-MED-1 — encapsulated plugin that registers the money-path routes
+ * (/verify, /settle) together with Layer 2 (per-key) rate-limiting.
+ *
+ * Layer 2 is a SECOND @fastify/rate-limit registration. Because it lives in
+ * this encapsulated scope and is a distinct registration, it has its OWN store
+ * and its OWN per-request `rateLimitRan` guard — so it runs IN ADDITION TO the
+ * global Layer 1 (per-IP onRequest), not instead of it. It uses the
+ * `preHandler` phase so it executes AFTER `requireFacilitatorKey` has stamped
+ * `req.facilitatorKeyId`, bucketing per authenticated caller key.
+ *
+ * The per-route `config.rateLimit` on /verify and /settle is consumed by BOTH
+ * registrations' onRoute hooks: Layer 1 applies it at onRequest keyed per-IP,
+ * Layer 2 applies it at preHandler keyed per-key. The per-IP ceiling is always
+ * enforced first; Layer 2 only ever ADDS a per-key bound (defense-in-depth).
+ *
+ * When RATE_LIMIT_ENABLED=false, Layer 2 is NOT registered (mirrors Layer 1) —
+ * the routes still register, with zero rate-limit overhead.
+ */
+function registerMoneyPathRoutes(env: EnvConfig): FastifyPluginAsync {
+  return async (scope) => {
+    if (env.RATE_LIMIT_ENABLED) {
+      const redisClient = getRedisClient();
+      await scope.register(rateLimit, {
+        global: true,
+        // BLQ-MED-1 Layer 2: post-auth phase so `req.facilitatorKeyId` is set.
+        hook: 'preHandler',
+        max: env.RATE_LIMIT_VERIFY_MAX,
+        timeWindow: env.RATE_LIMIT_WINDOW_SEC * 1000,
+        skipOnError: env.RATE_LIMIT_FAIL_OPEN,
+        redis: redisClient ?? undefined,
+        // Per-key bucket: `facilitatorKeyId` is a NON-SECRET sha256 prefix
+        // stamped by requireFacilitatorKey on a successful match (never the raw
+        // key, never logged). Distinct keys behind the same IP get independent
+        // budgets. Requests with no key (key-bypass test mode) fall back to a
+        // per-IP bucket — harmless, since Layer 1 already bounds per-IP.
+        keyGenerator: (req) => {
+          const keyId = req.facilitatorKeyId;
+          if (keyId) return `k:${keyId}`;
+          return extractClientIp(req) ?? req.ip ?? 'unknown';
+        },
+        enableDraftSpec: false,
+        errorResponseBuilder: rateLimitErrorResponseBuilder,
+      });
+    }
+    await scope.register(verifyRoute);
+    await scope.register(settleRoute);
+  };
 }
 
 export interface BuildAppOptions {
@@ -194,21 +293,41 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   // so the plugin's onRoute hook reads per-route config.rateLimit).
   // Conditional registration (DT-14): when RATE_LIMIT_ENABLED=false,
   // the plugin is NOT registered → zero-overhead global bypass (AC-6).
+  //
+  // BLQ-MED-1 (audit fix-pack) — TWO independent rate-limit layers:
+  //
+  //   Layer 1 (GLOBAL, `onRequest`, PER-IP): registered here. Runs in the
+  //     `onRequest` phase, BEFORE any route's auth preHandler. This restores
+  //     the pre-auth throttling that protects the money-path routes from
+  //     unauthenticated/wrong-bearer floods (matches `main` behavior — repeated
+  //     bad-bearer requests to /settle and /verify eventually get 429, not
+  //     unbounded 401s). It buckets purely by client IP, so it covers requests
+  //     that never authenticate (the auth preHandler short-circuits with 401
+  //     AFTER this hook has already counted the request).
+  //
+  //   Layer 2 (PER-KEY, `preHandler`, AFTER auth): a SEPARATE rate-limit
+  //     registration scoped to /settle + /verify (see registerMoneyPathRoutes
+  //     below). It runs AFTER `requireFacilitatorKey` stamps
+  //     `req.facilitatorKeyId`, so it buckets per authenticated caller key —
+  //     the additional hardening the audit asked for (one caller's key cannot
+  //     exhaust another's allowance behind a shared NAT'd IP). Layer 2 NEVER
+  //     weakens Layer 1: the per-IP ceiling is always enforced first.
+  //
+  // A single @fastify/rate-limit registration only adds ONE hook per route
+  // (its `onRoute` hook installs the global OR the per-route config hook, never
+  // both), and a per-request `rateLimitRan` guard prevents a second hook from
+  // the SAME registration running twice. Two layers therefore REQUIRE two
+  // registrations, each with its own store + `rateLimitRan` symbol.
   if (env.RATE_LIMIT_ENABLED) {
     const redisClient = getRedisClient();
     await app.register(rateLimit, {
       global: true,
-      // AUDIT (per-key rate-limit, additive): run the rate-limit check in the
-      // `preHandler` phase (default is `onRequest`) so it executes AFTER each
-      // route's auth preHandler (`requireFacilitatorKey`), which stamps
-      // `req.facilitatorKeyId`. Empirically verified: route preHandler runs
-      // before the plugin's preHandler-phase keyGenerator. Routes without an
-      // auth preHandler (public: /health, /supported, /openapi.json) simply
-      // have no keyId → pure per-IP bucket (legacy behavior preserved).
-      hook: 'preHandler',
-      // Defensive fallback caps — the 3 public routes OVERRIDE these via
-      // per-route config.rateLimit in W2. Any future route without a
-      // config inherits these.
+      // BLQ-MED-1: default `onRequest` phase (NOT `preHandler`). This is the
+      // pre-auth per-IP guard — it MUST run before route auth so unauthenticated
+      // floods are throttled (the regression this fix closes).
+      // Defensive fallback caps — the 3 public routes (and the money-path
+      // routes) OVERRIDE `max` via per-route config.rateLimit. Any future route
+      // without a config inherits these.
       max: env.RATE_LIMIT_VERIFY_MAX,
       timeWindow: env.RATE_LIMIT_WINDOW_SEC * 1000,
       // DT-10 + AUDIT: fail-open on Redis runtime outage is now env-configurable
@@ -223,67 +342,14 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       redis: redisClient ?? undefined,
       // DT-8: reuse the centralized extractor. Defensive `?? req.ip ??
       // 'unknown'` fallback ensures the plugin always has a key.
-      //
-      // AUDIT (per-key rate-limit, additive): when the auth preHandler matched
-      // a caller key it stamps `req.facilitatorKeyId` (a NON-SECRET sha256
-      // prefix — never the raw key). We fold it into the bucket so distinct
-      // keys behind the same IP get independent budgets (and one key cannot
-      // exhaust another's allowance). Requests with no key (unauthenticated /
-      // public routes / key-bypass test mode) fall back to pure per-IP — the
-      // exact legacy behavior, so single-key operation is unchanged.
-      //
-      // NOTE: the global rate-limit hook runs BEFORE per-route preHandlers, so
-      // for the FIRST request in a window the keyId may not be set yet; the
-      // settle/verify routes carry their own preHandler that authenticates,
-      // and steady-state traffic is keyed once the bucket is established. The
-      // per-IP component guarantees a bound even before the key is known.
-      keyGenerator: (req) => {
-        const ip = extractClientIp(req) ?? req.ip ?? 'unknown';
-        const keyId = req.facilitatorKeyId;
-        return keyId ? `${ip}:k:${keyId}` : ip;
-      },
+      // BLQ-MED-1: PURE per-IP. `facilitatorKeyId` is NOT read here — this hook
+      // runs in `onRequest`, BEFORE auth, so the key is not yet known. Per-key
+      // bucketing lives exclusively in Layer 2 (which runs post-auth).
+      keyGenerator: (req) => extractClientIp(req) ?? req.ip ?? 'unknown',
       // DT-12: default headers (X-RateLimit-*). Draft-spec variant
       // (RateLimit-*) not used — work-item AC-5 cites X- prefixed names.
       enableDraftSpec: false,
-      // DT-7 + DT-11: spec-literal body + warn log without PII (CD-3, CD-4).
-      // @fastify/rate-limit `throw`s the returned object; Fastify's default
-      // error handler reads `statusCode` from the thrown error to set the
-      // HTTP code and then serializes the remaining enumerable fields as
-      // the JSON body (see fastify/lib/error-handler.js:163,100).
-      //
-      // We need:
-      //   - HTTP 429  → attach `statusCode: 429` as a NON-enumerable property
-      //                 so it's used by Fastify but NOT emitted in the body
-      //                 (CD-3: body must have exactly 3 keys — code/message/http).
-      //   - body      → `{ error: { code, message, http } }` verbatim (CD-10).
-      //
-      // Using Object.defineProperty to make `statusCode` non-enumerable keeps
-      // the JSON shape clean while still honouring the Fastify error contract.
-      errorResponseBuilder: (req, context) => {
-        req.log.warn(
-          {
-            request_id: req.id,
-            path: req.routeOptions?.url ?? req.url,
-            rate_limit_max: context.max,
-            rate_limit_ttl_ms: context.ttl,
-          },
-          'rate limit exceeded',
-        );
-        const body = {
-          error: {
-            code: 'RATE_LIMITED',
-            message: 'Too many requests, please try again later',
-            http: 429,
-          },
-        };
-        Object.defineProperty(body, 'statusCode', {
-          value: 429,
-          enumerable: false,
-          writable: false,
-          configurable: false,
-        });
-        return body;
-      },
+      errorResponseBuilder: rateLimitErrorResponseBuilder,
     });
   }
 
@@ -304,8 +370,12 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   }
 
   await app.register(healthRoute);
-  await app.register(verifyRoute);
-  await app.register(settleRoute);
+  // BLQ-MED-1 — money-path routes (/verify, /settle) are registered inside an
+  // encapsulated scope that ALSO registers Layer 2 (per-key) rate-limiting.
+  // Encapsulation is required: Layer 2 must be a SEPARATE @fastify/rate-limit
+  // registration (own store + `rateLimitRan` symbol) so it runs IN ADDITION TO
+  // the global Layer 1 (per-IP onRequest) — not instead of it.
+  await app.register(registerMoneyPathRoutes(env));
   await app.register(supportedRoute);
   await app.register(openapiRoute);
 
