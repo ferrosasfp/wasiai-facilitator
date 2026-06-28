@@ -534,14 +534,31 @@ describe('parseEnv', () => {
 
   // ─── WFAC-53 FIX-6 — SETTLE_CAP_FAIL_MODE ────────────────────────────────
 
-  it('T-ENV-FAIL-1 (FIX-6 AC-16, CD-8): SETTLE_CAP_FAIL_MODE defaults "open"', () => {
+  it('T-ENV-FAIL-1 (AUDIT): SETTLE_CAP_FAIL_MODE defaults "closed" (secure-by-default)', () => {
+    // AUDIT money-path change: default flipped open -> closed so a missing env
+    // is fail-CLOSED for a payment service (no unbounded settle on Redis down).
     const result = parseEnv({ NODE_ENV: 'test' });
+    expect(result.SETTLE_CAP_FAIL_MODE).toBe('closed');
+  });
+
+  it('T-ENV-FAIL-1b (AUDIT): SETTLE_CAP_FAIL_MODE still overridable to "open"', () => {
+    const result = parseEnv({ NODE_ENV: 'test', SETTLE_CAP_FAIL_MODE: 'open' });
     expect(result.SETTLE_CAP_FAIL_MODE).toBe('open');
   });
 
   it('T-ENV-FAIL-2 (FIX-6 AC-15): SETTLE_CAP_FAIL_MODE accepts "closed"', () => {
     const result = parseEnv({ NODE_ENV: 'test', SETTLE_CAP_FAIL_MODE: 'closed' });
     expect(result.SETTLE_CAP_FAIL_MODE).toBe('closed');
+  });
+
+  it('T-ENV-RLFO-1 (AUDIT): RATE_LIMIT_FAIL_OPEN defaults true (legacy behavior)', () => {
+    const result = parseEnv({ NODE_ENV: 'test' });
+    expect(result.RATE_LIMIT_FAIL_OPEN).toBe(true);
+  });
+
+  it('T-ENV-RLFO-2 (AUDIT): RATE_LIMIT_FAIL_OPEN=false parses to false', () => {
+    const result = parseEnv({ NODE_ENV: 'test', RATE_LIMIT_FAIL_OPEN: 'false' });
+    expect(result.RATE_LIMIT_FAIL_OPEN).toBe(false);
   });
 
   it('T-ENV-FAIL-3 (CD-8 defense): SETTLE_CAP_FAIL_MODE rejects arbitrary strings → exit 1', () => {

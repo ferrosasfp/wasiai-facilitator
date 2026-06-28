@@ -115,6 +115,37 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
   app.decorate('env', env);
 
+  // AUDIT — production hardening startup warnings. Loud, structured warns when
+  // the service boots in production with a less-secure-than-recommended config.
+  // These do NOT change behavior (no fail-fast) — they surface drift from the
+  // recommended posture in logs/alerts without breaking existing deployments.
+  if (env.NODE_ENV === 'production') {
+    if (env.SETTLE_CAP_FAIL_MODE === 'open') {
+      logger.warn(
+        { setting: 'SETTLE_CAP_FAIL_MODE', value: 'open' },
+        'SECURITY: daily settle cap is FAIL-OPEN in production — a Redis outage ' +
+          'allows unbounded settlements (operator wallet drain risk). ' +
+          'Recommended: SETTLE_CAP_FAIL_MODE=closed.',
+      );
+    }
+    if (env.RATE_LIMIT_ENABLED && env.RATE_LIMIT_FAIL_OPEN) {
+      logger.warn(
+        { setting: 'RATE_LIMIT_FAIL_OPEN', value: true },
+        'SECURITY: rate limiting is FAIL-OPEN in production — a Redis outage ' +
+          'disables per-IP/per-key limits. Set RATE_LIMIT_FAIL_OPEN=false for ' +
+          'strict enforcement (requires Redis HA).',
+      );
+    }
+    if (!env.CORS_ALLOWED_ORIGINS || env.CORS_ALLOWED_ORIGINS.trim().length === 0) {
+      logger.warn(
+        { setting: 'CORS_ALLOWED_ORIGINS', value: '(unset)' },
+        'SECURITY: CORS_ALLOWED_ORIGINS is unset in production — CORS reflects ' +
+          'ANY origin (permissive). Set an explicit allow-list, e.g. ' +
+          'CORS_ALLOWED_ORIGINS=https://app.wasiai.io,https://wasiai.io.',
+      );
+    }
+  }
+
   // Security headers (helmet) — HSTS, X-Content-Type-Options, X-Frame-Options, etc.
   // Disabling CSP because this is a JSON-only API (no HTML served).
   // Registered FIRST so headers apply to all responses including errors.
@@ -180,9 +211,12 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       // config inherits these.
       max: env.RATE_LIMIT_VERIFY_MAX,
       timeWindow: env.RATE_LIMIT_WINDOW_SEC * 1000,
-      // DT-10: fail-open on Redis runtime outage. If the incr() call on
-      // the store rejects, the plugin lets the request through.
-      skipOnError: true,
+      // DT-10 + AUDIT: fail-open on Redis runtime outage is now env-configurable
+      // via RATE_LIMIT_FAIL_OPEN (default true = legacy behavior). When true,
+      // an incr() rejection lets the request through. Set 'false' for strict
+      // enforcement (only with Redis HA — see SECURITY.md). NOT flipped to
+      // false by default: a transient blip must not hard-break the service.
+      skipOnError: env.RATE_LIMIT_FAIL_OPEN,
       // DT-9 + DT-10 boot-time: when getRedisClient() returns null
       // (test env, REDIS_URL absent), pass undefined → plugin falls
       // back to LocalStore (in-memory) without crashing.
