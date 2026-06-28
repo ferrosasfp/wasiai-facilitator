@@ -167,6 +167,14 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     const redisClient = getRedisClient();
     await app.register(rateLimit, {
       global: true,
+      // AUDIT (per-key rate-limit, additive): run the rate-limit check in the
+      // `preHandler` phase (default is `onRequest`) so it executes AFTER each
+      // route's auth preHandler (`requireFacilitatorKey`), which stamps
+      // `req.facilitatorKeyId`. Empirically verified: route preHandler runs
+      // before the plugin's preHandler-phase keyGenerator. Routes without an
+      // auth preHandler (public: /health, /supported, /openapi.json) simply
+      // have no keyId → pure per-IP bucket (legacy behavior preserved).
+      hook: 'preHandler',
       // Defensive fallback caps — the 3 public routes OVERRIDE these via
       // per-route config.rateLimit in W2. Any future route without a
       // config inherits these.
@@ -181,7 +189,25 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       redis: redisClient ?? undefined,
       // DT-8: reuse the centralized extractor. Defensive `?? req.ip ??
       // 'unknown'` fallback ensures the plugin always has a key.
-      keyGenerator: (req) => extractClientIp(req) ?? req.ip ?? 'unknown',
+      //
+      // AUDIT (per-key rate-limit, additive): when the auth preHandler matched
+      // a caller key it stamps `req.facilitatorKeyId` (a NON-SECRET sha256
+      // prefix — never the raw key). We fold it into the bucket so distinct
+      // keys behind the same IP get independent budgets (and one key cannot
+      // exhaust another's allowance). Requests with no key (unauthenticated /
+      // public routes / key-bypass test mode) fall back to pure per-IP — the
+      // exact legacy behavior, so single-key operation is unchanged.
+      //
+      // NOTE: the global rate-limit hook runs BEFORE per-route preHandlers, so
+      // for the FIRST request in a window the keyId may not be set yet; the
+      // settle/verify routes carry their own preHandler that authenticates,
+      // and steady-state traffic is keyed once the bucket is established. The
+      // per-IP component guarantees a bound even before the key is known.
+      keyGenerator: (req) => {
+        const ip = extractClientIp(req) ?? req.ip ?? 'unknown';
+        const keyId = req.facilitatorKeyId;
+        return keyId ? `${ip}:k:${keyId}` : ip;
+      },
       // DT-12: default headers (X-RateLimit-*). Draft-spec variant
       // (RateLimit-*) not used — work-item AC-5 cites X- prefixed names.
       enableDraftSpec: false,

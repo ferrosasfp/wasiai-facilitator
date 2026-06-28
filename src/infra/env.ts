@@ -73,6 +73,18 @@ export const EnvSchema = z
     // presence for non-test env (same pattern as OPERATOR_PRIVATE_KEY). NEVER logged.
     FACILITATOR_API_KEY: z.string().min(1).optional(),
 
+    // AUDIT (key versioning / rotation) — ADDITIVE multi-key support.
+    // Comma-separated list of additional valid caller keys. Lets the operator
+    // rotate keys with a grace period (publish a new key here, deploy, migrate
+    // callers, then drop the old one) WITHOUT downtime. The single
+    // FACILITATOR_API_KEY above keeps working unchanged: at runtime the auth
+    // middleware accepts FACILITATOR_API_KEY OR any entry in this list.
+    // Raw CSV string (NO Zod transform per the CORS CD-11 precedent) — parsed +
+    // trimmed + filtered in src/middleware/auth.ts. NEVER logged.
+    // NOT added to .superRefine: optional, NOT required-in-prod (the single
+    // key remains the required credential; this is purely additive).
+    FACILITATOR_API_KEYS: z.string().optional(),
+
     // WFAC-AUDIT — Fastify trustProxy hop count. Railway = 1 hop ('1').
     // If Cloudflare sits in front, bump to '2' via env (no code change, CD-3).
     // In tests set 'false' to avoid depending on proxy infra (R-1).
