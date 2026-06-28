@@ -111,7 +111,14 @@
 
 - **Never commit secrets to git** — `.gitignore` includes `.env`, `.env.*`
 - **ESLint `no-secrets` plugin** — catches base64-looking strings, private keys, API keys
-- **Pino log redaction** — configured to strip `privateKey`, `signature`, `nonce` from logs
+- **Pino log redaction** — `redact` is configured on the logger
+  (`src/infra/logger.ts`) and applied in every mode (dev/test/prod). It replaces
+  secret-bearing fields with `[Redacted]` BEFORE serialization, both at the top
+  level and one level deep (`*.<field>`). Covered fields include
+  `privateKey` / `OPERATOR_PRIVATE_KEY`, `apiKey` / `FACILITATOR_API_KEY`,
+  `SUPABASE_SERVICE_KEY`, `secret`, `token`, `password`, `signature`, `nonce`,
+  and `authorization` / `cookie` / `set-cookie` headers. Regression-guarded by
+  `src/__tests__/unit/logger.redact.test.ts`.
 - **Railway/Vercel env vars** — encrypted at rest, scoped per environment
 
 ## Audit readiness
