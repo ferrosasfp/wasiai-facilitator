@@ -152,10 +152,12 @@ choices and how to tighten them in production.
   per-key rate limits are not enforced. Burst-from-single-IP attacks become
   viable until Redis recovers.
 - **Why fail-open is the DEFAULT (not flipped to closed):** a transient Redis
-  blip must not hard-break the whole service. The authoritative budget
-  protection is `SETTLE_DAILY_GLOBAL_CAP`, which is **fail-closed by default**
-  (`SETTLE_CAP_FAIL_MODE=closed`, see below) — so wallet-drain is already
-  bounded even when rate-limit is fail-open.
+  blip must not hard-break the whole service. `SETTLE_DAILY_GLOBAL_CAP`
+  (`SETTLE_CAP_FAIL_MODE`) is **also fail-open by default** for the same reason
+  (single-instance / non-HA Redis — see the 2026-06-29 outage below). Trade-off:
+  during a sustained Redis outage neither cap is enforced (bounded wallet-drain
+  risk for the outage window). This is the deliberate availability-over-
+  strictness choice until Redis is HA; flip both to fail-closed only with HA.
 - **Prod recommendation:** set `RATE_LIMIT_FAIL_OPEN=false` for strict
   enforcement, **but only with Redis HA** — a sustained outage will then reject
   all rate-limited requests. The app logs a loud `warn` at boot when running in
@@ -178,23 +180,28 @@ choices and how to tighten them in production.
   `RATE_LIMIT_SETTLE_MAX`); Layer 2 only ever ADDS a per-key bound and never
   weakens the per-IP guarantee of Layer 1.
 
-### Redis outage → SETTLE_DAILY_GLOBAL_CAP fail-closed (default) or fail-open (opt-in)
+### Redis outage → SETTLE_DAILY_GLOBAL_CAP fail-open (default) or fail-closed (opt-in, HA only)
 - **Mechanism:** `incrementAndCheckDailyCap` in `src/core/settle-cap.ts` does
-  `client.incr(key)` to enforce a global daily settle cap. The behavior on
-  Redis throw is configurable via `SETTLE_CAP_FAIL_MODE`:
-    - `SETTLE_CAP_FAIL_MODE=closed` (**DEFAULT, AUDIT** — secure-by-default):
-      HTTP 503 SERVICE_UNAVAILABLE. Surface = service degrades protectively;
-      legitimate clients see 503 but the operator wallet is safe from
-      unbounded settlement during a Redis outage.
-    - `SETTLE_CAP_FAIL_MODE=open` (opt-in, availability-first): request allowed
-      through. Surface = unbounded settle count until Redis recovers
-      (wallet-drain risk).
-- **AUDIT change:** the default flipped from `open` to `closed`. For a payment
-  service a missing/unset env must be the SECURE choice. The app logs a loud
-  `warn` at boot when running in production with `SETTLE_CAP_FAIL_MODE=open`.
-- **Trade-off:** fail-closed degrades availability during Redis outages; fail-
-  open trades availability for protection against budget overrun. There is no
-  free lunch — operators who prefer availability can opt into `open`.
+  `client.incr(key)` to enforce a global daily settle cap. Under HEALTHY Redis
+  the cap always enforces (over-limit → rejected) regardless of fail mode. Only
+  the behavior when the Redis `incr` THROWS is configurable via
+  `SETTLE_CAP_FAIL_MODE`:
+    - `SETTLE_CAP_FAIL_MODE=open` (**DEFAULT** — availability-first, safe for
+      single-instance Redis): request allowed through. A Redis outage means the
+      cap is not enforced until Redis recovers (bounded wallet-drain risk for
+      the outage window), but settlements keep working.
+    - `SETTLE_CAP_FAIL_MODE=closed` (opt-in, HA-only): HTTP 503
+      SERVICE_UNAVAILABLE on Redis error. Protects the operator wallet during a
+      Redis outage, but **rejects ALL settlements on any Redis blip** — only
+      safe with a reliable / HA Redis.
+- **INCIDENT 2026-06-29:** an audit pass had flipped the default to `closed`.
+  With single-instance Redis the cap-check failed and fail-closed rejected EVERY
+  settlement on every chain (total settlement outage). Reverted to `open` (for a
+  payment service on non-HA Redis, a missing/unset env must not be able to take
+  settlement down). The app logs a loud `warn` at boot in production noting
+  fail-open is active and that `closed` requires HA Redis.
+- **Trade-off:** with non-HA Redis, availability wins (fail-open). Once Redis is
+  HA, set `SETTLE_CAP_FAIL_MODE=closed` for strict wallet protection.
 
 ### EIP-712 Domain separator drift → boot refused (WFAC-53 FIX-2)
 - **Mechanism:** at boot, `initDomainCheck` (`src/chains/init-domain-check.ts`)
