@@ -534,14 +534,16 @@ describe('parseEnv', () => {
 
   // ─── WFAC-53 FIX-6 — SETTLE_CAP_FAIL_MODE ────────────────────────────────
 
-  it('T-ENV-FAIL-1 (AUDIT): SETTLE_CAP_FAIL_MODE defaults "closed" (secure-by-default)', () => {
-    // AUDIT money-path change: default flipped open -> closed so a missing env
-    // is fail-CLOSED for a payment service (no unbounded settle on Redis down).
+  it('T-ENV-FAIL-1: SETTLE_CAP_FAIL_MODE defaults "open" (Redis single-instance)', () => {
+    // INCIDENT 2026-06-29: PR #40 flipped this default to "closed"; a Redis blip
+    // then rejected ALL settlements (prod outage). Default reverted to fail-open
+    // because the cap-check depends on single-instance (non-HA) Redis. "closed"
+    // is only safe with HA Redis.
     const result = parseEnv({ NODE_ENV: 'test' });
-    expect(result.SETTLE_CAP_FAIL_MODE).toBe('closed');
+    expect(result.SETTLE_CAP_FAIL_MODE).toBe('open');
   });
 
-  it('T-ENV-FAIL-1b (AUDIT): SETTLE_CAP_FAIL_MODE still overridable to "open"', () => {
+  it('T-ENV-FAIL-1b: SETTLE_CAP_FAIL_MODE still overridable to "open"', () => {
     const result = parseEnv({ NODE_ENV: 'test', SETTLE_CAP_FAIL_MODE: 'open' });
     expect(result.SETTLE_CAP_FAIL_MODE).toBe('open');
   });
