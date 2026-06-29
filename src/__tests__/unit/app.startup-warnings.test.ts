@@ -2,8 +2,9 @@
  * Production hardening startup warnings (AUDIT).
  *
  * buildApp() must emit a loud `warn` at boot, in production, when the config
- * drifts from the recommended-secure posture:
- *   - SETTLE_CAP_FAIL_MODE=open       (fail-open caps — wallet-drain risk)
+ * carries an operational/availability trade-off:
+ *   - SETTLE_CAP_FAIL_MODE=open       (fail-open caps — wallet-drain risk; this
+ *                                      is the SAFE default while Redis is non-HA)
  *   - RATE_LIMIT_FAIL_OPEN=true       (fail-open rate-limit)
  *   - CORS_ALLOWED_ORIGINS unset      (permissive CORS)
  * It must NOT emit them when configured securely, nor outside production.
@@ -64,6 +65,10 @@ describe('production startup hardening warnings (AUDIT)', () => {
     });
     expect(cap.text()).toContain('SETTLE_CAP_FAIL_MODE');
     expect(cap.text()).toContain('FAIL-OPEN');
+    // Reworded (2026-06-29 incident): the warning must NOT nudge operators to
+    // set fail-closed unconditionally; it must condition fail-closed on HA Redis.
+    expect(cap.text()).toContain('HA');
+    expect(cap.text()).not.toContain('Recommended: SETTLE_CAP_FAIL_MODE=closed');
   });
 
   it('warns when CORS_ALLOWED_ORIGINS is unset in production', async () => {

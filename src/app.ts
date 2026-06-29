@@ -222,9 +222,12 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     if (env.SETTLE_CAP_FAIL_MODE === 'open') {
       logger.warn(
         { setting: 'SETTLE_CAP_FAIL_MODE', value: 'open' },
-        'SECURITY: daily settle cap is FAIL-OPEN in production — a Redis outage ' +
-          'allows unbounded settlements (operator wallet drain risk). ' +
-          'Recommended: SETTLE_CAP_FAIL_MODE=closed.',
+        'NOTICE: daily settle cap is FAIL-OPEN (active default) in production — ' +
+          'a Redis outage allows unbounded settlements (operator wallet drain ' +
+          'risk). This is the SAFE default while Redis is single-instance: ' +
+          'fail-closed would reject ALL settlements on a Redis blip (see the ' +
+          '2026-06-29 outage). Only set SETTLE_CAP_FAIL_MODE=closed once Redis ' +
+          'is HA.',
       );
     }
     if (env.RATE_LIMIT_ENABLED && env.RATE_LIMIT_FAIL_OPEN) {

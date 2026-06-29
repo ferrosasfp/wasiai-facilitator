@@ -162,20 +162,28 @@ export const EnvSchema = z
 
     /**
      * WFAC-53 FIX-6 — failure mode for incrementAndCheckDailyCap.
-     *   - 'open'   : Redis throw → allow request through (fail-open).
-     *   - 'closed' (DEFAULT, AUDIT hardening): Redis throw → returns
+     *   - 'open' (DEFAULT): Redis throw → allow request through (fail-open).
+     *   - 'closed': Redis throw → returns
      *              { ok: false, reason: 'redis_error_failclosed' } →
      *              /settle route returns HTTP 503 SERVICE_UNAVAILABLE.
      *
-     * AUDIT (money-path behavior change, flagged for AR): the default flipped
-     * from 'open' to 'closed'. For a PAYMENT service, a missing/unset env must
-     * be SECURE by default — when the daily settle cap cannot be enforced
-     * (Redis down) we must NOT let unbounded settlements drain the operator
-     * wallet. Still fully overridable to 'open' via env for operators who
-     * prefer availability over budget protection. Startup warns (see app.ts)
-     * when running in production with 'open'.
+     * The default is fail-OPEN because the settlement cap-check depends on Redis,
+     * which is currently single-instance (NOT HA). With fail-CLOSED a single
+     * Redis blip makes the cap-check throw and rejects EVERY /settle on EVERY
+     * chain ("Settlement cap check failed — service unavailable") → total
+     * settlement outage.
+     *
+     * INCIDENT 2026-06-29: PR #40 flipped this default to 'closed'. Redis went
+     * down, the cap-check failed closed, and ALL settlements were rejected
+     * across every chain (prod settlement outage). Restored by setting the
+     * Railway ENV back to 'open'; this default is now reverted to 'open' so an
+     * unset env can never reproduce the outage.
+     *
+     * SETTLE_CAP_FAIL_MODE=closed is ONLY safe with a reliable / HA Redis. Do
+     * NOT re-flip this default to 'closed' until Redis is HA. Startup warns
+     * (see app.ts) when running in production.
      */
-    SETTLE_CAP_FAIL_MODE: z.enum(['open', 'closed']).default('closed'),
+    SETTLE_CAP_FAIL_MODE: z.enum(['open', 'closed']).default('open'),
 
     /**
      * AUDIT (money-path behavior, flagged for AR) — rate-limit failure mode on
@@ -189,9 +197,10 @@ export const EnvSchema = z
      *             sustained Redis outage will then fail ALL rate-limited
      *             requests — only enable with Redis HA.
      * Default 'true' is DELIBERATE: flipping to fail-closed unconditionally
-     * could hard-break the service on a transient blip. The authoritative
-     * budget protection is SETTLE_CAP_FAIL_MODE (fail-closed by default);
-     * rate-limit is defense-in-depth.
+     * could hard-break the service on a transient blip (same class of outage as
+     * the 2026-06-29 SETTLE_CAP_FAIL_MODE incident). Both fail-open defaults
+     * exist because Redis is single-instance (NOT HA); only enable fail-closed
+     * modes once Redis is HA.
      */
     RATE_LIMIT_FAIL_OPEN: z
       .enum(['true', 'false'])
