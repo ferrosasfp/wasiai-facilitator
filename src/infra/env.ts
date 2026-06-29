@@ -73,6 +73,18 @@ export const EnvSchema = z
     // presence for non-test env (same pattern as OPERATOR_PRIVATE_KEY). NEVER logged.
     FACILITATOR_API_KEY: z.string().min(1).optional(),
 
+    // AUDIT (key versioning / rotation) — ADDITIVE multi-key support.
+    // Comma-separated list of additional valid caller keys. Lets the operator
+    // rotate keys with a grace period (publish a new key here, deploy, migrate
+    // callers, then drop the old one) WITHOUT downtime. The single
+    // FACILITATOR_API_KEY above keeps working unchanged: at runtime the auth
+    // middleware accepts FACILITATOR_API_KEY OR any entry in this list.
+    // Raw CSV string (NO Zod transform per the CORS CD-11 precedent) — parsed +
+    // trimmed + filtered in src/middleware/auth.ts. NEVER logged.
+    // NOT added to .superRefine: optional, NOT required-in-prod (the single
+    // key remains the required credential; this is purely additive).
+    FACILITATOR_API_KEYS: z.string().optional(),
+
     // WFAC-AUDIT — Fastify trustProxy hop count. Railway = 1 hop ('1').
     // If Cloudflare sits in front, bump to '2' via env (no code change, CD-3).
     // In tests set 'false' to avoid depending on proxy infra (R-1).
@@ -150,14 +162,41 @@ export const EnvSchema = z
 
     /**
      * WFAC-53 FIX-6 — failure mode for incrementAndCheckDailyCap.
-     *   - 'open'   (default, V1 backward-compatible): Redis throw → allow
-     *              request through (fail-open).
-     *   - 'closed' (opt-in hardening): Redis throw → returns
+     *   - 'open'   : Redis throw → allow request through (fail-open).
+     *   - 'closed' (DEFAULT, AUDIT hardening): Redis throw → returns
      *              { ok: false, reason: 'redis_error_failclosed' } →
      *              /settle route returns HTTP 503 SERVICE_UNAVAILABLE.
-     * CD-8: default 'open' preserves V1 behavior exactly.
+     *
+     * AUDIT (money-path behavior change, flagged for AR): the default flipped
+     * from 'open' to 'closed'. For a PAYMENT service, a missing/unset env must
+     * be SECURE by default — when the daily settle cap cannot be enforced
+     * (Redis down) we must NOT let unbounded settlements drain the operator
+     * wallet. Still fully overridable to 'open' via env for operators who
+     * prefer availability over budget protection. Startup warns (see app.ts)
+     * when running in production with 'open'.
      */
-    SETTLE_CAP_FAIL_MODE: z.enum(['open', 'closed']).default('open'),
+    SETTLE_CAP_FAIL_MODE: z.enum(['open', 'closed']).default('closed'),
+
+    /**
+     * AUDIT (money-path behavior, flagged for AR) — rate-limit failure mode on
+     * a transient Redis error. Maps to @fastify/rate-limit `skipOnError`.
+     *   - 'true'  (DEFAULT): preserve current behavior (skipOnError: true).
+     *             A Redis blip lets requests through rather than hard-breaking
+     *             the service. Recommended ONLY if you accept a brief per-IP
+     *             rate-limit bypass during Redis outages.
+     *   - 'false' (prod recommendation for strict enforcement): a Redis error
+     *             on the rate-limit store rejects the request. CAUTION: a
+     *             sustained Redis outage will then fail ALL rate-limited
+     *             requests — only enable with Redis HA.
+     * Default 'true' is DELIBERATE: flipping to fail-closed unconditionally
+     * could hard-break the service on a transient blip. The authoritative
+     * budget protection is SETTLE_CAP_FAIL_MODE (fail-closed by default);
+     * rate-limit is defense-in-depth.
+     */
+    RATE_LIMIT_FAIL_OPEN: z
+      .enum(['true', 'false'])
+      .default('true')
+      .transform((v) => v === 'true'),
   })
   .superRefine((data, ctx) => {
     if (!data.REDIS_URL && data.NODE_ENV !== 'test') {

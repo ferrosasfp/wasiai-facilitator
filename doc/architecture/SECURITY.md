@@ -111,7 +111,14 @@
 
 - **Never commit secrets to git** — `.gitignore` includes `.env`, `.env.*`
 - **ESLint `no-secrets` plugin** — catches base64-looking strings, private keys, API keys
-- **Pino log redaction** — configured to strip `privateKey`, `signature`, `nonce` from logs
+- **Pino log redaction** — `redact` is configured on the logger
+  (`src/infra/logger.ts`) and applied in every mode (dev/test/prod). It replaces
+  secret-bearing fields with `[Redacted]` BEFORE serialization, both at the top
+  level and one level deep (`*.<field>`). Covered fields include
+  `privateKey` / `OPERATOR_PRIVATE_KEY`, `apiKey` / `FACILITATOR_API_KEY`,
+  `SUPABASE_SERVICE_KEY`, `secret`, `token`, `password`, `signature`, `nonce`,
+  and `authorization` / `cookie` / `set-cookie` headers. Regression-guarded by
+  `src/__tests__/unit/logger.redact.test.ts`.
 - **Railway/Vercel env vars** — encrypted at rest, scoped per environment
 
 ## Audit readiness
@@ -137,31 +144,57 @@ posture in different ways. This section documents the graceful-degradation
 choices and how to tighten them in production.
 
 ### Redis outage → rate-limit bypass
-- **Mechanism:** `@fastify/rate-limit` is configured with `skipOnError: true`
-  (`src/app.ts` line ~127, WFAC-40 DT-10). If Redis is unreachable or throws on
-  `INCR`, the plugin allows the request through (fail-open).
-- **Surface:** during a Redis outage, per-IP rate limits are not enforced.
-  Burst-from-single-IP attacks become viable until Redis recovers.
-- **Why fail-open here:** rate-limit is a defense-in-depth signal, not the
-  authoritative budget. The authoritative budget (operator wallet balance)
-  is enforced by `SETTLE_DAILY_GLOBAL_CAP` (see below).
-- **Mitigation:** operators that need strict per-IP enforcement during Redis
-  outages can swap to a `failOpen: false` rate-limit config in V2.
+- **Mechanism:** `@fastify/rate-limit`'s `skipOnError` is wired to the
+  `RATE_LIMIT_FAIL_OPEN` env (`src/app.ts`, AUDIT). **Default `true`** (legacy
+  behavior): if Redis is unreachable or throws on `INCR`, the plugin allows the
+  request through (fail-open).
+- **Surface:** with `RATE_LIMIT_FAIL_OPEN=true`, during a Redis outage per-IP /
+  per-key rate limits are not enforced. Burst-from-single-IP attacks become
+  viable until Redis recovers.
+- **Why fail-open is the DEFAULT (not flipped to closed):** a transient Redis
+  blip must not hard-break the whole service. The authoritative budget
+  protection is `SETTLE_DAILY_GLOBAL_CAP`, which is **fail-closed by default**
+  (`SETTLE_CAP_FAIL_MODE=closed`, see below) — so wallet-drain is already
+  bounded even when rate-limit is fail-open.
+- **Prod recommendation:** set `RATE_LIMIT_FAIL_OPEN=false` for strict
+  enforcement, **but only with Redis HA** — a sustained outage will then reject
+  all rate-limited requests. The app logs a loud `warn` at boot when running in
+  production with `RATE_LIMIT_FAIL_OPEN=true`.
+- **Two rate-limit layers (AUDIT / BLQ-MED-1):** the money-path routes
+  (`/verify`, `/settle`) are protected by TWO independent `@fastify/rate-limit`
+  registrations (`src/app.ts`):
+    - **Layer 1 — global, `onRequest`, per-IP.** Runs BEFORE caller auth, so
+      unauthenticated / wrong-bearer floods are throttled per client IP (a bad
+      bearer is counted by this layer, then rejected 401 by auth; once the IP
+      exceeds the cap it gets 429, not unbounded 401s). This is the pre-auth
+      DoS/brute-force guard.
+    - **Layer 2 — per-key, `preHandler`, keyed by `facilitatorKeyId`.** Runs
+      AFTER `requireFacilitatorKey` has matched a caller key and stamped
+      `facilitatorKeyId = sha256(matched key)[:16]` (non-secret). Distinct
+      rotated keys behind one shared IP get independent budgets, so one key
+      cannot exhaust another's allowance. Raw keys are never used as Redis keys
+      nor logged.
+  Both layers read the same per-route cap (`RATE_LIMIT_VERIFY_MAX` /
+  `RATE_LIMIT_SETTLE_MAX`); Layer 2 only ever ADDS a per-key bound and never
+  weakens the per-IP guarantee of Layer 1.
 
-### Redis outage → SETTLE_DAILY_GLOBAL_CAP fail-open (default) or fail-closed (opt-in)
+### Redis outage → SETTLE_DAILY_GLOBAL_CAP fail-closed (default) or fail-open (opt-in)
 - **Mechanism:** `incrementAndCheckDailyCap` in `src/core/settle-cap.ts` does
   `client.incr(key)` to enforce a global daily settle cap. The behavior on
-  Redis throw is configurable via `SETTLE_CAP_FAIL_MODE` (WFAC-53 FIX-6):
-    - `SETTLE_CAP_FAIL_MODE=open` (default, preserves V1 behavior): request
-      allowed through. Surface = unbounded settle count until Redis recovers.
-    - `SETTLE_CAP_FAIL_MODE=closed` (opt-in): HTTP 503 SERVICE_UNAVAILABLE.
-      Surface = service degrades protectively; legitimate clients see 503 but
-      operator wallet is safe.
-- **Recommendation:** set `SETTLE_CAP_FAIL_MODE=closed` in any production
-  deployment where the operator wallet balance is significant (>$1k).
+  Redis throw is configurable via `SETTLE_CAP_FAIL_MODE`:
+    - `SETTLE_CAP_FAIL_MODE=closed` (**DEFAULT, AUDIT** — secure-by-default):
+      HTTP 503 SERVICE_UNAVAILABLE. Surface = service degrades protectively;
+      legitimate clients see 503 but the operator wallet is safe from
+      unbounded settlement during a Redis outage.
+    - `SETTLE_CAP_FAIL_MODE=open` (opt-in, availability-first): request allowed
+      through. Surface = unbounded settle count until Redis recovers
+      (wallet-drain risk).
+- **AUDIT change:** the default flipped from `open` to `closed`. For a payment
+  service a missing/unset env must be the SECURE choice. The app logs a loud
+  `warn` at boot when running in production with `SETTLE_CAP_FAIL_MODE=open`.
 - **Trade-off:** fail-closed degrades availability during Redis outages; fail-
   open trades availability for protection against budget overrun. There is no
-  free lunch — operators choose.
+  free lunch — operators who prefer availability can opt into `open`.
 
 ### EIP-712 Domain separator drift → boot refused (WFAC-53 FIX-2)
 - **Mechanism:** at boot, `initDomainCheck` (`src/chains/init-domain-check.ts`)

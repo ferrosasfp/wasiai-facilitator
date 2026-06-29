@@ -92,11 +92,19 @@ async function makeApp(
   return buildApp({ rawEnv, loggerDestination: capture, skipDomainCheck: true });
 }
 
-/** Arbitrary malformed payload — triggers 400 before rate-limit? No: rate-limit
- * runs in onRequest, BEFORE the handler. So on over-limit requests, we get 429
- * regardless of payload validity. Under-limit requests with bad payload return
- * 400; this is irrelevant to the rate-limit assertions, which only care about
- * statusCode === 429 on the N+1 th call. */
+/** Arbitrary malformed payload — triggers 400 before rate-limit? No: the
+ * GLOBAL per-IP rate-limit (Layer 1) runs in `onRequest`, BEFORE the handler.
+ * So on over-limit requests we get 429 regardless of payload validity.
+ * Under-limit requests with a bad payload return 400; this is irrelevant to the
+ * rate-limit assertions, which only care about statusCode === 429 on the N+1 th
+ * call.
+ *
+ * BLQ-MED-1: these tests build the app with FACILITATOR_API_KEY UNSET (the
+ * NODE_ENV=test bypass in requireFacilitatorKey), so caller auth is OFF and the
+ * money-path routes are reached without a bearer. They therefore exercise the
+ * GLOBAL per-IP `onRequest` layer (Layer 1). The per-key `preHandler` layer
+ * (Layer 2) and the pre-auth-throttling regression are covered separately in
+ * rate-limiting.unauth-flood.test.ts (which builds the app with auth ACTIVE). */
 const ANY_PAYLOAD = JSON.stringify({ anything: 'here' });
 
 describe('@fastify/rate-limit integration (WFAC-40)', () => {
