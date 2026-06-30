@@ -70,6 +70,25 @@ function readRpcUrl(envVarName: AvalancheRpcEnvName, chainIdNum: number): string
 }
 
 /**
+ * OP-04 (audit) — optional secondary RPC URL for RPC fallback. Returns the
+ * trimmed `*_RPC_URL_FALLBACK` value, or undefined when unset/blank. `switch`
+ * over the literal union avoids `security/detect-object-injection`.
+ */
+function readFallbackRpcUrl(envVarName: AvalancheRpcEnvName): string | undefined {
+  let value: string | undefined;
+  switch (envVarName) {
+    case 'AVALANCHE_FUJI_RPC_URL':
+      value = process.env.AVALANCHE_FUJI_RPC_URL_FALLBACK;
+      break;
+    case 'AVALANCHE_MAINNET_RPC_URL':
+      value = process.env.AVALANCHE_MAINNET_RPC_URL_FALLBACK;
+      break;
+  }
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+/**
  * WFAC-53 FIX-4 — single-case switch over the only literal currently
  * consumed in avalanche.ts. Eliminates the `security/detect-object-injection`
  * disable (CD-10, CD-13). If a new mainnet flag is added, extend the union.
@@ -97,11 +116,13 @@ class AvalancheAdapter extends BaseEip3009Adapter {
     viemChain: Chain;
   }) {
     const rpcUrl = readRpcUrl(opts.envVarName, opts.chainIdNum);
+    const rpcUrlFallback = readFallbackRpcUrl(opts.envVarName);
     super({
       chainIdNum: opts.chainIdNum,
       name: opts.name,
       network: opts.network,
       rpcUrl,
+      ...(rpcUrlFallback ? { rpcUrlFallback } : {}),
       viemChain: opts.viemChain,
       token: opts.token,
       ...(opts.blockExplorer ? { blockExplorer: opts.blockExplorer } : {}),

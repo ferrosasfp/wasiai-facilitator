@@ -85,6 +85,20 @@ export const EnvSchema = z
     // key remains the required credential; this is purely additive).
     FACILITATOR_API_KEYS: z.string().optional(),
 
+    // OP-04 (audit) — optional secondary RPC URLs for per-chain RPC fallback.
+    // When set, the chain client uses viem `fallback([http(primary),
+    // http(secondary)])` so a single RPC outage rolls over transparently. When
+    // unset, a sane PUBLIC fallback is used for known chainIds (see
+    // src/chains/base-adapter.ts:publicFallbackRpcUrl); if neither exists the
+    // transport is primary-only (backward-compatible). NOT in .superRefine —
+    // purely optional, never required. These are public RPC URLs, not secrets.
+    KITE_TESTNET_RPC_URL_FALLBACK: z.string().min(1).optional(),
+    KITE_MAINNET_RPC_URL_FALLBACK: z.string().min(1).optional(),
+    AVALANCHE_FUJI_RPC_URL_FALLBACK: z.string().min(1).optional(),
+    AVALANCHE_MAINNET_RPC_URL_FALLBACK: z.string().min(1).optional(),
+    BASE_SEPOLIA_RPC_URL_FALLBACK: z.string().min(1).optional(),
+    BASE_MAINNET_RPC_URL_FALLBACK: z.string().min(1).optional(),
+
     // WFAC-AUDIT — Fastify trustProxy hop count. Railway = 1 hop ('1').
     // If Cloudflare sits in front, bump to '2' via env (no code change, CD-3).
     // In tests set 'false' to avoid depending on proxy infra (R-1).

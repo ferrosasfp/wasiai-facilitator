@@ -20,11 +20,12 @@ import {
   createPublicClient,
   createWalletClient,
   http,
+  fallback,
   isAddressEqual,
   recoverTypedDataAddress,
   getAddress,
 } from 'viem';
-import type { PublicClient, WalletClient, Chain, Address } from 'viem';
+import type { PublicClient, WalletClient, Chain, Address, Transport } from 'viem';
 import type { Logger } from 'pino';
 import {
   type AdapterResult,
@@ -70,16 +71,52 @@ export interface BaseAdapterOpts {
   name: string;
   network: 'mainnet' | 'testnet';
   rpcUrl: string;
+  /**
+   * OP-04 (audit) — optional secondary RPC URL. When provided (operator-set
+   * via `*_RPC_URL_FALLBACK`), the chain clients use a viem `fallback([...])`
+   * transport so a single RPC outage does not take the chain offline. When
+   * absent, a sane PUBLIC fallback is used for known chainIds (see
+   * `publicFallbackRpcUrl`); if neither exists the transport is just the
+   * primary `http(rpcUrl)` (backward-compatible).
+   */
+  rpcUrlFallback?: string;
   viemChain: Chain;
   token: EIP3009Token;
   blockExplorer?: string;
   nativeCurrency: { name: string; symbol: string; decimals: number };
 }
 
+/**
+ * OP-04 — sane PUBLIC fallback RPC for known chainIds, used only when the
+ * operator did NOT configure an explicit `*_RPC_URL_FALLBACK`. Returns
+ * `undefined` for unknown chains (then the transport is primary-only).
+ * `switch` over a numeric literal avoids `security/detect-object-injection`.
+ */
+export function publicFallbackRpcUrl(chainId: number): string | undefined {
+  switch (chainId) {
+    case 2368: // Kite Testnet
+      return 'https://rpc-testnet.gokite.ai';
+    case 2366: // Kite Mainnet
+      return 'https://rpc-mainnet.gokite.ai';
+    case 43113: // Avalanche Fuji
+      return 'https://api.avax-test.network/ext/bc/C/rpc';
+    case 43114: // Avalanche C-Chain
+      return 'https://api.avax.network/ext/bc/C/rpc';
+    case 84532: // Base Sepolia
+      return 'https://sepolia.base.org';
+    case 8453: // Base mainnet
+      return 'https://mainnet.base.org';
+    default:
+      return undefined;
+  }
+}
+
 export abstract class BaseEip3009Adapter implements ChainAdapter {
   public readonly metadata: ChainMetadata;
   protected readonly _viemChain: Chain;
   protected readonly _rpcUrl: string;
+  /** OP-04 — resolved secondary RPC URL (explicit env or public default), or undefined. */
+  protected readonly _rpcUrlFallback: string | undefined;
   private _publicClient: PublicClient | null = null;
   private _walletClient: WalletClient | null = null;
   protected readonly _breaker: ChainCircuitBreaker;
@@ -87,6 +124,8 @@ export abstract class BaseEip3009Adapter implements ChainAdapter {
   constructor(opts: BaseAdapterOpts) {
     this._rpcUrl = opts.rpcUrl;
     this._viemChain = opts.viemChain;
+    // OP-04 — prefer the operator-supplied fallback; else a sane public one.
+    this._rpcUrlFallback = opts.rpcUrlFallback ?? publicFallbackRpcUrl(opts.chainIdNum);
 
     this.metadata = {
       chainId: asChainId(opts.chainIdNum),
@@ -113,11 +152,24 @@ export abstract class BaseEip3009Adapter implements ChainAdapter {
     });
   }
 
+  /**
+   * OP-04 — build the viem transport. When a secondary RPC is available, use
+   * `fallback([http(primary), http(secondary)])` so a primary RPC outage
+   * transparently rolls over to the secondary. Otherwise a plain
+   * `http(primary)` (preserves the pre-audit single-RPC behavior).
+   */
+  private _buildTransport(): Transport {
+    if (this._rpcUrlFallback && this._rpcUrlFallback !== this._rpcUrl) {
+      return fallback([http(this._rpcUrl), http(this._rpcUrlFallback)]);
+    }
+    return http(this._rpcUrl);
+  }
+
   getPublicClient(): PublicClient {
     if (!this._publicClient) {
       this._publicClient = createPublicClient({
         chain: this._viemChain,
-        transport: http(this._rpcUrl),
+        transport: this._buildTransport(),
       }) as PublicClient;
     }
     return this._publicClient;
@@ -129,7 +181,7 @@ export abstract class BaseEip3009Adapter implements ChainAdapter {
       this._walletClient = createWalletClient({
         account: getOperatorAccount(),
         chain: this._viemChain,
-        transport: http(this._rpcUrl),
+        transport: this._buildTransport(),
       }) as WalletClient;
     }
     return this._walletClient;
