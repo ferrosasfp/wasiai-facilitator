@@ -85,6 +85,28 @@ export const EnvSchema = z
     // key remains the required credential; this is purely additive).
     FACILITATOR_API_KEYS: z.string().optional(),
 
+    // OP-04 (audit) — optional secondary RPC URLs for per-chain RPC fallback.
+    // When set, the chain client uses viem `fallback([http(primary),
+    // http(secondary)])` so a single RPC outage rolls over transparently. When
+    // unset, a sane PUBLIC fallback is used for known chainIds (see
+    // src/chains/base-adapter.ts:publicFallbackRpcUrl); if neither exists the
+    // transport is primary-only (backward-compatible). NOT in .superRefine —
+    // purely optional, never required. These are public RPC URLs, not secrets.
+    KITE_TESTNET_RPC_URL_FALLBACK: z.string().min(1).optional(),
+    KITE_MAINNET_RPC_URL_FALLBACK: z.string().min(1).optional(),
+    AVALANCHE_FUJI_RPC_URL_FALLBACK: z.string().min(1).optional(),
+    AVALANCHE_MAINNET_RPC_URL_FALLBACK: z.string().min(1).optional(),
+    BASE_SEPOLIA_RPC_URL_FALLBACK: z.string().min(1).optional(),
+    BASE_MAINNET_RPC_URL_FALLBACK: z.string().min(1).optional(),
+
+    // TB-04 (audit) — OPTIONAL allowlist of permitted /settle `payTo` receivers.
+    // Comma-separated EVM addresses. When NON-EMPTY, a /settle whose body
+    // `accepted.payTo` is not in the list is rejected (403) BEFORE any chain
+    // interaction. When unset/empty → every receiver is allowed (current,
+    // backward-compatible behavior). Raw CSV (NO Zod transform, parsed in
+    // src/core/payto-allowlist.ts). NOT a secret; safe to log the COUNT only.
+    FACILITATOR_PAYTO_ALLOWLIST: z.string().optional(),
+
     // WFAC-AUDIT — Fastify trustProxy hop count. Railway = 1 hop ('1').
     // If Cloudflare sits in front, bump to '2' via env (no code change, CD-3).
     // In tests set 'false' to avoid depending on proxy infra (R-1).

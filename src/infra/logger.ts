@@ -1,4 +1,4 @@
-import pino, { type Logger, type LoggerOptions, type DestinationStream } from 'pino';
+import pino, { type Logger, type LoggerOptions, type DestinationStream, type LogFn } from 'pino';
 import type { EnvConfig } from './env.js';
 
 /**
@@ -75,6 +75,49 @@ function buildRedactPaths(): string[] {
 const REDACT_PATHS: readonly string[] = buildRedactPaths();
 
 /**
+ * OP-11 (audit) — free-text hex-secret scrubber.
+ *
+ * `redact.paths` only masks STRUCTURED object keys; it cannot touch a secret
+ * that leaks inside a FREE-TEXT message string (e.g. a viem/RPC error whose
+ * `.message` embedded an operator key, a signature, or a 32-byte nonce). This
+ * regex matches a `0x` + 64 hex-char blob (a 32-byte value — private key,
+ * EIP-712 signature half, nonce, hash) anywhere in a plain string and replaces
+ * it with `[Redacted-hex]`.
+ *
+ * SCOPE: applied ONLY to free-text STRING arguments passed to a log call (the
+ * `msg` and any string interpolation args) via the pino `logMethod` hook —
+ * NOT to structured fields. This is deliberate: structured `tx_hash` is public
+ * on-chain data we intentionally log; the risk is a 64-hex blob smuggled into
+ * an unstructured error message.
+ *
+ * `g` + case-insensitive so multiple occurrences and mixed-case hex are caught.
+ */
+const HEX_SECRET_RE = /0x[0-9a-fA-F]{64}/g;
+
+/** Replace every 64-hex blob in a free-text string with `[Redacted-hex]`. */
+export function scrubHexSecrets(text: string): string {
+  return text.replace(HEX_SECRET_RE, '[Redacted-hex]');
+}
+
+/**
+ * pino `logMethod` hook: scrub free-text STRING arguments before they are
+ * serialized. The first arg may be a merge OBJECT (left untouched here — it is
+ * handled by `redact.paths`) or a string message; any subsequent string args
+ * are interpolation params. We only rewrite string args.
+ */
+function scrubbingLogMethod(
+  this: Logger,
+  args: Parameters<LogFn>,
+  method: LogFn,
+  _level: number,
+): void {
+  const scrubbed = args.map((a) =>
+    typeof a === 'string' && a.includes('0x') ? scrubHexSecrets(a) : a,
+  ) as Parameters<LogFn>;
+  method.apply(this, scrubbed);
+}
+
+/**
  * Create a Pino logger configured from EnvConfig.
  *
  * - development: uses `pino-pretty` transport (human-readable, ANSI colors).
@@ -96,6 +139,11 @@ export function createLogger(env: EnvConfig, destination?: DestinationStream): L
     redact: {
       paths: [...REDACT_PATHS],
       censor: '[Redacted]',
+    },
+    // OP-11 — scrub 0x+64hex blobs from free-text message strings (the
+    // structured-field redaction above cannot reach unstructured messages).
+    hooks: {
+      logMethod: scrubbingLogMethod,
     },
   };
 

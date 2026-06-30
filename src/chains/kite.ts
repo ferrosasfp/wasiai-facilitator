@@ -42,6 +42,25 @@ function readEnv(name: KiteRpcEnvName, chainId: number): string {
   return value;
 }
 
+/**
+ * OP-04 (audit) — optional secondary RPC URL for RPC fallback. Returns the
+ * trimmed `*_RPC_URL_FALLBACK` value, or undefined when unset/blank. `switch`
+ * over the literal union avoids `security/detect-object-injection`.
+ */
+function readFallbackEnv(name: KiteRpcEnvName): string | undefined {
+  let value: string | undefined;
+  switch (name) {
+    case 'KITE_TESTNET_RPC_URL':
+      value = process.env.KITE_TESTNET_RPC_URL_FALLBACK;
+      break;
+    case 'KITE_MAINNET_RPC_URL':
+      value = process.env.KITE_MAINNET_RPC_URL_FALLBACK;
+      break;
+  }
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
 class KiteAdapter extends BaseEip3009Adapter {
   // Token + EIP-712 domain overrides (mainnet, PR feat/mainnet). Defaults
   // preserve the testnet PYUSD shape so Kite Testnet metadata is byte-identical.
@@ -59,6 +78,7 @@ class KiteAdapter extends BaseEip3009Adapter {
     eip712Version?: string;
   }) {
     const rpcUrl = readEnv(opts.envVarName, opts.chainIdNum);
+    const rpcUrlFallback = readFallbackEnv(opts.envVarName);
 
     const viemChain: Chain = defineChain({
       id: opts.chainIdNum,
@@ -89,6 +109,7 @@ class KiteAdapter extends BaseEip3009Adapter {
       name: opts.name,
       network: opts.network,
       rpcUrl,
+      ...(rpcUrlFallback ? { rpcUrlFallback } : {}),
       viemChain,
       token,
       ...(opts.blockExplorer ? { blockExplorer: opts.blockExplorer } : {}),

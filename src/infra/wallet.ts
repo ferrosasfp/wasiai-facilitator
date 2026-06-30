@@ -19,8 +19,19 @@
  */
 
 import { privateKeyToAccount } from 'viem/accounts';
+import { nonceManager as operatorNonceManager } from 'viem';
 import type { Account } from 'viem';
 import { ChainAdapterInitError } from '../chains/types.js';
+
+/**
+ * Shared nonce manager for the operator account (ECOSYSTEM-AUDIT R-1 / OP-03,
+ * defense-in-depth). viem's default `nonceManager` (JSON-RPC source) tracks the
+ * next nonce per (address, chainId) instead of re-reading "pending" on every
+ * tx, which reduces the window where two writes pick the same nonce. The
+ * per-chain `runExclusive` mutex in src/chains/chain-mutex.ts is the primary
+ * serializer; this is the second layer so even an unserialized path gets
+ * monotonic nonces.
+ */
 
 const OPERATOR_KEY_REGEX = /^0x[0-9a-fA-F]{64}$/;
 let _cached: Account | null = null;
@@ -39,7 +50,7 @@ export function getOperatorAccount(): Account {
     // chainId 0 as sentinel — error is not chain-specific here.
     throw new ChainAdapterInitError('OPERATOR_PRIVATE_KEY', 0);
   }
-  _cached = privateKeyToAccount(pk as `0x${string}`);
+  _cached = privateKeyToAccount(pk as `0x${string}`, { nonceManager: operatorNonceManager });
   return _cached;
 }
 

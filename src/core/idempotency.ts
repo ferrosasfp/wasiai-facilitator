@@ -137,9 +137,46 @@ export function buildIdempotencyKey(parsed: VerifyRequest): string {
  * redis module directly. Returns false when:
  *   - initRedis was never called, OR
  *   - REDIS_URL is undefined (test env path).
+ *
+ * NOTE (OP-13): this is a CONFIGURATION check (client constructed) — it does
+ * NOT prove the Redis server is actually reachable. For a true reachability
+ * signal use `isRedisReachable()`. The money-path (idempotency cache, in-flight
+ * lock) intentionally keeps using this cheap sync check and fails open on a
+ * dead server (each Redis op is independently swallowed), so we do not add a
+ * PING to the hot path.
  */
 export function isRedisAvailable(): boolean {
   return getRedisClient() !== null;
+}
+
+/**
+ * OP-13 — alias of `isRedisAvailable` with an intention-revealing name:
+ * "is a Redis client configured?" (REDIS_URL present + initRedis ran). Used by
+ * the health endpoint to distinguish 'disabled' (no client) from
+ * 'unreachable' (client present but PING failed).
+ */
+export function isRedisConfigured(): boolean {
+  return getRedisClient() !== null;
+}
+
+/**
+ * OP-13 — REAL reachability check via Redis PING. Returns:
+ *   - `true`  → client is configured AND `PING` returned 'PONG'.
+ *   - `false` → no client configured, OR the PING failed/threw (server down,
+ *               connection refused, timeout).
+ *
+ * Never throws (swallows all errors) so callers can use it as a plain boolean.
+ * This is NOT on the money-path hot loop — it is for `/health` observability.
+ */
+export async function isRedisReachable(): Promise<boolean> {
+  const client = getRedisClient();
+  if (!client) return false;
+  try {
+    const pong = await client.ping();
+    return pong === 'PONG';
+  } catch {
+    return false;
+  }
 }
 
 /**

@@ -19,6 +19,7 @@ import { verifyRoute } from './routes/verify.js';
 import { settleRoute } from './routes/settle.js';
 import { supportedRoute } from './routes/supported.js';
 import { openapiRoute } from './routes/openapi.js';
+import { metricsRoute } from './routes/metrics.js';
 import { initChainBreakers } from './chains/init-breakers.js';
 import { initDomainCheck } from './chains/init-domain-check.js';
 // Side-effect import: registers built-in chain adapters (kite, avalanche) in chainRegistry.
@@ -42,7 +43,7 @@ declare module 'fastify' {
  * Uses `request.routeOptions.url` for exact match (query string is stripped —
  * CD-12). Any new public route is audited by default unless added here.
  */
-const AUDIT_EXCLUDED_PATHS: ReadonlySet<string> = new Set(['/health', '/openapi.json']);
+const AUDIT_EXCLUDED_PATHS: ReadonlySet<string> = new Set(['/health', '/openapi.json', '/metrics']);
 
 /**
  * WFAC-AUDIT AC-2 — coerce the raw TRUST_PROXY env string into the value
@@ -381,6 +382,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   await app.register(registerMoneyPathRoutes(env));
   await app.register(supportedRoute);
   await app.register(openapiRoute);
+  // OP-05 — Prometheus scrape endpoint (exposes prom-client default registry).
+  await app.register(metricsRoute);
 
   // WFAC-33 — audit log onResponse hook (global).
   // Fires AFTER the response is flushed to the client (Fastify v5 guarantees

@@ -88,6 +88,25 @@ function readRpcUrl(envVarName: BaseRpcEnvName, chainIdNum: number): string {
 }
 
 /**
+ * OP-04 (audit) — optional secondary RPC URL for RPC fallback. Returns the
+ * trimmed `*_RPC_URL_FALLBACK` value, or undefined when unset/blank. `switch`
+ * over the literal union avoids `security/detect-object-injection`.
+ */
+function readFallbackRpcUrl(envVarName: BaseRpcEnvName): string | undefined {
+  let value: string | undefined;
+  switch (envVarName) {
+    case 'BASE_SEPOLIA_RPC_URL':
+      value = process.env.BASE_SEPOLIA_RPC_URL_FALLBACK;
+      break;
+    case 'BASE_MAINNET_RPC_URL':
+      value = process.env.BASE_MAINNET_RPC_URL_FALLBACK;
+      break;
+  }
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+/**
  * Read the boolean enabled flag for a Base chain. Default = false so existing
  * deployments preserve byte-identical behavior — operator must explicitly opt
  * in to register a Base adapter. Mirrors avalanche.ts:readEnabledFlag.
@@ -118,11 +137,13 @@ class BaseAdapter extends BaseEip3009Adapter {
     viemChain: Chain;
   }) {
     const rpcUrl = readRpcUrl(opts.envVarName, opts.chainIdNum);
+    const rpcUrlFallback = readFallbackRpcUrl(opts.envVarName);
     super({
       chainIdNum: opts.chainIdNum,
       name: opts.name,
       network: opts.network,
       rpcUrl,
+      ...(rpcUrlFallback ? { rpcUrlFallback } : {}),
       viemChain: opts.viemChain,
       token: opts.token,
       ...(opts.blockExplorer ? { blockExplorer: opts.blockExplorer } : {}),

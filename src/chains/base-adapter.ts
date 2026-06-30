@@ -20,11 +20,12 @@ import {
   createPublicClient,
   createWalletClient,
   http,
+  fallback,
   isAddressEqual,
   recoverTypedDataAddress,
   getAddress,
 } from 'viem';
-import type { PublicClient, WalletClient, Chain, Address } from 'viem';
+import type { PublicClient, WalletClient, Chain, Address, Transport } from 'viem';
 import type { Logger } from 'pino';
 import {
   type AdapterResult,
@@ -53,6 +54,7 @@ import {
 } from './abi/fiat-token.js';
 import { normalizeSignature } from './abi/signature.js';
 import { getOperatorAccount } from '../infra/wallet.js';
+import { runExclusive } from './chain-mutex.js';
 
 /**
  * Extract a safe, bounded-length string from an unknown error. Defensive
@@ -69,16 +71,67 @@ export interface BaseAdapterOpts {
   name: string;
   network: 'mainnet' | 'testnet';
   rpcUrl: string;
+  /**
+   * OP-04 (audit) — optional secondary RPC URL. When provided (operator-set
+   * via `*_RPC_URL_FALLBACK`), BOTH the read (public) and write (wallet/settle)
+   * clients use a viem `fallback([...])` transport so a single RPC outage does
+   * not take the chain offline.
+   *
+   * MNR-1 (audit2) — when this is ABSENT, a sane PUBLIC fallback is used for
+   * known chainIds (see `publicFallbackRpcUrl`) but ONLY on the READ/verify
+   * path. The WRITE/settle (wallet) transport NEVER gets a hardcoded public
+   * default — it falls back only when this explicit operator opt-in is set.
+   * Injecting a third-party public RPC into the mainnet broadcast path by
+   * default would be a money-path trust expansion (a malicious/compromised
+   * public RPC could censor/delay/feed-stale-views to a settle broadcast).
+   */
+  rpcUrlFallback?: string;
   viemChain: Chain;
   token: EIP3009Token;
   blockExplorer?: string;
   nativeCurrency: { name: string; symbol: string; decimals: number };
 }
 
+/**
+ * OP-04 — sane PUBLIC fallback RPC for known chainIds, used only when the
+ * operator did NOT configure an explicit `*_RPC_URL_FALLBACK`. Returns
+ * `undefined` for unknown chains (then the transport is primary-only).
+ * `switch` over a numeric literal avoids `security/detect-object-injection`.
+ */
+export function publicFallbackRpcUrl(chainId: number): string | undefined {
+  switch (chainId) {
+    case 2368: // Kite Testnet
+      return 'https://rpc-testnet.gokite.ai';
+    case 2366: // Kite Mainnet
+      return 'https://rpc-mainnet.gokite.ai';
+    case 43113: // Avalanche Fuji
+      return 'https://api.avax-test.network/ext/bc/C/rpc';
+    case 43114: // Avalanche C-Chain
+      return 'https://api.avax.network/ext/bc/C/rpc';
+    case 84532: // Base Sepolia
+      return 'https://sepolia.base.org';
+    case 8453: // Base mainnet
+      return 'https://mainnet.base.org';
+    default:
+      return undefined;
+  }
+}
+
 export abstract class BaseEip3009Adapter implements ChainAdapter {
   public readonly metadata: ChainMetadata;
   protected readonly _viemChain: Chain;
   protected readonly _rpcUrl: string;
+  /**
+   * MNR-1 — resolved secondary RPC URL for the READ/verify path (explicit env
+   * fallback OR a sane public default for known chainIds), or undefined.
+   */
+  protected readonly _readRpcUrlFallback: string | undefined;
+  /**
+   * MNR-1 — resolved secondary RPC URL for the WRITE/settle path. ONLY the
+   * explicit operator-set `*_RPC_URL_FALLBACK`; NEVER a hardcoded public
+   * default. Undefined when the operator did not opt in.
+   */
+  protected readonly _writeRpcUrlFallback: string | undefined;
   private _publicClient: PublicClient | null = null;
   private _walletClient: WalletClient | null = null;
   protected readonly _breaker: ChainCircuitBreaker;
@@ -86,6 +139,11 @@ export abstract class BaseEip3009Adapter implements ChainAdapter {
   constructor(opts: BaseAdapterOpts) {
     this._rpcUrl = opts.rpcUrl;
     this._viemChain = opts.viemChain;
+    // MNR-1 — READ path: prefer the operator-supplied fallback; else a sane
+    // public default for known chainIds. WRITE path: ONLY the explicit operator
+    // opt-in — no hardcoded public default on the money/broadcast path.
+    this._readRpcUrlFallback = opts.rpcUrlFallback ?? publicFallbackRpcUrl(opts.chainIdNum);
+    this._writeRpcUrlFallback = opts.rpcUrlFallback;
 
     this.metadata = {
       chainId: asChainId(opts.chainIdNum),
@@ -112,11 +170,31 @@ export abstract class BaseEip3009Adapter implements ChainAdapter {
     });
   }
 
+  /**
+   * OP-04 / MNR-1 — build the viem transport. When the given secondary RPC is
+   * available (and distinct from the primary), use
+   * `fallback([http(primary), http(secondary)])` so a primary RPC outage
+   * transparently rolls over. Otherwise a plain `http(primary)` (preserves the
+   * pre-audit single-RPC behavior).
+   *
+   * The caller passes the path-specific fallback: `_readRpcUrlFallback` for the
+   * read/verify client (may be a public default) and `_writeRpcUrlFallback` for
+   * the wallet/settle client (explicit operator opt-in only).
+   */
+  private _buildTransport(rpcUrlFallback: string | undefined): Transport {
+    if (rpcUrlFallback && rpcUrlFallback !== this._rpcUrl) {
+      return fallback([http(this._rpcUrl), http(rpcUrlFallback)]);
+    }
+    return http(this._rpcUrl);
+  }
+
   getPublicClient(): PublicClient {
     if (!this._publicClient) {
+      // READ/verify path — may use a sane public default fallback (MNR-1):
+      // a stale read only costs a retry, never a bad settle.
       this._publicClient = createPublicClient({
         chain: this._viemChain,
-        transport: http(this._rpcUrl),
+        transport: this._buildTransport(this._readRpcUrlFallback),
       }) as PublicClient;
     }
     return this._publicClient;
@@ -125,10 +203,12 @@ export abstract class BaseEip3009Adapter implements ChainAdapter {
   getWalletClient(): WalletClient {
     if (!this._walletClient) {
       // WFAC-50 — inject operator account for signing.
+      // MNR-1 — WRITE/settle path: fallback ONLY on explicit operator opt-in;
+      // never a hardcoded public default on the money/broadcast path.
       this._walletClient = createWalletClient({
         account: getOperatorAccount(),
         chain: this._viemChain,
-        transport: http(this._rpcUrl),
+        transport: this._buildTransport(this._writeRpcUrlFallback),
       }) as WalletClient;
     }
     return this._walletClient;
@@ -510,87 +590,99 @@ export abstract class BaseEip3009Adapter implements ChainAdapter {
     const { r, s } = sig;
     const vNum = Number(sig.v); // 27 or 28
 
-    // 3. Simulate (AC-7, CD-4). MUST run BEFORE writeContract.
-    const publicClient = this.getPublicClient();
-    const walletClient = this.getWalletClient();
-    let simRequest: unknown;
-    try {
-      const sim = await publicClient.simulateContract({
-        account: walletClient.account,
-        address: token.address,
-        abi: FIAT_TOKEN_ABI,
-        functionName: 'transferWithAuthorization',
-        args: [
-          authorization.from as Address,
-          authorization.to as Address,
-          BigInt(authorization.value),
-          BigInt(authorization.validAfter),
-          BigInt(authorization.validBefore),
-          authorization.nonce as `0x${string}`,
-          vNum,
-          r,
-          s,
-        ],
-      });
-      simRequest = sim.request;
-    } catch (e) {
-      return {
-        ok: false,
-        error: { code: 'SIMULATION_FAILED', message: sanitize(e), http: 500 },
-      };
-    }
+    // 3-7. On-chain section — simulate → write → wait → status → success.
+    //
+    // R-1 / OP-03 (audit): serialize this whole section PER CHAIN with
+    // `runExclusive(chainId, ...)`. The operator signs every settle on a chain
+    // with ONE account; viem reads the next account nonce lazily on each
+    // writeContract. Two CONCURRENT DISTINCT settles on the same chain would
+    // otherwise both read the same pending nonce and the second broadcast
+    // reverts ("nonce too low"). Settles on DIFFERENT chains keep running in
+    // parallel (independent operator nonces). The in-flight idempotency lock
+    // does NOT cover this — it dedups IDENTICAL requests only.
+    return runExclusive<AdapterResult<SettleResult>>(this.metadata.chainId as number, async () => {
+      // 3. Simulate (AC-7, CD-4). MUST run BEFORE writeContract.
+      const publicClient = this.getPublicClient();
+      const walletClient = this.getWalletClient();
+      let simRequest: unknown;
+      try {
+        const sim = await publicClient.simulateContract({
+          account: walletClient.account,
+          address: token.address,
+          abi: FIAT_TOKEN_ABI,
+          functionName: 'transferWithAuthorization',
+          args: [
+            authorization.from as Address,
+            authorization.to as Address,
+            BigInt(authorization.value),
+            BigInt(authorization.validAfter),
+            BigInt(authorization.validBefore),
+            authorization.nonce as `0x${string}`,
+            vNum,
+            r,
+            s,
+          ],
+        });
+        simRequest = sim.request;
+      } catch (e) {
+        return {
+          ok: false,
+          error: { code: 'SIMULATION_FAILED', message: sanitize(e), http: 500 },
+        };
+      }
 
-    // 4. Write (AC-7, AC-11, CD-6). Use sim.request opaque — do NOT reconstruct.
-    let hash: `0x${string}`;
-    try {
-      hash = await walletClient.writeContract(simRequest as never);
-    } catch (e) {
-      return {
-        ok: false,
-        error: { code: 'TRANSACTION_FAILED', message: sanitize(e), http: 500 },
-      };
-    }
+      // 4. Write (AC-7, AC-11, CD-6). Use sim.request opaque — do NOT reconstruct.
+      let hash: `0x${string}`;
+      try {
+        hash = await walletClient.writeContract(simRequest as never);
+      } catch (e) {
+        return {
+          ok: false,
+          error: { code: 'TRANSACTION_FAILED', message: sanitize(e), http: 500 },
+        };
+      }
 
-    // 5. Wait receipt (AC-7, AC-12).
-    let receipt;
-    try {
-      receipt = await publicClient.waitForTransactionReceipt({
-        hash,
-        timeout: RECEIPT_TIMEOUT_MS,
-      });
-    } catch (e) {
-      const msg =
-        e instanceof Error && e.name === 'WaitForTransactionReceiptTimeoutError'
-          ? 'receipt timeout'
-          : sanitize(e);
-      return {
-        ok: false,
-        error: { code: 'TRANSACTION_FAILED', message: msg, http: 500 },
-      };
-    }
+      // 5. Wait receipt (AC-7, AC-12).
+      let receipt;
+      try {
+        receipt = await publicClient.waitForTransactionReceipt({
+          hash,
+          timeout: RECEIPT_TIMEOUT_MS,
+        });
+      } catch (e) {
+        const msg =
+          e instanceof Error && e.name === 'WaitForTransactionReceiptTimeoutError'
+            ? 'receipt timeout'
+            : sanitize(e);
+        return {
+          ok: false,
+          error: { code: 'TRANSACTION_FAILED', message: msg, http: 500 },
+        };
+      }
 
-    // 6. Status (AC-13).
-    if (receipt.status === 'reverted') {
-      return {
-        ok: false,
-        error: {
-          code: 'TRANSACTION_FAILED',
-          message: 'transaction reverted on-chain',
-          http: 500,
-        },
-      };
-    }
+      // 6. Status (AC-13).
+      if (receipt.status === 'reverted') {
+        return {
+          ok: false,
+          error: {
+            code: 'TRANSACTION_FAILED',
+            message: 'transaction reverted on-chain',
+            http: 500,
+          },
+        };
+      }
 
-    // 7. Success (AC-7, AC-9). Fields from input params, NOT re-read from chain.
-    return {
-      ok: true,
-      settled: true,
-      transactionHash: hash,
-      blockNumber: Number(receipt.blockNumber),
-      amount: params.accepted.amount,
-      from: authorization.from as Address,
-      to: authorization.to as Address,
-      asset: token.address,
-    };
+      // 7. Success (AC-7, AC-9). Fields from input params, NOT re-read from chain.
+      return {
+        ok: true,
+        settled: true,
+        transactionHash: hash,
+        blockNumber: Number(receipt.blockNumber),
+        amount: params.accepted.amount,
+        from: authorization.from as Address,
+        to: authorization.to as Address,
+        asset: token.address,
+      };
+    });
   }
 }
