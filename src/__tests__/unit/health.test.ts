@@ -167,21 +167,40 @@ describe('GET /health', () => {
     }
   });
 
-  it('returns 200 with exact shape {status, version, uptime, timestamp}', async () => {
+  it('returns 200 with dependency-aware shape {status, degraded, version, uptime, timestamp, details} (OP-05)', async () => {
     app = await buildApp({ skipDomainCheck: true }); // WFAC-53 CD-16
     const res = await app.inject({ method: 'GET', url: '/health' });
+    // Liveness stays 200 even when a dependency is degraded (OP-05).
     expect(res.statusCode).toBe(200);
     expect(res.headers['content-type']).toMatch(/^application\/json/);
 
     const body = JSON.parse(res.body) as Record<string, unknown>;
-    expect(Object.keys(body).sort()).toEqual(['status', 'timestamp', 'uptime', 'version']);
+    expect(Object.keys(body).sort()).toEqual([
+      'degraded',
+      'details',
+      'status',
+      'timestamp',
+      'uptime',
+      'version',
+    ]);
     expect(body.status).toBe('ok');
+    expect(typeof body.degraded).toBe('boolean');
     expect(typeof body.version).toBe('string');
     expect(body.version).toMatch(/^\d+\.\d+\.\d+/);
     expect(typeof body.uptime).toBe('number');
     expect(typeof body.timestamp).toBe('string');
     const ts = body.timestamp as string;
     expect(new Date(ts).toISOString()).toBe(ts);
+
+    // OP-05 — details carry redis/wallet/chains, NEVER a secret value.
+    const details = body.details as Record<string, unknown>;
+    expect(details).toHaveProperty('redis');
+    expect(details).toHaveProperty('wallet');
+    expect(details).toHaveProperty('chains');
+    expect(Array.isArray(details.chains)).toBe(true);
+    // The wallet detail is a presence boolean — the raw key must never appear.
+    expect(JSON.stringify(body)).not.toContain('OPERATOR_PRIVATE_KEY');
+    expect(JSON.stringify(body)).not.toMatch(/0x[0-9a-fA-F]{64}/);
   });
 
   it('version matches package.json', async () => {

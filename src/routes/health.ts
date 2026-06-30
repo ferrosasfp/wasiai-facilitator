@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { resolve, dirname } from 'node:path';
 import type { FastifyPluginAsync } from 'fastify';
+import { getHealthStatus, type HealthStatusDetail } from '../core/health-status.js';
 
 /**
  * Read `version` from package.json once at module load and cache it.
@@ -17,18 +18,30 @@ const { version } = JSON.parse(readFileSync(pkgPath, 'utf-8')) as {
 };
 
 export interface HealthResponse {
+  /**
+   * 'ok' for liveness — the process is up. Dependency problems are surfaced via
+   * `degraded` + `details`, NOT by failing the probe (OP-05): /health stays 200
+   * so a transient Redis/RPC blip does not get the container killed.
+   */
   status: 'ok';
+  /** OP-05 — true when any tracked dependency is unhealthy. */
+  degraded: boolean;
   version: string;
   uptime: number;
   timestamp: string;
+  /** OP-05 — per-dependency detail (Redis, wallet presence, per-chain RPC). */
+  details: HealthStatusDetail;
 }
 
 /**
- * GET /health — liveness probe with basic metadata.
+ * GET /health — liveness probe with dependency-aware detail (OP-05).
  *
- * CD-9: `config.rateLimit = false` so the rate-limit plugin (registered in
- * WFAC-20+) will exempt this route. Fastify ignores unknown config keys, so
- * declaring this here in WFAC-2 is safe even before the plugin exists.
+ * Always returns HTTP 200 for liveness (the process is up). The body carries a
+ * `degraded` flag and a `details` object reporting Redis reachability (real
+ * PING), per-chain RPC reachability, and operator wallet presence — WITHOUT
+ * leaking any secret value.
+ *
+ * CD-9: `config.rateLimit = false` so the rate-limit plugin exempts this route.
  */
 export const healthRoute: FastifyPluginAsync = async (app) => {
   app.get(
@@ -37,11 +50,14 @@ export const healthRoute: FastifyPluginAsync = async (app) => {
       config: { rateLimit: false },
     },
     async (_request, _reply): Promise<HealthResponse> => {
+      const details = await getHealthStatus();
       return {
         status: 'ok',
+        degraded: details.degraded,
         version,
         uptime: process.uptime(),
         timestamp: new Date().toISOString(),
+        details,
       };
     },
   );
