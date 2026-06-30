@@ -1,9 +1,4 @@
-import pino, {
-  type Logger,
-  type LoggerOptions,
-  type DestinationStream,
-  type LogFn,
-} from 'pino';
+import pino, { type Logger, type LoggerOptions, type DestinationStream, type LogFn } from 'pino';
 import type { EnvConfig } from './env.js';
 
 /**

@@ -48,9 +48,10 @@ function restoreEnv(snapshot: Record<string, string | undefined>): void {
  * transport factory. Returns 'fallback' | 'http' and the inner transport count
  * for fallback.
  */
-function inspectTransport(client: {
-  transport: Record<string, unknown>;
-}): { type: string; innerCount: number } {
+function inspectTransport(client: { transport: Record<string, unknown> }): {
+  type: string;
+  innerCount: number;
+} {
   // viem stores the RESOLVED transport on client.transport. A fallback
   // transport carries `type: 'fallback'` and an array `transports`.
   const t = client.transport;

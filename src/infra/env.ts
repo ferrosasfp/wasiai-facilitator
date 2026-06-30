@@ -99,6 +99,14 @@ export const EnvSchema = z
     BASE_SEPOLIA_RPC_URL_FALLBACK: z.string().min(1).optional(),
     BASE_MAINNET_RPC_URL_FALLBACK: z.string().min(1).optional(),
 
+    // TB-04 (audit) — OPTIONAL allowlist of permitted /settle `payTo` receivers.
+    // Comma-separated EVM addresses. When NON-EMPTY, a /settle whose body
+    // `accepted.payTo` is not in the list is rejected (403) BEFORE any chain
+    // interaction. When unset/empty → every receiver is allowed (current,
+    // backward-compatible behavior). Raw CSV (NO Zod transform, parsed in
+    // src/core/payto-allowlist.ts). NOT a secret; safe to log the COUNT only.
+    FACILITATOR_PAYTO_ALLOWLIST: z.string().optional(),
+
     // WFAC-AUDIT — Fastify trustProxy hop count. Railway = 1 hop ('1').
     // If Cloudflare sits in front, bump to '2' via env (no code change, CD-3).
     // In tests set 'false' to avoid depending on proxy infra (R-1).

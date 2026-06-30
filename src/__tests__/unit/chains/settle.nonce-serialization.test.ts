@@ -209,12 +209,10 @@ describe('P0 R-1/OP-03 — per-chain settle nonce serialization', () => {
 
     const N = 12;
     const paramsList = await Promise.all(
-      Array.from(
-        { length: N },
-        (_, i) =>
-          makeValidParams({
-            nonce: `0x${i.toString(16).padStart(2, '0').repeat(32)}` as `0x${string}`,
-          }),
+      Array.from({ length: N }, (_, i) =>
+        makeValidParams({
+          nonce: `0x${i.toString(16).padStart(2, '0').repeat(32)}` as `0x${string}`,
+        }),
       ),
     );
     const results = await Promise.all(paramsList.map((p) => mod.kiteTestnetAdapter.settle(p)));

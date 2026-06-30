@@ -52,12 +52,14 @@ export interface AuditMeta {
   //   - 'SERVICE_UNAVAILABLE' (WFAC-53 FIX-6 DT-O — settle-cap Redis throw in
   //                            fail-closed mode; observability of the new path)
   //   - 'CONFLICT'            (WFAC-AUDIT AC-3 — in-flight settle lock held; 409)
+  //   - 'FORBIDDEN'           (TB-04 — /settle payTo not in the allowlist; 403)
   readonly errorCode?:
     | X402ErrorCode
     | 'INVALID_PAYLOAD'
     | 'RATE_LIMITED'
     | 'SERVICE_UNAVAILABLE'
-    | 'CONFLICT';
+    | 'CONFLICT'
+    | 'FORBIDDEN';
   readonly idempotencyKey?: string;
 }
 

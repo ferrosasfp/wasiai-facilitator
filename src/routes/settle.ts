@@ -37,6 +37,7 @@ import {
 // (never imports @supabase/supabase-js nor ../infra/supabase.js). CD-3.
 import { buildLedgerEntry, persistLedgerEntry } from '../core/ledger.js';
 import { incrementAndCheckDailyCap } from '../core/settle-cap.js';
+import { parsePayToAllowlist, isPayToAllowed } from '../core/payto-allowlist.js';
 import { requireFacilitatorKey } from '../middleware/auth.js';
 
 /** Route-local union: X402ErrorCode + 'INVALID_PAYLOAD' + 'RATE_LIMITED' literals. */
@@ -55,7 +56,8 @@ type SettleRouteErrorCode =
   | 'INVALID_PAYLOAD'
   | 'RATE_LIMITED'
   | 'SERVICE_UNAVAILABLE' // WFAC-53 FIX-6 (CD-15 — route-local, NOT in X402ErrorCode)
-  | 'CONFLICT'; // WFAC-AUDIT AC-3 — route-local, NOT in X402ErrorCode
+  | 'CONFLICT' // WFAC-AUDIT AC-3 — route-local, NOT in X402ErrorCode
+  | 'FORBIDDEN'; // TB-04 — payTo not in the configured allowlist (route-local)
 
 interface ErrorBody {
   readonly error: {
@@ -71,6 +73,13 @@ const ZOD_MESSAGE_MAX_LEN = 200;
 export const settleRoute: FastifyPluginAsync = async (app) => {
   // WFAC-40 — per-route rate-limit config (DT-6 + DT-13 SDD).
   const env = app.env;
+  // TB-04 — parse the OPTIONAL payTo allowlist ONCE at plugin init. Empty set
+  // ⇒ feature disabled (every receiver allowed; current behavior).
+  const payToAllowlist = parsePayToAllowlist(env.FACILITATOR_PAYTO_ALLOWLIST);
+  if (payToAllowlist.size > 0) {
+    // Log the COUNT only (addresses are not secrets but no need to emit them).
+    app.log.info({ allowlist_size: payToAllowlist.size }, 'settle payTo allowlist active');
+  }
   app.post(
     '/settle',
     {
@@ -110,6 +119,30 @@ export const settleRoute: FastifyPluginAsync = async (app) => {
         return reply.code(400).send(body);
       }
       const parsed: SettleRequest = parseResult.data;
+
+      // Step 1.5 — TB-04 payTo allowlist (per-caller authz). When an allowlist
+      // is configured, reject settles to a non-permitted receiver BEFORE any
+      // idempotency/cap/chain work. Disabled (empty set) ⇒ no-op. We do NOT
+      // echo the rejected payTo back (avoid confirming probing) — the caller
+      // knows the value it sent.
+      if (!isPayToAllowed(parsed.accepted.payTo, payToAllowlist)) {
+        const body: ErrorBody = {
+          error: { code: 'FORBIDDEN', message: 'payTo not permitted', http: 403 },
+        };
+        app.log.warn(
+          {
+            request_id: requestId,
+            error_code: 'FORBIDDEN',
+            http_status: 403,
+            // facilitatorKeyId is the NON-SECRET sha256 prefix set by auth.
+            facilitator_key_id: request.facilitatorKeyId,
+            duration_ms: Date.now() - startMs,
+          },
+          'settle failed — payTo not in allowlist',
+        );
+        request.auditMeta = { ...request.auditMeta, errorCode: 'FORBIDDEN' };
+        return reply.code(403).send(body);
+      }
 
       // Step 2 — idempotency lookup
       const idempotencyKey = buildSettleIdempotencyKey(parsed);

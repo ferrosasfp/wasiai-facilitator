@@ -43,11 +43,7 @@ declare module 'fastify' {
  * Uses `request.routeOptions.url` for exact match (query string is stripped —
  * CD-12). Any new public route is audited by default unless added here.
  */
-const AUDIT_EXCLUDED_PATHS: ReadonlySet<string> = new Set([
-  '/health',
-  '/openapi.json',
-  '/metrics',
-]);
+const AUDIT_EXCLUDED_PATHS: ReadonlySet<string> = new Set(['/health', '/openapi.json', '/metrics']);
 
 /**
  * WFAC-AUDIT AC-2 — coerce the raw TRUST_PROXY env string into the value
