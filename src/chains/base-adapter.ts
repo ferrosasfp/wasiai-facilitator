@@ -73,11 +73,17 @@ export interface BaseAdapterOpts {
   rpcUrl: string;
   /**
    * OP-04 (audit) — optional secondary RPC URL. When provided (operator-set
-   * via `*_RPC_URL_FALLBACK`), the chain clients use a viem `fallback([...])`
-   * transport so a single RPC outage does not take the chain offline. When
-   * absent, a sane PUBLIC fallback is used for known chainIds (see
-   * `publicFallbackRpcUrl`); if neither exists the transport is just the
-   * primary `http(rpcUrl)` (backward-compatible).
+   * via `*_RPC_URL_FALLBACK`), BOTH the read (public) and write (wallet/settle)
+   * clients use a viem `fallback([...])` transport so a single RPC outage does
+   * not take the chain offline.
+   *
+   * MNR-1 (audit2) — when this is ABSENT, a sane PUBLIC fallback is used for
+   * known chainIds (see `publicFallbackRpcUrl`) but ONLY on the READ/verify
+   * path. The WRITE/settle (wallet) transport NEVER gets a hardcoded public
+   * default — it falls back only when this explicit operator opt-in is set.
+   * Injecting a third-party public RPC into the mainnet broadcast path by
+   * default would be a money-path trust expansion (a malicious/compromised
+   * public RPC could censor/delay/feed-stale-views to a settle broadcast).
    */
   rpcUrlFallback?: string;
   viemChain: Chain;
@@ -115,8 +121,17 @@ export abstract class BaseEip3009Adapter implements ChainAdapter {
   public readonly metadata: ChainMetadata;
   protected readonly _viemChain: Chain;
   protected readonly _rpcUrl: string;
-  /** OP-04 — resolved secondary RPC URL (explicit env or public default), or undefined. */
-  protected readonly _rpcUrlFallback: string | undefined;
+  /**
+   * MNR-1 — resolved secondary RPC URL for the READ/verify path (explicit env
+   * fallback OR a sane public default for known chainIds), or undefined.
+   */
+  protected readonly _readRpcUrlFallback: string | undefined;
+  /**
+   * MNR-1 — resolved secondary RPC URL for the WRITE/settle path. ONLY the
+   * explicit operator-set `*_RPC_URL_FALLBACK`; NEVER a hardcoded public
+   * default. Undefined when the operator did not opt in.
+   */
+  protected readonly _writeRpcUrlFallback: string | undefined;
   private _publicClient: PublicClient | null = null;
   private _walletClient: WalletClient | null = null;
   protected readonly _breaker: ChainCircuitBreaker;
@@ -124,8 +139,11 @@ export abstract class BaseEip3009Adapter implements ChainAdapter {
   constructor(opts: BaseAdapterOpts) {
     this._rpcUrl = opts.rpcUrl;
     this._viemChain = opts.viemChain;
-    // OP-04 — prefer the operator-supplied fallback; else a sane public one.
-    this._rpcUrlFallback = opts.rpcUrlFallback ?? publicFallbackRpcUrl(opts.chainIdNum);
+    // MNR-1 — READ path: prefer the operator-supplied fallback; else a sane
+    // public default for known chainIds. WRITE path: ONLY the explicit operator
+    // opt-in — no hardcoded public default on the money/broadcast path.
+    this._readRpcUrlFallback = opts.rpcUrlFallback ?? publicFallbackRpcUrl(opts.chainIdNum);
+    this._writeRpcUrlFallback = opts.rpcUrlFallback;
 
     this.metadata = {
       chainId: asChainId(opts.chainIdNum),
@@ -153,23 +171,30 @@ export abstract class BaseEip3009Adapter implements ChainAdapter {
   }
 
   /**
-   * OP-04 — build the viem transport. When a secondary RPC is available, use
+   * OP-04 / MNR-1 — build the viem transport. When the given secondary RPC is
+   * available (and distinct from the primary), use
    * `fallback([http(primary), http(secondary)])` so a primary RPC outage
-   * transparently rolls over to the secondary. Otherwise a plain
-   * `http(primary)` (preserves the pre-audit single-RPC behavior).
+   * transparently rolls over. Otherwise a plain `http(primary)` (preserves the
+   * pre-audit single-RPC behavior).
+   *
+   * The caller passes the path-specific fallback: `_readRpcUrlFallback` for the
+   * read/verify client (may be a public default) and `_writeRpcUrlFallback` for
+   * the wallet/settle client (explicit operator opt-in only).
    */
-  private _buildTransport(): Transport {
-    if (this._rpcUrlFallback && this._rpcUrlFallback !== this._rpcUrl) {
-      return fallback([http(this._rpcUrl), http(this._rpcUrlFallback)]);
+  private _buildTransport(rpcUrlFallback: string | undefined): Transport {
+    if (rpcUrlFallback && rpcUrlFallback !== this._rpcUrl) {
+      return fallback([http(this._rpcUrl), http(rpcUrlFallback)]);
     }
     return http(this._rpcUrl);
   }
 
   getPublicClient(): PublicClient {
     if (!this._publicClient) {
+      // READ/verify path — may use a sane public default fallback (MNR-1):
+      // a stale read only costs a retry, never a bad settle.
       this._publicClient = createPublicClient({
         chain: this._viemChain,
-        transport: this._buildTransport(),
+        transport: this._buildTransport(this._readRpcUrlFallback),
       }) as PublicClient;
     }
     return this._publicClient;
@@ -178,10 +203,12 @@ export abstract class BaseEip3009Adapter implements ChainAdapter {
   getWalletClient(): WalletClient {
     if (!this._walletClient) {
       // WFAC-50 — inject operator account for signing.
+      // MNR-1 — WRITE/settle path: fallback ONLY on explicit operator opt-in;
+      // never a hardcoded public default on the money/broadcast path.
       this._walletClient = createWalletClient({
         account: getOperatorAccount(),
         chain: this._viemChain,
-        transport: this._buildTransport(),
+        transport: this._buildTransport(this._writeRpcUrlFallback),
       }) as WalletClient;
     }
     return this._walletClient;

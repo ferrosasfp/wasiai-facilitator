@@ -88,7 +88,7 @@ describe('P1 OP-04 — RPC fallback transport', () => {
     expect(info.innerCount).toBe(2);
   });
 
-  it('FB-2: no explicit fallback but a known chainId → public default fallback transport is used', async () => {
+  it('FB-2: no explicit fallback but a known chainId → READ client uses the public default fallback transport', async () => {
     // Use a non-public primary so it differs from the public default for 2368.
     process.env['KITE_TESTNET_RPC_URL'] = 'https://primary.example/rpc';
     delete process.env['KITE_TESTNET_RPC_URL_FALLBACK'];
@@ -97,9 +97,24 @@ describe('P1 OP-04 — RPC fallback transport', () => {
       transport: Record<string, unknown>;
     };
     const info = inspectTransport(client);
-    // chainId 2368 has a sane public fallback → still a fallback transport.
+    // chainId 2368 has a sane public fallback → READ path is still a fallback.
     expect(info.type).toBe('fallback');
     expect(info.innerCount).toBe(2);
+  });
+
+  it('MNR-1: no explicit fallback on a known chainId → WRITE/settle client does NOT get the hardcoded public default (single http transport)', async () => {
+    // Money-path trust: the wallet/broadcast transport must only fall back on
+    // an explicit operator opt-in — NEVER a hardcoded public default. Even
+    // though chainId 2368 has a public default (used by the READ client), the
+    // WRITE client stays single-http.
+    process.env['KITE_TESTNET_RPC_URL'] = 'https://primary.example/rpc';
+    delete process.env['KITE_TESTNET_RPC_URL_FALLBACK'];
+    const mod = await import('../../../chains/kite.js');
+    const client = mod.kiteTestnetAdapter.getWalletClient() as unknown as {
+      transport: Record<string, unknown>;
+    };
+    const info = inspectTransport(client);
+    expect(info.type).toBe('http');
   });
 
   it('FB-3: primary equal to the public default → single http transport (no duplicate fallback)', async () => {
@@ -115,7 +130,7 @@ describe('P1 OP-04 — RPC fallback transport', () => {
     expect(info.type).toBe('http');
   });
 
-  it('FB-4: wallet client also uses the fallback transport when configured', async () => {
+  it('FB-4: wallet client uses the fallback transport ONLY when an explicit *_RPC_URL_FALLBACK is set (operator opt-in)', async () => {
     process.env['KITE_TESTNET_RPC_URL'] = 'https://primary.example/rpc';
     process.env['KITE_TESTNET_RPC_URL_FALLBACK'] = 'https://secondary.example/rpc';
     const mod = await import('../../../chains/kite.js');
