@@ -53,6 +53,7 @@ import {
 } from './abi/fiat-token.js';
 import { normalizeSignature } from './abi/signature.js';
 import { getOperatorAccount } from '../infra/wallet.js';
+import { runExclusive } from './chain-mutex.js';
 
 /**
  * Extract a safe, bounded-length string from an unknown error. Defensive
@@ -510,87 +511,99 @@ export abstract class BaseEip3009Adapter implements ChainAdapter {
     const { r, s } = sig;
     const vNum = Number(sig.v); // 27 or 28
 
-    // 3. Simulate (AC-7, CD-4). MUST run BEFORE writeContract.
-    const publicClient = this.getPublicClient();
-    const walletClient = this.getWalletClient();
-    let simRequest: unknown;
-    try {
-      const sim = await publicClient.simulateContract({
-        account: walletClient.account,
-        address: token.address,
-        abi: FIAT_TOKEN_ABI,
-        functionName: 'transferWithAuthorization',
-        args: [
-          authorization.from as Address,
-          authorization.to as Address,
-          BigInt(authorization.value),
-          BigInt(authorization.validAfter),
-          BigInt(authorization.validBefore),
-          authorization.nonce as `0x${string}`,
-          vNum,
-          r,
-          s,
-        ],
-      });
-      simRequest = sim.request;
-    } catch (e) {
-      return {
-        ok: false,
-        error: { code: 'SIMULATION_FAILED', message: sanitize(e), http: 500 },
-      };
-    }
+    // 3-7. On-chain section — simulate → write → wait → status → success.
+    //
+    // R-1 / OP-03 (audit): serialize this whole section PER CHAIN with
+    // `runExclusive(chainId, ...)`. The operator signs every settle on a chain
+    // with ONE account; viem reads the next account nonce lazily on each
+    // writeContract. Two CONCURRENT DISTINCT settles on the same chain would
+    // otherwise both read the same pending nonce and the second broadcast
+    // reverts ("nonce too low"). Settles on DIFFERENT chains keep running in
+    // parallel (independent operator nonces). The in-flight idempotency lock
+    // does NOT cover this — it dedups IDENTICAL requests only.
+    return runExclusive<AdapterResult<SettleResult>>(this.metadata.chainId as number, async () => {
+      // 3. Simulate (AC-7, CD-4). MUST run BEFORE writeContract.
+      const publicClient = this.getPublicClient();
+      const walletClient = this.getWalletClient();
+      let simRequest: unknown;
+      try {
+        const sim = await publicClient.simulateContract({
+          account: walletClient.account,
+          address: token.address,
+          abi: FIAT_TOKEN_ABI,
+          functionName: 'transferWithAuthorization',
+          args: [
+            authorization.from as Address,
+            authorization.to as Address,
+            BigInt(authorization.value),
+            BigInt(authorization.validAfter),
+            BigInt(authorization.validBefore),
+            authorization.nonce as `0x${string}`,
+            vNum,
+            r,
+            s,
+          ],
+        });
+        simRequest = sim.request;
+      } catch (e) {
+        return {
+          ok: false,
+          error: { code: 'SIMULATION_FAILED', message: sanitize(e), http: 500 },
+        };
+      }
 
-    // 4. Write (AC-7, AC-11, CD-6). Use sim.request opaque — do NOT reconstruct.
-    let hash: `0x${string}`;
-    try {
-      hash = await walletClient.writeContract(simRequest as never);
-    } catch (e) {
-      return {
-        ok: false,
-        error: { code: 'TRANSACTION_FAILED', message: sanitize(e), http: 500 },
-      };
-    }
+      // 4. Write (AC-7, AC-11, CD-6). Use sim.request opaque — do NOT reconstruct.
+      let hash: `0x${string}`;
+      try {
+        hash = await walletClient.writeContract(simRequest as never);
+      } catch (e) {
+        return {
+          ok: false,
+          error: { code: 'TRANSACTION_FAILED', message: sanitize(e), http: 500 },
+        };
+      }
 
-    // 5. Wait receipt (AC-7, AC-12).
-    let receipt;
-    try {
-      receipt = await publicClient.waitForTransactionReceipt({
-        hash,
-        timeout: RECEIPT_TIMEOUT_MS,
-      });
-    } catch (e) {
-      const msg =
-        e instanceof Error && e.name === 'WaitForTransactionReceiptTimeoutError'
-          ? 'receipt timeout'
-          : sanitize(e);
-      return {
-        ok: false,
-        error: { code: 'TRANSACTION_FAILED', message: msg, http: 500 },
-      };
-    }
+      // 5. Wait receipt (AC-7, AC-12).
+      let receipt;
+      try {
+        receipt = await publicClient.waitForTransactionReceipt({
+          hash,
+          timeout: RECEIPT_TIMEOUT_MS,
+        });
+      } catch (e) {
+        const msg =
+          e instanceof Error && e.name === 'WaitForTransactionReceiptTimeoutError'
+            ? 'receipt timeout'
+            : sanitize(e);
+        return {
+          ok: false,
+          error: { code: 'TRANSACTION_FAILED', message: msg, http: 500 },
+        };
+      }
 
-    // 6. Status (AC-13).
-    if (receipt.status === 'reverted') {
-      return {
-        ok: false,
-        error: {
-          code: 'TRANSACTION_FAILED',
-          message: 'transaction reverted on-chain',
-          http: 500,
-        },
-      };
-    }
+      // 6. Status (AC-13).
+      if (receipt.status === 'reverted') {
+        return {
+          ok: false,
+          error: {
+            code: 'TRANSACTION_FAILED',
+            message: 'transaction reverted on-chain',
+            http: 500,
+          },
+        };
+      }
 
-    // 7. Success (AC-7, AC-9). Fields from input params, NOT re-read from chain.
-    return {
-      ok: true,
-      settled: true,
-      transactionHash: hash,
-      blockNumber: Number(receipt.blockNumber),
-      amount: params.accepted.amount,
-      from: authorization.from as Address,
-      to: authorization.to as Address,
-      asset: token.address,
-    };
+      // 7. Success (AC-7, AC-9). Fields from input params, NOT re-read from chain.
+      return {
+        ok: true,
+        settled: true,
+        transactionHash: hash,
+        blockNumber: Number(receipt.blockNumber),
+        amount: params.accepted.amount,
+        from: authorization.from as Address,
+        to: authorization.to as Address,
+        asset: token.address,
+      };
+    });
   }
 }
