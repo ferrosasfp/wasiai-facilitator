@@ -7,9 +7,14 @@
  *   2. Global daily settle counter in Redis — hard ceiling across ALL IPs
  *      and ALL wallets, protects operator gas budget.
  *
- * Both are fail-open: if Redis is unavailable or BigInt parsing throws,
- * the request is allowed through (like WFAC-5/WFAC-40 fail-open pattern).
- * Surface of abuse grows only when infra is already compromised.
+ * Fail behavior differs by mechanism:
+ *   - Amount cap (#1) is fail-CLOSED: if BigInt parsing throws (or the amount
+ *     is non-positive), the request is rejected (`{ ok: false }`). An
+ *     imparseable cap/amount is a misconfig, so blocking is the safe default.
+ *   - Daily cap (#2) is fail-open by default: if Redis is unavailable, the
+ *     request is allowed through (like WFAC-5/WFAC-40 fail-open pattern), so
+ *     the abuse surface grows only when infra is already compromised. The
+ *     caller MAY opt into fail-closed via `failMode: 'closed'` (WFAC-53 FIX-6).
  *
  * Boundaries (OWNERS.md):
  *   - MAY import: `pino` (type-only), `../infra/redis.js` (runtime).
