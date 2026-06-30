@@ -37,7 +37,8 @@
     "zod": "^3.23.8"
   },
   "overrides": {
-    "ws": "^8.21.0"
+    "ws": "^8.21.0",
+    "esbuild": "^0.28.1"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.3.5",
