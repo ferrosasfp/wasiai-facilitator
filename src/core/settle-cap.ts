@@ -4,8 +4,12 @@
  * Two independent mechanisms:
  *   1. Per-request amount cap (pure, synchronous) — compared against the
  *      authorized amount in the x402 body.
- *   2. Global daily settle counter in Redis — hard ceiling across ALL IPs
- *      and ALL wallets, protects operator gas budget.
+ *   2. Per-caller daily settle counter in Redis — a hard daily ceiling scoped
+ *      to the calling API key (WFAC-AUDIT M3). The counter is partitioned by a
+ *      NON-SECRET, stable id of the caller key so one tenant that exhausts its
+ *      own daily cap can NEVER deny settlement capacity to other tenants
+ *      (cross-tenant DoS). When no caller id is available (auth-bypass/test),
+ *      it falls back to a single shared daily key (legacy behavior).
  *
  * Fail behavior differs by mechanism:
  *   - Amount cap (#1) is fail-CLOSED: if BigInt parsing throws (or the amount
@@ -68,22 +72,33 @@ export function checkSettleAmountCap(amountAtomic: string, capAtomic: string): A
  * Atomic INCR on today's daily counter. On first bump, sets TTL = 48h.
  * Returns the post-increment count + the configured cap.
  *
+ * The counter is PARTITIONED PER CALLER (WFAC-AUDIT M3): the Redis key is
+ * `settle:daily:<YYYY-MM-DD>:<keyId>` when `keyId` is provided, so each API key
+ * gets an independent daily budget and a single tenant can never exhaust the
+ * capacity of others. When `keyId` is undefined (auth-bypass in test / no key
+ * configured), it falls back to the shared `settle:daily:<YYYY-MM-DD>` key
+ * (legacy behavior preserved).
+ *
  * If the resulting count exceeds `cap`, returns `{ ok: false }` with a
  * `retryAfterSeconds` hint (seconds until next UTC midnight).
  *
  * If Redis is unreachable or throws, returns `{ ok: true, count: 0, cap }`
  * (fail-open). Never throws.
  *
- * @param cap — configured global daily cap. If <= 0, all requests pass (disabled).
+ * @param cap — configured per-caller daily cap. If <= 0, all requests pass (disabled).
  * @param failMode — WFAC-53 FIX-6. 'open' (default, V1) → Redis throw → fail-open;
  *                   'closed' → Redis throw → return `{ ok: false, reason: 'redis_error_failclosed' }`
  *                   so the /settle route can respond HTTP 503 SERVICE_UNAVAILABLE (CD-8, CD-15).
  * @param logger — for warn-level logging on fail-open/fail-closed paths.
+ * @param keyId — NON-SECRET, stable id of the calling API key (sha256 prefix from
+ *                the auth middleware). Partitions the daily counter per tenant.
+ *                Never the raw key. Undefined → shared legacy counter.
  */
 export async function incrementAndCheckDailyCap(
   cap: number,
   failMode: 'open' | 'closed',
   logger: Pick<Logger, 'warn' | 'debug'>,
+  keyId?: string,
 ): Promise<DailyCapResult> {
   if (cap <= 0) return { ok: true, count: 0, cap: 0 };
 
@@ -92,7 +107,11 @@ export async function incrementAndCheckDailyCap(
 
   const now = new Date();
   const dateKey = now.toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
-  const key = `${DAILY_CAP_KEY_PREFIX}${dateKey}`;
+  // Partition per caller so one tenant's flood cannot deny others (M3).
+  const key =
+    keyId !== undefined && keyId.length > 0
+      ? `${DAILY_CAP_KEY_PREFIX}${dateKey}:${keyId}`
+      : `${DAILY_CAP_KEY_PREFIX}${dateKey}`;
 
   try {
     const count = await client.incr(key);

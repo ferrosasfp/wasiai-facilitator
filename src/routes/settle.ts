@@ -197,13 +197,17 @@ export const settleRoute: FastifyPluginAsync = async (app) => {
       // ── settle pipeline (Step 2.5 → Step 5), wrapped so the finally above
       //    releases the lock regardless of which terminal return fires. ──
       async function runSettle(): Promise<FastifyReply> {
-        // Step 2.5 — global daily settle cap (anti-abuse). WFAC-53 FIX-6:
-        // SETTLE_CAP_FAIL_MODE controls Redis-throw behavior (open=fail-open,
-        // closed=HTTP 503 SERVICE_UNAVAILABLE).
+        // Step 2.5 — per-caller daily settle cap (anti-abuse). WFAC-AUDIT M3:
+        // the counter is partitioned by `facilitatorKeyId` (NON-SECRET sha256
+        // prefix set by the auth preHandler) so one tenant that exhausts its
+        // daily cap can never deny settlement capacity to other tenants.
+        // WFAC-53 FIX-6: SETTLE_CAP_FAIL_MODE controls Redis-throw behavior
+        // (open=fail-open, closed=HTTP 503 SERVICE_UNAVAILABLE).
         const dailyCap = await incrementAndCheckDailyCap(
           env.SETTLE_DAILY_GLOBAL_CAP,
           env.SETTLE_CAP_FAIL_MODE,
           app.log,
+          request.facilitatorKeyId,
         );
         if (!dailyCap.ok) {
           if (dailyCap.reason === 'redis_error_failclosed') {
