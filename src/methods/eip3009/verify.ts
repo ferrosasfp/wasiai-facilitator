@@ -1,4 +1,23 @@
 /**
+ * ⚠️ DEAD CODE — NOT wired into runtime.
+ *
+ * The LIVE verify path is `src/chains/base-adapter.ts` (BaseEip3009Adapter),
+ * consumed by the chain adapters (base/kite). Nothing in runtime imports this
+ * module: the only production consumer of `methods/eip3009/*` is
+ * `src/core/schemas.ts`, which imports `./schemas.js` ONLY.
+ *
+ * Do NOT re-wire this into the settle/verify flow without a full re-audit: its
+ * logic DIVERGES from the live path (it does EIP-712 recover + `from`-match
+ * off-chain, whereas the live adapter delegates authenticity to the on-chain
+ * `transferWithAuthorization`). Re-cabling the wrong path here would silently
+ * change the trust model.
+ *
+ * Kept on purpose as a referenced semantic spec: live code and tests point at
+ * this file by name (see `base-adapter.ts`, `chains.base.test.ts`,
+ * `chain-adapter.test.ts` — "Semantics identical to methods/eip3009/verify.ts")
+ * and `errors.test.ts` reads it by path. Covered by `verify.test.ts` +
+ * `verify.adversarial.test.ts`.
+ *
  * EIP-3009 verify — off-chain validation of a TransferWithAuthorization.
  *
  * Pure async function. No RPC calls. No side effects. No logger.
