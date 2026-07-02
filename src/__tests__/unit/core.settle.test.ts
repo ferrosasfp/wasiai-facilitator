@@ -279,4 +279,93 @@ describe('settleCore (WFAC-21 W1)', () => {
       expect(result.to).toBe(VALID_BODY.payload.authorization.to);
     }
   });
+
+  // ─── Step 0 per-settle amount cap — cap the SETTLED amount, not the declared one ─
+  //
+  // The on-chain transfer moves `authorization.value` (base-adapter.ts:407/617),
+  // and verify only guarantees `value >= accepted`. So the cap MUST bind to
+  // `authorization.value`; binding to `accepted.amount` is evadible.
+
+  it('T-C13 (bug repro): rejects when accepted.amount <= cap but authorization.value > cap', async () => {
+    const settleSpy = vi.fn(async () => VALID_SETTLE_RESULT);
+    const adapter = makeFakeAdapter(2368, settleSpy);
+    chainRegistry.register(adapter);
+
+    // Attacker: declares a tiny accepted.amount (under cap) but signs a huge value.
+    const evasive: VerifyRequest = {
+      ...VALID_BODY,
+      accepted: { ...VALID_BODY.accepted, amount: '1' },
+      payload: {
+        ...VALID_BODY.payload,
+        authorization: { ...VALID_BODY.payload.authorization, value: '10000' },
+      },
+    };
+
+    const result = await settleCore(evasive, { maxAmountAtomic: '5000' });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('INVALID_AMOUNT');
+      expect(result.error.message).toContain('per-settle cap');
+    }
+    // Must never reach the chain when the settled value exceeds the cap.
+    expect(settleSpy).not.toHaveBeenCalled();
+  });
+
+  it('T-C14 (regression): passes when value === accepted <= cap (legitimate settle)', async () => {
+    const settleSpy = vi.fn(async () => VALID_SETTLE_RESULT);
+    const adapter = makeFakeAdapter(2368, settleSpy);
+    chainRegistry.register(adapter);
+
+    const legit: VerifyRequest = {
+      ...VALID_BODY,
+      accepted: { ...VALID_BODY.accepted, amount: '1000' },
+      payload: {
+        ...VALID_BODY.payload,
+        authorization: { ...VALID_BODY.payload.authorization, value: '1000' },
+      },
+    };
+
+    const result = await settleCore(legit, { maxAmountAtomic: '5000' });
+    expect(result.ok).toBe(true);
+    expect(settleSpy).toHaveBeenCalledOnce();
+  });
+
+  it('T-C15 (edge): value === accepted === cap passes (boundary, cap uses > not >=)', async () => {
+    const settleSpy = vi.fn(async () => VALID_SETTLE_RESULT);
+    const adapter = makeFakeAdapter(2368, settleSpy);
+    chainRegistry.register(adapter);
+
+    const atLimit: VerifyRequest = {
+      ...VALID_BODY,
+      accepted: { ...VALID_BODY.accepted, amount: '5000' },
+      payload: {
+        ...VALID_BODY.payload,
+        authorization: { ...VALID_BODY.payload.authorization, value: '5000' },
+      },
+    };
+
+    const result = await settleCore(atLimit, { maxAmountAtomic: '5000' });
+    expect(result.ok).toBe(true);
+    expect(settleSpy).toHaveBeenCalledOnce();
+  });
+
+  it('T-C16 (edge): value one over cap while accepted at cap → rejects', async () => {
+    const settleSpy = vi.fn(async () => VALID_SETTLE_RESULT);
+    const adapter = makeFakeAdapter(2368, settleSpy);
+    chainRegistry.register(adapter);
+
+    const over: VerifyRequest = {
+      ...VALID_BODY,
+      accepted: { ...VALID_BODY.accepted, amount: '5000' },
+      payload: {
+        ...VALID_BODY.payload,
+        authorization: { ...VALID_BODY.payload.authorization, value: '5001' },
+      },
+    };
+
+    const result = await settleCore(over, { maxAmountAtomic: '5000' });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe('INVALID_AMOUNT');
+    expect(settleSpy).not.toHaveBeenCalled();
+  });
 });

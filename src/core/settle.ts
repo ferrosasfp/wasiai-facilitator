@@ -39,8 +39,21 @@ export async function settleCore(
 ): Promise<Result<SettleResult>> {
   // Step 0 — per-request amount cap (anti-abuse, public sharing hardening).
   // Rejects settles above the configured maximum BEFORE hitting the chain.
+  //
+  // The cap MUST top the amount that is REALLY settled on-chain, which is the
+  // signed EIP-3009 `authorization.value` (see base-adapter transfer args:
+  // `value: BigInt(authorization.value)`), NOT the declared `accepted.amount`.
+  // `verify` only guarantees `value >= accepted` (a lower bound), so capping
+  // `accepted.amount` would be EVADIBLE: a caller could declare a tiny
+  // `accepted.amount` under the cap while signing an arbitrarily large `value`,
+  // and the facilitator would liquidate that large `value`. Capping `value`
+  // (>= accepted by the invariant) closes that hole; for a legitimate settle
+  // where `value === accepted`, this is identical to the previous behavior.
   if (options?.maxAmountAtomic !== undefined) {
-    const capCheck = checkSettleAmountCap(parsed.accepted.amount, options.maxAmountAtomic);
+    const capCheck = checkSettleAmountCap(
+      parsed.payload.authorization.value,
+      options.maxAmountAtomic,
+    );
     if (!capCheck.ok) {
       return {
         ok: false,
