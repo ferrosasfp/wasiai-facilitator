@@ -167,10 +167,13 @@ export const EnvSchema = z
       .string()
       .regex(/^[1-9][0-9]*$/, { message: 'must be a positive uint256 decimal (no leading zero)' })
       .default('100000000000000000000'),
-    // Global daily settle cap — hard ceiling across ALL IPs/wallets to protect
-    // the operator wallet gas budget. Key `settle:daily:<YYYY-MM-DD>` in Redis.
-    // Set to 0 to disable (useful for stress-testing or after re-fueling).
-    // Fail-open on Redis outage (never blocks due to infra).
+    // Per-caller daily settle cap (WFAC-AUDIT M3) — a hard daily ceiling applied
+    // PER API KEY to protect the operator wallet gas budget while preventing
+    // cross-tenant DoS. The Redis counter is partitioned as
+    // `settle:daily:<YYYY-MM-DD>:<keyId>`, where keyId is the NON-SECRET sha256
+    // prefix of the caller's bearer key; unauthenticated/test callers fall back
+    // to the shared `settle:daily:<YYYY-MM-DD>` key. Set to 0 to disable (useful
+    // for stress-testing or after re-fueling). Fail-open on Redis outage.
     SETTLE_DAILY_GLOBAL_CAP: z.coerce.number().int().min(0).default(1000),
 
     /**

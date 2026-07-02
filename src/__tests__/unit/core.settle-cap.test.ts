@@ -165,4 +165,60 @@ describe('incrementAndCheckDailyCap (Redis INCR)', () => {
       expect.stringContaining('fail-open'),
     );
   });
+
+  // ─── WFAC-AUDIT M3 — per-caller partitioning of the daily counter ───────
+
+  const DATE_RE = /^settle:daily:\d{4}-\d{2}-\d{2}/;
+
+  it('T-M3-PARTITION: keyId partitions the Redis key as settle:daily:<date>:<keyId>', async () => {
+    mockClient.incr.mockResolvedValue(1);
+    await incrementAndCheckDailyCap(1000, 'open', nullLogger, 'abc123def456');
+    expect(mockClient.incr).toHaveBeenCalledTimes(1);
+    const usedKey = mockClient.incr.mock.calls[0][0] as string;
+    expect(usedKey).toMatch(DATE_RE);
+    expect(usedKey.endsWith(':abc123def456')).toBe(true);
+  });
+
+  it('T-M3-FALLBACK: omitted keyId falls back to the shared settle:daily:<date> key (legacy)', async () => {
+    mockClient.incr.mockResolvedValue(1);
+    await incrementAndCheckDailyCap(1000, 'open', nullLogger);
+    const usedKey = mockClient.incr.mock.calls[0][0] as string;
+    expect(usedKey).toMatch(DATE_RE);
+    // No trailing ':<keyId>' segment → exactly `settle:daily:<date>`.
+    expect(usedKey.split(':')).toHaveLength(3);
+  });
+
+  it('T-M3-FALLBACK-EMPTY: empty-string keyId also falls back to the shared key', async () => {
+    mockClient.incr.mockResolvedValue(1);
+    await incrementAndCheckDailyCap(1000, 'open', nullLogger, '');
+    const usedKey = mockClient.incr.mock.calls[0][0] as string;
+    expect(usedKey.split(':')).toHaveLength(3);
+  });
+
+  it('T-M3-ISOLATION: two callers hit independent counters (no cross-tenant DoS)', async () => {
+    // Tenant A floods to its cap; tenant B must still pass on its own counter.
+    const perKeyCounts = new Map<string, number>();
+    mockClient.incr.mockImplementation(async (k: string) => {
+      const next = (perKeyCounts.get(k) ?? 0) + 1;
+      perKeyCounts.set(k, next);
+      return next;
+    });
+
+    const cap = 2;
+    // Tenant A: exhausts its own cap (3rd call overflows).
+    expect((await incrementAndCheckDailyCap(cap, 'open', nullLogger, 'tenantA')).ok).toBe(true);
+    expect((await incrementAndCheckDailyCap(cap, 'open', nullLogger, 'tenantA')).ok).toBe(true);
+    const aOverflow = await incrementAndCheckDailyCap(cap, 'open', nullLogger, 'tenantA');
+    expect(aOverflow.ok).toBe(false);
+
+    // Tenant B: unaffected by A exhausting its counter.
+    const bFirst = await incrementAndCheckDailyCap(cap, 'open', nullLogger, 'tenantB');
+    expect(bFirst.ok).toBe(true);
+    if (bFirst.ok) expect(bFirst.count).toBe(1);
+
+    // Distinct Redis keys were used for the two tenants.
+    const keys = new Set(mockClient.incr.mock.calls.map((c) => c[0] as string));
+    expect([...keys].some((k) => k.endsWith(':tenantA'))).toBe(true);
+    expect([...keys].some((k) => k.endsWith(':tenantB'))).toBe(true);
+  });
 });
