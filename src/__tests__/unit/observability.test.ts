@@ -11,6 +11,7 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../../app.js';
+import { EnvSchema, type EnvConfig } from '../../infra/env.js';
 
 describe('P1 OP-05 — GET /metrics', () => {
   let app: FastifyInstance | undefined;
@@ -54,6 +55,77 @@ describe('P1 OP-05 — GET /metrics', () => {
     app = await buildApp({ skipDomainCheck: true });
     const res = await app.inject({ method: 'GET', url: '/metrics' });
     expect(res.statusCode).toBe(200);
+  });
+});
+
+describe('N10 — GET /metrics token gate', () => {
+  let app: FastifyInstance | undefined;
+  // NODE_ENV='test' bypasses superRefine required-in-prod checks, so this parses
+  // with everything else optional. Override NODE_ENV/METRICS_TOKEN per test by
+  // spreading — the object is passed as `env`, so buildApp does NOT re-validate.
+  const baseEnv: EnvConfig = EnvSchema.parse({ NODE_ENV: 'test' });
+  const prodEnv: EnvConfig = { ...baseEnv, NODE_ENV: 'production' };
+  const prodEnvWithToken: EnvConfig = {
+    ...baseEnv,
+    NODE_ENV: 'production',
+    METRICS_TOKEN: 'scrape-secret',
+  };
+
+  afterEach(async () => {
+    if (app) {
+      await app.close();
+      app = undefined;
+    }
+  });
+
+  it('MG-1: token unset + production → 503 (fail-closed)', async () => {
+    app = await buildApp({ env: prodEnv, skipDomainCheck: true });
+    const res = await app.inject({ method: 'GET', url: '/metrics' });
+    expect(res.statusCode).toBe(503);
+  });
+
+  it('MG-2: token unset + non-prod → 200 (passthrough)', async () => {
+    app = await buildApp({ env: baseEnv, skipDomainCheck: true });
+    const res = await app.inject({ method: 'GET', url: '/metrics' });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toMatch(/# (HELP|TYPE) /);
+  });
+
+  it('MG-3: token set + correct x-metrics-token header → 200', async () => {
+    app = await buildApp({ env: prodEnvWithToken, skipDomainCheck: true });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/metrics',
+      headers: { 'x-metrics-token': 'scrape-secret' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toMatch(/# (HELP|TYPE) /);
+  });
+
+  it('MG-4: token set + correct Authorization Bearer → 200', async () => {
+    app = await buildApp({ env: prodEnvWithToken, skipDomainCheck: true });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/metrics',
+      headers: { authorization: 'Bearer scrape-secret' },
+    });
+    expect(res.statusCode).toBe(200);
+  });
+
+  it('MG-5: token set + wrong token → 401', async () => {
+    app = await buildApp({ env: prodEnvWithToken, skipDomainCheck: true });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/metrics',
+      headers: { 'x-metrics-token': 'wrong-token' },
+    });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('MG-6: token set + absent token → 401', async () => {
+    app = await buildApp({ env: prodEnvWithToken, skipDomainCheck: true });
+    const res = await app.inject({ method: 'GET', url: '/metrics' });
+    expect(res.statusCode).toBe(401);
   });
 });
 

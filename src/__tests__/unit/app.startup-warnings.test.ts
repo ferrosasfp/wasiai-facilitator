@@ -7,6 +7,7 @@
  *                                      is the SAFE default while Redis is non-HA)
  *   - RATE_LIMIT_FAIL_OPEN=true       (fail-open rate-limit)
  *   - CORS_ALLOWED_ORIGINS unset      (permissive CORS)
+ *   - METRICS_TOKEN unset             (N10 — /metrics fail-closed 503 in prod)
  * It must NOT emit them when configured securely, nor outside production.
  *
  * These warnings change NO behavior (no fail-fast) — they surface drift only.
@@ -99,6 +100,22 @@ describe('production startup hardening warnings (AUDIT)', () => {
     expect(cap.text()).toContain('RATE_LIMIT_FAIL_OPEN');
   });
 
+  it('warns when METRICS_TOKEN is unset in production (N10)', async () => {
+    const cap = new CaptureStream();
+    const { buildApp } = await import('../../app.js');
+    app = await buildApp({
+      rawEnv: {
+        ...PROD_BASE,
+        SETTLE_CAP_FAIL_MODE: 'closed',
+        CORS_ALLOWED_ORIGINS: 'https://x.io',
+      }, // METRICS_TOKEN unset
+      loggerDestination: cap,
+      skipDomainCheck: true,
+    });
+    expect(cap.text()).toContain('METRICS_TOKEN');
+    expect(cap.text()).toContain('FAIL-CLOSED');
+  });
+
   it('does NOT warn when configured securely in production', async () => {
     const cap = new CaptureStream();
     const { buildApp } = await import('../../app.js');
@@ -108,6 +125,7 @@ describe('production startup hardening warnings (AUDIT)', () => {
         SETTLE_CAP_FAIL_MODE: 'closed',
         RATE_LIMIT_FAIL_OPEN: 'false',
         CORS_ALLOWED_ORIGINS: 'https://app.wasiai.io',
+        METRICS_TOKEN: 'a-long-random-metrics-secret',
       },
       loggerDestination: cap,
       skipDomainCheck: true,
