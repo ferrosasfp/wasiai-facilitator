@@ -85,6 +85,22 @@ export const EnvSchema = z
     // key remains the required credential; this is purely additive).
     FACILITATOR_API_KEYS: z.string().optional(),
 
+    // N10 (audit hardening) — token gate for GET /metrics. The Prometheus
+    // scrape target exposes operational state (per-chain circuit-breaker
+    // gauges/counters). On Railway the endpoint is a PUBLIC URL, so it must not
+    // leak operational state to anonymous recon. Behavior (see
+    // requireMetricsToken in src/middleware/auth.ts):
+    //   - SET   → /metrics requires this token, sent as `x-metrics-token: <v>`
+    //             or `Authorization: Bearer <v>`, timing-safe compared. 401 on
+    //             mismatch/absence.
+    //   - UNSET → production FAILS CLOSED (503 — never expose metrics
+    //             unconfigured in prod); dev/test passes through (local scrape /
+    //             tests keep working).
+    // NOT added to .superRefine (same rationale as CORS/rate-limit fail-mode
+    // envs): an unset token must degrade /metrics ONLY (503), never block boot.
+    // NEVER logged.
+    METRICS_TOKEN: z.string().min(1).optional(),
+
     // OP-04 (audit) — optional secondary RPC URLs for per-chain RPC fallback.
     // When set, the chain client uses viem `fallback([http(primary),
     // http(secondary)])` so a single RPC outage rolls over transparently. When

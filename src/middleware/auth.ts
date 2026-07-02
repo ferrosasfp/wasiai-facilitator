@@ -128,3 +128,67 @@ function unauthorized(reply: FastifyReply): void {
     error: { code: 'UNAUTHORIZED', message: 'Invalid or missing API key', http: 401 },
   });
 }
+
+/**
+ * N10 (audit hardening) — token gate for GET /metrics.
+ *
+ * The Prometheus scrape target exposes operational state (per-chain circuit
+ * breaker gauges/counters). On Railway the endpoint is a PUBLIC URL, so it is
+ * gated by a shared secret (`METRICS_TOKEN`). Fail-CLOSED in production:
+ *
+ *   - METRICS_TOKEN set   → require the token, sent as `x-metrics-token: <v>`
+ *                           or `Authorization: Bearer <v>` (same bearer scheme
+ *                           as caller-auth). Timing-safe compared. 401 on
+ *                           mismatch/absence.
+ *   - METRICS_TOKEN unset:
+ *       - production       → 503 (fail-closed: never expose metrics
+ *                            unconfigured in prod).
+ *       - dev/test         → passthrough (local scrape / tests keep working).
+ *
+ * SECURITY (CD-NEW-AUTH-NOLOG): NEVER logs the token — reuses the same
+ * timing-safe comparison as the caller-auth path. Read SOLELY via
+ * `request.server.env` (no direct env import — OWNERS boundary).
+ */
+export async function requireMetricsToken(
+  request: FastifyRequest,
+  reply: FastifyReply,
+): Promise<void> {
+  const token = request.server.env.METRICS_TOKEN;
+
+  // Unconfigured: fail-CLOSED in production, passthrough in dev/test.
+  if (token === undefined || token.length === 0) {
+    if (request.server.env.NODE_ENV === 'production') {
+      reply.code(503).send({
+        error: {
+          code: 'SERVICE_UNAVAILABLE',
+          message: 'Metrics endpoint is not configured',
+          http: 503,
+        },
+      });
+    }
+    return;
+  }
+
+  const provided = extractMetricsToken(request);
+  if (provided === undefined || !timingSafeMatch(provided, token)) {
+    reply.code(401).send({
+      error: { code: 'UNAUTHORIZED', message: 'Invalid or missing metrics token', http: 401 },
+    });
+  }
+}
+
+/**
+ * Extract the metrics token from the dedicated `x-metrics-token` header or a
+ * standard `Authorization: Bearer <token>` header (consistent with the
+ * caller-auth bearer scheme). Returns undefined when neither is present.
+ */
+function extractMetricsToken(request: FastifyRequest): string | undefined {
+  const dedicated = request.headers['x-metrics-token'];
+  if (typeof dedicated === 'string' && dedicated.length > 0) return dedicated;
+  const header = request.headers['authorization'];
+  if (typeof header === 'string' && header.startsWith('Bearer ')) {
+    const t = header.slice('Bearer '.length);
+    if (t.length > 0) return t;
+  }
+  return undefined;
+}

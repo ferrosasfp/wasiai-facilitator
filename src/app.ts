@@ -247,6 +247,15 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
           'CORS_ALLOWED_ORIGINS=https://app.wasiai.io,https://wasiai.io.',
       );
     }
+    if (!env.METRICS_TOKEN || env.METRICS_TOKEN.length === 0) {
+      logger.warn(
+        { setting: 'METRICS_TOKEN', value: '(unset)' },
+        'SECURITY: METRICS_TOKEN is unset in production — GET /metrics is ' +
+          'FAIL-CLOSED (503) so operational state is never exposed to anonymous ' +
+          'recon (N10). Set METRICS_TOKEN and pass it to your scraper as ' +
+          '`x-metrics-token` (or `Authorization: Bearer`) to enable scraping.',
+      );
+    }
   }
 
   // Security headers (helmet) — HSTS, X-Content-Type-Options, X-Frame-Options, etc.
