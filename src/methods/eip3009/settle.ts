@@ -1,4 +1,21 @@
 /**
+ * ⚠️ DEAD CODE — NOT wired into runtime.
+ *
+ * The LIVE settle path is `src/chains/base-adapter.ts` (BaseEip3009Adapter),
+ * consumed by the chain adapters (base/kite). Nothing in runtime imports this
+ * module: the only production consumer of `methods/eip3009/*` is
+ * `src/core/schemas.ts`, which imports `./schemas.js` ONLY.
+ *
+ * Do NOT re-wire this into the settle flow without a full re-audit: it re-runs
+ * `verifyEip3009` (off-chain recover + `from`-match) before writing, which the
+ * live adapter does NOT do — the live path delegates authenticity to the
+ * on-chain `transferWithAuthorization`. Re-cabling the wrong path here would
+ * silently change the trust model.
+ *
+ * Kept on purpose as a referenced semantic spec: `base-adapter.ts` notes it
+ * "Mirrors src/methods/eip3009/settle.ts" and `errors.test.ts` reads it by
+ * path. Covered by `settle.test.ts`.
+ *
  * EIP-3009 settle — on-chain transferWithAuthorization execution.
  *
  * Flow:
