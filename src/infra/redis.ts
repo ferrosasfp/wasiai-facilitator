@@ -95,6 +95,12 @@ export function getRedisClient(): Redis | null {
   const logger = _logger;
 
   const client = new Redis(url, {
+    // Railway private networking (`*.railway.internal`) is IPv6-only. ioredis
+    // defaults to `family: 4` (IPv4-only DNS lookup), so the initial connect may
+    // resolve by luck but reconnections/subsequent lookups fail → the client
+    // drifts to `unreachable`. `family: 0` enables dual-stack DNS lookup (IPv4
+    // AND IPv6), resolving the IPv6 host consistently, including on reconnect.
+    family: 0,
     lazyConnect: true,
     maxRetriesPerRequest: 3,
     enableReadyCheck: false,

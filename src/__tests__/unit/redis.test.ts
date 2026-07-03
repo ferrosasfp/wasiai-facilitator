@@ -175,6 +175,9 @@ describe('getRedisClient', () => {
     expect(opts.enableReadyCheck).toBe(false);
     expect(typeof opts.retryStrategy).toBe('function');
     expect(opts.db).toBe(0);
+    // family:0 = dual-stack DNS lookup, required for Railway IPv6-only
+    // `*.railway.internal` hosts (default ioredis family:4 fails to resolve).
+    expect(opts.family).toBe(0);
   });
 
   it('logs redacted URL at info level on first creation (AC-5)', async () => {
