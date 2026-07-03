@@ -1,111 +1,66 @@
 # wasiai-facilitator
 
-> Self-hosted x402 facilitator for EVM chains. Part of the WasiAI ecosystem.
+> Self-hosted, multi-chain x402 facilitator. The settlement piece of WasiAI's neutral, open payment layer for the agent economy.
 
-## 🏆 Kite Hackathon 2026 submission
+`wasiai-facilitator` is the relayer that turns a signed payment authorization into an on-chain settlement. It implements the [HTTP 402 Payment Required](https://docs.x402.org) facilitator role: it verifies EIP-3009 signatures off-chain (`verify`) and executes `transferWithAuthorization` on-chain (`settle`), so agents and their counterparts can move stablecoins without the payer ever holding native gas.
 
-The wasiai-facilitator is the self-hosted x402 relayer that powers gasless settlement on Kite and Avalanche for the **WasiAI A2A** agent commerce gateway. Together with [`wasiai-a2a`](https://github.com/ferrosasfp/wasiai-a2a) (the gateway) and [`wasiai-agentshop`](https://github.com/ferrosasfp/wasiai-agentshop) (the use case demo), it forms our Kite Hackathon 2026 submission.
+## Where this fits
 
-| Resource | Link |
-|---|---|
-| 🌐 **Use case demo** | https://wasiai-agentshop.vercel.app/ |
-| 🎬 **Demo video (3 min)** | https://www.youtube.com/watch?v=Ydh_sEJXgt4 |
-| 🔗 **Sample on-chain tx** | [`0xf3eaa00a…0f1d674`](https://testnet.kitescan.ai/tx/0xf3eaa00a7e83c41b2b9d8247e39d32f564b36cd8745f91e3c080ff23f0f1d674) — PYUSD settle on Kite Ozone via this facilitator |
-| 📦 **A2A gateway repo** | https://github.com/ferrosasfp/wasiai-a2a |
-| 📦 **Use case repo** | https://github.com/ferrosasfp/wasiai-agentshop |
-| 🎤 **Pitch deck** | https://wasiai.io/pitch-v6/ |
+WasiAI is a neutral, open, multi-chain payment layer for the agent economy, LATAM-first. The agent economy tends to fragment into walled gardens; WasiAI is the neutral ground: open standards, settlement on each agent's own chain, no lock-in.
 
-Built by Fernando Rosas and Elizabeth Palacios.
+This repo is one component of that layer, the settlement relayer. It is infrastructure, not the whole layer and not an application. The neutral gateway that routes and orchestrates lives in [`wasiai-a2a-gateway`](https://github.com/ferrosasfp/wasiai-a2a-gateway) and consumes this facilitator to settle payments.
 
----
+## What it does
 
-## What is this?
+- **Verify off-chain.** Validates an EIP-3009 signed `TransferWithAuthorization` (signature, domain, amount, expiry) with no state change.
+- **Settle on-chain.** Simulates and then submits `transferWithAuthorization`. The operator wallet pays gas, so the payer settles gaslessly.
+- **Multi-chain by design.** Each network is a self-contained chain adapter. Adding a chain is one adapter module plus one line in the registry.
+- **Fail-safe.** Per-chain circuit breakers, a daily settle cap, boot-time EIP-712 domain-separator drift checks, idempotency guards, and per-IP plus per-key rate limiting.
 
-A [HTTP 402 Payment Required](https://docs.x402.org) protocol facilitator — verifies payment signatures off-chain and settles EIP-3009 `transferWithAuthorization` transactions on-chain, enabling gasless stablecoin micropayments between autonomous agents.
+## Supported chains
 
-**Live URL**: `https://wasiai-facilitator-production.up.railway.app`
+Chain adapters are opt-in. Kite Ozone testnet registers by default; every other network requires explicit env configuration (mainnets and Base Sepolia are OFF unless a `*_ENABLED=true` flag and its RPC are set).
 
-**👉 Integrating as a client?** See **[doc/HACKATHON.md](doc/HACKATHON.md)** for a full guide with code examples, error codes, and limits.
+| Chain | chainId | Token | Default | Notes |
+|---|---|---|---|---|
+| Kite Ozone testnet | 2368 | PYUSD (18 dec) | On | Live, E2E tested |
+| Kite mainnet | 2366 | USDC.e | Off | Env-gated (`KITE_MAINNET_ENABLED`) |
+| Avalanche Fuji | 43113 | USDC | Off | Registers when its RPC is set |
+| Avalanche C-Chain | 43114 | USDC | Off | Env-gated (`AVALANCHE_MAINNET_ENABLED`) |
+| Base Sepolia | 84532 | USDC (6 dec) | Off | Env-gated (`BASE_SEPOLIA_ENABLED`) |
+| Base mainnet | 8453 | USDC (6 dec) | Off | Env-gated (`BASE_MAINNET_ENABLED`) |
 
-**Currently supported chains:**
-| Chain              | chainId | Token | Status |
-|--------------------|---------|-------|--------|
-| Kite Ozone Testnet  | 2368    | PYUSD (18 dec) | ✅ Live + E2E tested |
-| Kite Mainnet       | 2366    | USDC.e | Staged (env-gated) |
-| Avalanche Fuji     | 43113   | USDC  | ✅ Live |
-| Avalanche C-Chain Mainnet | 43114 | USDC | ✅ Live (mainnet hybrid mode) |
-| Base Sepolia       | 84532   | USDC (6 dec) | Staged (env-gated, WKH-105) |
-| Base Mainnet       | 8453    | USDC (6 dec) | Staged (env-gated, WKH-105) |
+Settlement method: EIP-3009 `TransferWithAuthorization`. A single `OPERATOR_PRIVATE_KEY` signs across all enabled chains today.
 
-**Method:** EIP-3009 `TransferWithAuthorization`
+Mainnet adapters exist in code but ship disabled. Only enable a mainnet after validating on its testnet and funding the operator wallet with that chain's native gas.
 
-**Roadmap:** Permit2, ERC-7710 delegations, Solana, Aptos, Stellar.
+## API
 
----
+x402 spec-compliant. `/verify` and `/settle` require a facilitator API key in production (sent as the `x-facilitator-key` header).
 
-## API (x402 spec-compliant)
+| Method | Path | Purpose | On-chain |
+|---|---|---|:---:|
+| GET | `/health` | Liveness and version | No |
+| GET | `/supported` | Enabled chains and methods (live registry) | No |
+| GET | `/openapi.json` | OpenAPI 3.1 spec | No |
+| GET | `/metrics` | Prometheus metrics (token-gated) | No |
+| POST | `/verify` | Validate a signed authorization (read-only) | No |
+| POST | `/settle` | Verify, then execute `transferWithAuthorization` | Yes |
 
-| Method | Path              | Purpose                                              | On-chain |
-|--------|-------------------|------------------------------------------------------|:--------:|
-| GET    | `/health`         | Liveness + version                                   | No       |
-| GET    | `/supported`      | Supported chains + methods (reads live registry)     | No       |
-| GET    | `/openapi.json`   | Full OpenAPI 3.1 spec                                | No       |
-| POST   | `/verify`         | Validate EIP-3009 signed authorization (read-only)   | No       |
-| POST   | `/settle`         | Verify + execute `transferWithAuthorization`         | **Yes**  |
-
-Quick check:
+Quick check against the live deployment:
 
 ```bash
 curl https://wasiai-facilitator-production.up.railway.app/supported
 ```
 
-Full integration guide: **[doc/HACKATHON.md](doc/HACKATHON.md)**.
-
----
-
-## Supported Networks: Base
-
-Base support (WKH-105) is implemented as an opt-in chain adapter pair following the same chain-adaptive pattern as Avalanche and Kite. Both Base networks are **disabled by default** — operators must explicitly opt in.
-
-### Base Sepolia (chainId 84532)
-
-Testnet — Circle USDC at `0x036CbD53842c5426634e7929541eC2318f3dCF7e` (6 decimals, EIP-712 domain `name="USDC"` v2). Use this for integration testing without spending real funds.
-
-To enable on Railway / local:
-
-```bash
-BASE_SEPOLIA_ENABLED=true
-BASE_SEPOLIA_RPC_URL=https://sepolia.base.org   # or your Alchemy/Infura endpoint
-```
-
-Operator wallet must hold Base Sepolia ETH for gas — [Coinbase faucet](https://www.coinbase.com/faucets/base-sepolia-faucet).
-
-### Base Mainnet (chainId 8453)
-
-Production — native Circle USDC at `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` (6 decimals, EIP-712 domain `name="USD Coin"` v2). Mainnet moves real money — only enable after Sepolia validation and explicit operator approval.
-
-```bash
-BASE_MAINNET_ENABLED=true
-BASE_MAINNET_RPC_URL=https://mainnet.base.org
-```
-
-Operator wallet must hold Base ETH (L2 native gas) before flipping the flag.
-
-### Notes
-
-- The EIP-712 `name` field on **Base Sepolia USDC literally returns `"USDC"`** (not `"USD Coin"` like the other Circle USDC deployments). This is verified on-chain via `cast call ... "name()(string)"`. The adapter encodes both variants — boot-time `initDomainCheck` (WFAC-53) will refuse to start if the local domain separator drifts from the on-chain `DOMAIN_SEPARATOR()`.
-- Both Base networks reuse the existing per-chain `ChainCircuitBreaker` (CB_FAILURE_THRESHOLD, CB_ROLLING_WINDOW_MS, etc.) — RPC outages on one chain do not affect the others.
-- A single `OPERATOR_PRIVATE_KEY` signs across all chains today (V1 multi-key story is a separate epic).
-
----
-
-## Development
+## Quick start
 
 ### Prerequisites
-- Node.js 20+
-- Redis (local or Upstash)
-- Operator wallet with native gas token on each target chain
-- Supabase project (optional, for settlement ledger)
+
+- Node.js 22+
+- Redis (local or hosted) for rate limiting, idempotency, and the settle cap
+- An operator wallet holding native gas on each chain you enable
+- Supabase project (optional, for the settlement audit ledger)
 
 ### Setup
 
@@ -114,54 +69,58 @@ git clone git@github.com:ferrosasfp/wasiai-facilitator.git
 cd wasiai-facilitator
 npm install
 cp .env.example .env
-# Edit .env with OPERATOR_PRIVATE_KEY, RPCs, REDIS_URL
+# Set OPERATOR_PRIVATE_KEY, the RPC URLs for the chains you enable,
+# REDIS_URL, and (in production) FACILITATOR_API_KEYS.
 npm run dev
 ```
 
-Server starts on port 3002.
+The server listens on port 3002 by default.
 
 ### Testing
 
 ```bash
-npm test                # unit tests
-npm run test:coverage   # with coverage report
-npm run qa              # typecheck + lint + format check + tests
+npm test               # unit tests (vitest)
+npm run test:coverage  # with coverage
+npm run qa             # typecheck + lint + format check + tests
 ```
 
-### Deployment
+## Configuration
 
-Production deploy target: Railway (persistent Node process).
+All configuration is via environment variables. See `.env.example` for the full, documented list. The essentials:
 
-```bash
-# Requires RAILWAY_TOKEN env var
-railway up
-```
+| Variable | Purpose |
+|---|---|
+| `OPERATOR_PRIVATE_KEY` | Signer that submits settlements and pays gas. Never commit this. |
+| `FACILITATOR_API_KEYS` | Comma-separated caller keys. Required in production; sent as `x-facilitator-key`. |
+| `<CHAIN>_RPC_URL` / `<CHAIN>_ENABLED` | Per-chain RPC endpoint and opt-in flag. |
+| `REDIS_URL` | Redis for rate limits, idempotency, and the settle cap. |
+| `CORS_ALLOWED_ORIGINS` | Comma-separated allow-list. Unset reflects any origin (dev only). |
+| `METRICS_TOKEN` | Gates `GET /metrics`. Unset makes the endpoint fail-closed. |
+| `SETTLE_CAP_*`, `CB_*`, `RATE_LIMIT_*` | Daily settle cap, circuit-breaker, and rate-limit tuning. |
 
----
+Never place private keys, operator addresses, or any secret in code or in this repo. They belong only in your deployment environment.
 
 ## Security
 
-This facilitator handles signed payment authorizations that move real funds. Security is paramount:
+This service signs transactions that move funds, so it is built to fail safe:
 
-- **Simulate before settle** — every on-chain tx is `simulateContract`ed first
-- **Idempotency cache** — 120s per-payload cache + in-flight lock are best-effort server-side guards that reduce double-dispatch (x402 spec). They are NOT an absolute double-spend prevention: the definitive safeguard is the on-chain EIP-3009 nonce — a second `transferWithAuthorization` with the same nonce reverts on-chain (the 2nd settle fails). See `src/core/idempotency.ts`.
-- **Operator wallet** — single signer per chain; key rotation planned V2
-- **Rate limiting** — per-IP + per-API-key (V1.5)
-- **Security scanning** — Snyk, Dependabot, `eslint-plugin-security` in CI
+- **Simulate before settle.** Every on-chain transaction is `simulateContract`ed first.
+- **Double-spend defense.** A short-lived idempotency cache and in-flight lock reduce double dispatch, and the on-chain EIP-3009 nonce is the definitive guard: a replay with the same nonce reverts on-chain.
+- **Per-chain circuit breakers.** An RPC outage on one chain does not affect the others.
+- **Boot-time domain check.** Startup refuses to proceed if a local EIP-712 domain separator drifts from the on-chain `DOMAIN_SEPARATOR()`.
+- **Rate limiting.** Per-IP (pre-auth) plus per-key (post-auth), backed by Redis.
+- **Hardened defaults.** Helmet security headers, CORS allow-list, token-gated metrics, and loud production warnings when a config is weaker than recommended.
+- **CI scanning.** `eslint-plugin-security`, `eslint-plugin-no-secrets`, and `npm audit` in the pipeline.
 
-See `doc/architecture/SECURITY.md` for threat model.
+## Deployment
 
----
+The reference deployment runs as a persistent Node process on Railway. Build with `npm run build`, run with `npm start`.
 
 ## Ecosystem
 
-- [`wasiai-a2a`](https://github.com/ferrosasfp/wasiai-a2a) — A2A Protocol gateway (consumes this facilitator)
-- [`wasiai-agentshop`](https://github.com/ferrosasfp/wasiai-agentshop) — first use case on the stack (LATAM remittances on Kite, settled via this facilitator)
-- [`wasiai-v2`](https://github.com/ferrosasfp/wasiai-v2) — Agent marketplace
-- [WasiAI](https://wasiai.io) — Landing
-
----
+- [`wasiai-a2a-gateway`](https://github.com/ferrosasfp/wasiai-a2a-gateway): the neutral A2A payment gateway that consumes this facilitator
+- [WasiAI](https://wasiai.io): project landing
 
 ## License
 
-MIT © 2026 Fernando Rosas (OpenClaw)
+MIT. See [LICENSE](LICENSE). Copyright 2026 Fernando Rosas (OpenClaw).
