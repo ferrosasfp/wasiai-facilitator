@@ -114,6 +114,14 @@ export function getRedisClient(): Redis | null {
     // `connectTimeout` caps the background reconnect probe at 5s.
     commandTimeout: 2_000,
     connectTimeout: 5_000,
+    // WKH-131: while the socket is NOT connected (Railway private-net flapping),
+    // reject commands INSTANTLY instead of queuing them until a reconnect. Redis
+    // is best-effort here, so an instant reject → immediate fail-open. Without this
+    // a settle that fires several Redis ops (idempotency + cap + ledger) while
+    // Redis is down stacked ~2s (commandTimeout) EACH; across the step settle plus
+    // the fee-split legs that pushed a single /execute past 60s. When Redis is
+    // reachable again the client (retryStrategy never gives up) resumes normally.
+    enableOfflineQueue: false,
     db: _env.REDIS_DB,
     connectionName: 'wasiai-facilitator',
     retryStrategy: redisRetryStrategy,
