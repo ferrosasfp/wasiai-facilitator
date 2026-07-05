@@ -104,6 +104,16 @@ export function getRedisClient(): Redis | null {
     lazyConnect: true,
     maxRetriesPerRequest: 3,
     enableReadyCheck: false,
+    // WKH-131: Redis is BEST-EFFORT for the facilitator (idempotency, rate-limit,
+    // daily settle-cap all fail-open). When Railway private networking flaps and
+    // `connect ETIMEDOUT` fires, each Redis op must fail-open FAST, not block the
+    // request. Without these bounds a single settle waited on the ~20s socket
+    // connect timeout PER Redis op → a Kite settle took 208s (each idempotency /
+    // cap / ledger call stacking the timeout) → the gateway aborted at 10-30s and
+    // Chaski showed "$0 · done". `commandTimeout` caps every command at 2s;
+    // `connectTimeout` caps the background reconnect probe at 5s.
+    commandTimeout: 2_000,
+    connectTimeout: 5_000,
     db: _env.REDIS_DB,
     connectionName: 'wasiai-facilitator',
     retryStrategy: redisRetryStrategy,
