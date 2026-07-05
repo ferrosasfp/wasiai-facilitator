@@ -110,10 +110,11 @@ describe('redisRetryStrategy', () => {
     expect(redisRetryStrategy(10)).toBe(3000);
   });
 
-  it('returns null after 10 retries', async () => {
+  it('never gives up — keeps the capped 3000ms backoff forever (WKH-131 self-heal)', async () => {
     const { redisRetryStrategy } = await import('../../infra/redis.js');
-    expect(redisRetryStrategy(11)).toBeNull();
-    expect(redisRetryStrategy(100)).toBeNull();
+    expect(redisRetryStrategy(11)).toBe(3000);
+    expect(redisRetryStrategy(100)).toBe(3000);
+    expect(redisRetryStrategy(10_000)).toBe(3000);
   });
 });
 

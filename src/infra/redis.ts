@@ -126,19 +126,27 @@ export function getRedisClient(): Redis | null {
 }
 
 /**
- * Exponential backoff retry strategy for ioredis (AC-9).
+ * Exponential backoff retry strategy for ioredis (AC-9 / WKH-131).
  *
  *   times=0  → 100ms
  *   times=1  → 200ms
  *   times=2  → 400ms
  *   times=3  → 800ms
  *   times=4  → 1600ms
- *   times=5+ → 3000ms (capped)
- *   times>10 → null (give up; ioredis emits final 'error' event)
+ *   times=5+ → 3000ms (capped, forever)
+ *
+ * NEVER returns null. `REDIS_URL` is validated at boot (parseEnv), so if it is
+ * set it is well-formed and we always WANT to keep reconnecting. Giving up
+ * permanently was the WKH-131 root cause: a transient Railway private-networking
+ * blip at deploy time exhausted the old 10-retry budget → ioredis stopped
+ * reconnecting → the client stayed dead forever (health `unreachable`) even after
+ * Redis was healthy again. Keeping a capped 3s backoff lets the client self-heal.
+ * Per-command latency during an outage is bounded separately by
+ * `maxRetriesPerRequest: 3`, so requests still fail fast (fail-open) instead of
+ * hanging on the reconnect loop.
  */
-export function redisRetryStrategy(times: number): number | null {
-  if (times > 10) return null;
-  return Math.min(100 * 2 ** times, 3000);
+export function redisRetryStrategy(times: number): number {
+  return Math.min(100 * 2 ** Math.min(times, 5), 3000);
 }
 
 /**
