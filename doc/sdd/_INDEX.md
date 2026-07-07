@@ -23,6 +23,8 @@
 | 019 | 2026-05-11 | Post-review hardening — multi-chain, multi-consumer (WFAC-53) | security-hardening | QUALITY | DONE | fix/wfac-53-post-review-hardening |
 | 020 | 2026-05-29 | Remediación auditoría profesional — seguridad de pagos + calidad (WFAC-AUDIT) | security+refactor | QUALITY | DONE | feat/020-wfac-audit-remediation |
 | 021 | 2026-06-10 | Kite testnet token metadata env-configurable (WFAC-12) | chain-config | QUALITY | DONE | feat/021-wfac-12-kite-testnet-token-config |
+| 022 | 2026-07-07 | [SUPERSEDED] Settle concurrency nonce mutex (WKH-154 phase 1) | bugfix | QUALITY | SUPERSEDED | — |
+| 023 | 2026-07-07 | Circuit breaker: transport vs business (WKH-154) | bugfix | QUALITY | DONE | fix/154-facilitator-cb-transport-vs-business |
 
 <!--
 Formato por entrada:

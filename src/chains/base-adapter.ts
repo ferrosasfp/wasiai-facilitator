@@ -55,6 +55,7 @@ import {
 import { normalizeSignature } from './abi/signature.js';
 import { getOperatorAccount } from '../infra/wallet.js';
 import { runExclusive } from './chain-mutex.js';
+import { classifyChainError, tagBusiness, isTaggedBusiness } from './error-classifier.js';
 
 /**
  * Extract a safe, bounded-length string from an unknown error. Defensive
@@ -239,6 +240,14 @@ export abstract class BaseEip3009Adapter implements ChainAdapter {
           !result.ok &&
           (result.error.code === 'SIMULATION_FAILED' || result.error.code === 'TRANSACTION_FAILED')
         ) {
+          // WKH-154: a failure tagged as business in _verifyRaw does NOT count
+          // toward the breaker (return = resolved outcome for cockatiel).
+          // Transport/ambiguous (untagged) DOES count (throw legacy). In
+          // practice _verifyRaw does no RPC, so it never tags → identical to
+          // today; the gate blinds the path if it ever gains RPC (CD-11).
+          if (isTaggedBusiness(result)) {
+            return result;
+          }
           throw new BusinessFailureError(result, result.error.code);
         }
         return result;
@@ -457,6 +466,12 @@ export abstract class BaseEip3009Adapter implements ChainAdapter {
           !result.ok &&
           (result.error.code === 'SIMULATION_FAILED' || result.error.code === 'TRANSACTION_FAILED')
         ) {
+          // WKH-154: contención/negocio tagueada en _settleRaw NO cuenta hacia el
+          // breaker (return = outcome resuelto para cockatiel). Transporte/ambiguo
+          // (sin tag) SÍ cuenta (throw legacy). Preserva la invariante 1↔1 (CD-11).
+          if (isTaggedBusiness(result)) {
+            return result;
+          }
           throw new BusinessFailureError(result, result.error.code);
         }
         return result;
@@ -625,10 +640,15 @@ export abstract class BaseEip3009Adapter implements ChainAdapter {
         });
         simRequest = sim.request;
       } catch (e) {
-        return {
+        // WKH-154: same-account contention (gas/nonce/revert) surfaces here.
+        // Tag it business so the wrapper resolves it as an outcome instead of
+        // counting it toward the breaker. Transport/ambiguous stays untagged.
+        const result: AdapterResult<SettleResult> = {
           ok: false,
           error: { code: 'SIMULATION_FAILED', message: sanitize(e), http: 500 },
         };
+        if (classifyChainError(e) === 'business') tagBusiness(result);
+        return result;
       }
 
       // 4. Write (AC-7, AC-11, CD-6). Use sim.request opaque — do NOT reconstruct.
@@ -636,10 +656,14 @@ export abstract class BaseEip3009Adapter implements ChainAdapter {
       try {
         hash = await walletClient.writeContract(simRequest as never);
       } catch (e) {
-        return {
+        // WKH-154: business broadcast failures (nonce too low, already known)
+        // are contention, not a chain outage — tag so they do not count.
+        const result: AdapterResult<SettleResult> = {
           ok: false,
           error: { code: 'TRANSACTION_FAILED', message: sanitize(e), http: 500 },
         };
+        if (classifyChainError(e) === 'business') tagBusiness(result);
+        return result;
       }
 
       // 5. Wait receipt (AC-7, AC-12).
@@ -654,10 +678,15 @@ export abstract class BaseEip3009Adapter implements ChainAdapter {
           e instanceof Error && e.name === 'WaitForTransactionReceiptTimeoutError'
             ? 'receipt timeout'
             : sanitize(e);
-        return {
+        // WKH-154: classify on the RAW `e` (not `msg`). A receipt timeout is a
+        // transport signal → stays untagged → counts (legacy). A business
+        // revert surfaced here is tagged → does not count.
+        const result: AdapterResult<SettleResult> = {
           ok: false,
           error: { code: 'TRANSACTION_FAILED', message: msg, http: 500 },
         };
+        if (classifyChainError(e) === 'business') tagBusiness(result);
+        return result;
       }
 
       // 6. Status (AC-13).
