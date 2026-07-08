@@ -44,7 +44,14 @@ export type X402ErrorCode =
   // WFAC-41 (DT-3 Opción B) — circuit breaker open: facilitator cannot reach
   // the RPC for this chain. HTTP 503. Populated by ChainAdapter.verify/settle
   // when the per-chain breaker is in OPEN state (src/chains/circuit-breaker.ts).
-  | 'CHAIN_UNAVAILABLE';
+  | 'CHAIN_UNAVAILABLE'
+  // WKH-148 (DT-3) — operator (relayer) wallet native balance below the
+  // configured OPERATOR_MIN_BALANCE_WEI threshold. HTTP 503. Populated by the
+  // read-only pre-check in _settleRaw (src/chains/base-adapter.ts) BEFORE any
+  // simulateContract/writeContract — a transient, operator-actionable condition
+  // (refuel gas), NOT a settle execution failure. The 12th facilitator code
+  // (10 x402 spec + CHAIN_UNAVAILABLE + this).
+  | 'OPERATOR_FUNDING_LOW';
 
 export interface Err {
   readonly ok: false;

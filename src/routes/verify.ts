@@ -47,6 +47,12 @@ type VerifyRouteErrorCode =
   | 'TRANSACTION_FAILED'
   | 'DELEGATION_INVALID'
   | 'CHAIN_UNAVAILABLE' // WFAC-41
+  // WKH-148 — type-completeness ONLY. /verify never spends operator gas, so it
+  // NEVER emits OPERATOR_FUNDING_LOW (the pre-check lives in _settleRaw, not
+  // _verifyRaw). Listed here solely because `result.error.code`
+  // (X402ErrorCode) is assigned to this route-local union at the HTTP mapping
+  // step — the compiler requires exhaustive coverage of the widened union.
+  | 'OPERATOR_FUNDING_LOW'
   | 'INVALID_PAYLOAD';
 
 interface ErrorBody {

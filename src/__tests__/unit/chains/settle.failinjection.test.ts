@@ -65,6 +65,9 @@ function makeMockClients(): {
 } {
   const operatorAccount = privateKeyToAccount(TEST_PRIVATE_KEY);
   const publicClient = {
+    // WKH-148 — healthy operator balance so the settle funding pre-check passes
+    // and the fault-injection targets the simulate/write path as intended.
+    getBalance: vi.fn(async () => 10n ** 20n),
     simulateContract: vi.fn(),
     waitForTransactionReceipt: vi.fn(),
   } as unknown as PublicClient;

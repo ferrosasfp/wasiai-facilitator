@@ -53,6 +53,7 @@ type SettleRouteErrorCode =
   | 'TRANSACTION_FAILED'
   | 'DELEGATION_INVALID'
   | 'CHAIN_UNAVAILABLE' // WFAC-41
+  | 'OPERATOR_FUNDING_LOW' // WKH-148 — relayer underfunded pre-check (503)
   | 'INVALID_PAYLOAD'
   | 'RATE_LIMITED'
   | 'SERVICE_UNAVAILABLE' // WFAC-53 FIX-6 (CD-15 — route-local, NOT in X402ErrorCode)

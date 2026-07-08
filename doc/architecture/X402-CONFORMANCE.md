@@ -52,6 +52,20 @@ Mapped in `src/core/errors.ts`:
 | `TRANSACTION_FAILED` | 500 | On-chain exec reverts |
 | `DELEGATION_INVALID` | 401 | (ERC-7710 only) |
 
+### Facilitator-specific error codes (beyond spec)
+
+Also mapped in `src/core/errors.ts` (exhaustive `Record<X402ErrorCode, …>`).
+These extend the 10 spec codes above with facilitator-only conditions:
+
+| Facilitator code | HTTP status | Trigger | Added |
+|------------------|-------------|---------|-------|
+| `CHAIN_UNAVAILABLE` | 503 | Per-chain circuit breaker OPEN (RPC unreachable) | WFAC-41 (11th code) |
+| `OPERATOR_FUNDING_LOW` | 503 | Operator (relayer) native balance below `OPERATOR_MIN_BALANCE_WEI`; read-only pre-check in `_settleRaw` BEFORE simulate/broadcast | WKH-148 (12th code) |
+
+Both are transient + operator-actionable (503). The `OPERATOR_FUNDING_LOW`
+body is PII-free (no address/balance/chainId — those go to the server log only);
+unlike `CHAIN_UNAVAILABLE` it carries NO `Retry-After` (refuel time is unknown).
+
 ## Idempotency
 
 **Spec requirement:** short-lived in-memory cache (120s) to reject duplicate settlements.
@@ -69,6 +83,11 @@ These are our additions that go beyond the minimum spec:
 - **Rate limiting** — per-IP + per-API-key (planned V1.5)
 - **Audit log** — append-only log of every verify/settle attempt
 - **Wallet balance monitoring** — alerts when operator wallet low on gas
+  (proactive poller: WKH-71). **Reactive detection implemented (WKH-148):** a
+  read-only operator-balance pre-check in `_settleRaw` short-circuits a settle to
+  `OPERATOR_FUNDING_LOW` (503) BEFORE simulate/broadcast when the relayer is below
+  `OPERATOR_MIN_BALANCE_WEI`, replacing the opaque RPC "gas required exceeds
+  allowance" with an explicit, operator-actionable error + structured log.
 - **Security scanning in CI** — Snyk + Dependabot + ESLint security plugins
 
 ## Known deviations / intentional differences

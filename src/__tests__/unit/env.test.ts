@@ -575,4 +575,30 @@ describe('parseEnv', () => {
     const allWrites = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
     expect(allWrites).toContain('SETTLE_CAP_FAIL_MODE');
   });
+
+  // ── WKH-148 — OPERATOR_MIN_BALANCE_WEI (AC-4 / CD-3) ───────────────────────
+  it('T-ENV-OFL-1 (AC-4): OPERATOR_MIN_BALANCE_WEI defaults to 1e16 (0.01 token) when unset', () => {
+    const result = parseEnv({ NODE_ENV: 'test' });
+    expect(result.OPERATOR_MIN_BALANCE_WEI).toBe('10000000000000000');
+  });
+
+  it('T-ENV-OFL-2 (CD-3): OPERATOR_MIN_BALANCE_WEI override is honored', () => {
+    const result = parseEnv({ NODE_ENV: 'test', OPERATOR_MIN_BALANCE_WEI: '250000000000000000' });
+    expect(result.OPERATOR_MIN_BALANCE_WEI).toBe('250000000000000000');
+  });
+
+  it('T-ENV-OFL-3 (CD-8 defense): OPERATOR_MIN_BALANCE_WEI rejects non-numeric → exit 1', () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((_code?: number) => {
+      throw new Error('__exit__');
+    }) as never);
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    expect(() => parseEnv({ NODE_ENV: 'test', OPERATOR_MIN_BALANCE_WEI: '0.5' })).toThrow(
+      '__exit__',
+    );
+
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const allWrites = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(allWrites).toContain('OPERATOR_MIN_BALANCE_WEI');
+  });
 });

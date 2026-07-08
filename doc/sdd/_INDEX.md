@@ -25,6 +25,7 @@
 | 021 | 2026-06-10 | Kite testnet token metadata env-configurable (WFAC-12) | chain-config | QUALITY | DONE | feat/021-wfac-12-kite-testnet-token-config |
 | 022 | 2026-07-07 | [SUPERSEDED] Settle concurrency nonce mutex (WKH-154 phase 1) | bugfix | QUALITY | SUPERSEDED | — |
 | 023 | 2026-07-07 | Circuit breaker: transport vs business (WKH-154) | bugfix | QUALITY | DONE | fix/154-facilitator-cb-transport-vs-business |
+| 024 | 2026-07-07 | Error explícito OPERATOR_FUNDING_LOW en /settle (WKH-148) | bugfix+security | FAST+AR | in progress | fix/148-operator-funding-low |
 
 <!--
 Formato por entrada:
