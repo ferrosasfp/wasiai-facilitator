@@ -73,6 +73,9 @@ function makeMockClients(): {
 } {
   const operatorAccount = privateKeyToAccount(TEST_PRIVATE_KEY);
   const publicClient = {
+    // WKH-148 — healthy operator balance so the settle funding pre-check passes
+    // and the on-chain flow runs exactly as before (well above the 0.01 default).
+    getBalance: vi.fn(async () => 10n ** 20n),
     simulateContract: vi.fn(),
     waitForTransactionReceipt: vi.fn(),
   } as unknown as PublicClient;

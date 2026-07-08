@@ -183,6 +183,26 @@ export const EnvSchema = z
       .string()
       .regex(/^[1-9][0-9]*$/, { message: 'must be a positive uint256 decimal (no leading zero)' })
       .default('100000000000000000000'),
+    // WKH-148 — operator (relayer) native-balance floor for the /settle
+    // pre-check. When the operator wallet's native balance on a chain is below
+    // this many wei, /settle short-circuits to OPERATOR_FUNDING_LOW (503) BEFORE
+    // simulate/broadcast, instead of returning an opaque RPC "gas required
+    // exceeds allowance". Kept as a STRING (parsed to BigInt in base-adapter):
+    // the default 1e16 exceeds Number.MAX_SAFE_INTEGER, so z.coerce.number()
+    // would lose precision. Default 10000000000000000 = 0.01 token @ 18 decimals
+    // (all supported gas tokens — KITE/AVAX/ETH-Base — use 18 decimals, so one
+    // global wei threshold is comparable across chains; DT-5). A sane default
+    // means NO config is required to work exactly as today (CD-3). Same
+    // regex/string pattern as SETTLE_MAX_AMOUNT_ATOMIC (no leading zero).
+    // NIT-1 (WKH-148 CR): the adapter cannot import this default (OWNERS.md —
+    // `src/chains/*` may not import `src/infra/env.ts`), so the same literal
+    // lives in src/chains/base-adapter.ts as a BigInt. See that file for why a
+    // single shared constant is not achievable across the import boundary.
+    // keep in sync with: src/chains/base-adapter.ts → OPERATOR_MIN_BALANCE_WEI_DEFAULT (10_000_000_000_000_000n)
+    OPERATOR_MIN_BALANCE_WEI: z
+      .string()
+      .regex(/^[1-9][0-9]*$/, { message: 'must be a positive uint256 decimal (no leading zero)' })
+      .default('10000000000000000'),
     // Per-caller daily settle cap (WFAC-AUDIT M3) — a hard daily ceiling applied
     // PER API KEY to protect the operator wallet gas budget while preventing
     // cross-tenant DoS. The Redis counter is partitioned as

@@ -1213,4 +1213,34 @@ describe('POST /settle', () => {
     expect(Object.keys(body.error).sort()).toEqual(['code', 'http', 'message']);
     expect((body.error as { retryAfterMs?: unknown }).retryAfterMs).toBeUndefined();
   });
+
+  // ─── WKH-148 — OPERATOR_FUNDING_LOW route mapping (T-RT-SETTLE-OFL-*) ─────
+
+  it('T-RT-SETTLE-OFL-1 (AC-1): OPERATOR_FUNDING_LOW maps to HTTP 503 with a PII-free body', async () => {
+    const adapter = makeFakeAdapter(2368, async () => ({
+      ok: false as const,
+      error: {
+        code: 'OPERATOR_FUNDING_LOW' as const,
+        message: 'Settlement temporarily unavailable',
+        http: 503,
+      },
+    }));
+    app = await buildAppWithAdapter(adapter);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/settle',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify(VALID_BODY),
+    });
+    expect(res.statusCode).toBe(503);
+    const body = JSON.parse(res.body) as { error: Record<string, unknown> };
+    expect(body.error.code).toBe('OPERATOR_FUNDING_LOW');
+    expect(body.error.http).toBe(503);
+    // CD-4 — body carries exactly {code, message, http}; no address, no balance.
+    expect(Object.keys(body.error).sort()).toEqual(['code', 'http', 'message']);
+    expect(body.error.message).toBe('Settlement temporarily unavailable');
+    // Scope OUT — unlike CHAIN_UNAVAILABLE, funding-low has NO Retry-After.
+    expect(res.headers['retry-after']).toBeUndefined();
+  });
 });

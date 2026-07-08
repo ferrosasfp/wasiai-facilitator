@@ -29,8 +29,9 @@ import { HTTP_BY_CODE, DEFAULT_MESSAGE_BY_CODE, buildX402Error } from '../../../
 import type { X402ErrorCode } from '../../../core/types.js';
 
 // ---------------------------------------------------------------------------
-// Canonical inventory — the 11 codes (10 x402 spec + CHAIN_UNAVAILABLE WFAC-41),
-// mirrored from doc/architecture/X402-CONFORMANCE.md §"Standard error codes".
+// Canonical inventory — the 12 codes (10 x402 spec + CHAIN_UNAVAILABLE WFAC-41
+// + OPERATOR_FUNDING_LOW WKH-148), mirrored from
+// doc/architecture/X402-CONFORMANCE.md §"Standard error codes".
 // ---------------------------------------------------------------------------
 const CANONICAL: Array<{ code: X402ErrorCode; http: number }> = [
   { code: 'INVALID_SIGNATURE', http: 401 },
@@ -45,6 +46,8 @@ const CANONICAL: Array<{ code: X402ErrorCode; http: number }> = [
   { code: 'DELEGATION_INVALID', http: 401 },
   // WFAC-41 — circuit breaker open, HTTP 503.
   { code: 'CHAIN_UNAVAILABLE', http: 503 },
+  // WKH-148 — operator wallet underfunded (relayer out of gas), HTTP 503.
+  { code: 'OPERATOR_FUNDING_LOW', http: 503 },
 ];
 
 describe('core/errors — HTTP_BY_CODE (AC-4)', () => {
@@ -54,12 +57,16 @@ describe('core/errors — HTTP_BY_CODE (AC-4)', () => {
     }
   });
 
-  it('contains exactly 11 entries (spec-literal inventory + WFAC-41 CHAIN_UNAVAILABLE)', () => {
-    expect(Object.keys(HTTP_BY_CODE)).toHaveLength(11);
+  it('contains exactly 12 entries (spec-literal inventory + WFAC-41 CHAIN_UNAVAILABLE + WKH-148 OPERATOR_FUNDING_LOW)', () => {
+    expect(Object.keys(HTTP_BY_CODE)).toHaveLength(12);
   });
 
   it('WFAC-41 T-CB-HTTP-503: CHAIN_UNAVAILABLE maps to 503', () => {
     expect(HTTP_BY_CODE.CHAIN_UNAVAILABLE).toBe(503);
+  });
+
+  it('WKH-148 T-OFL-HTTP-503: OPERATOR_FUNDING_LOW maps to 503', () => {
+    expect(HTTP_BY_CODE.OPERATOR_FUNDING_LOW).toBe(503);
   });
 
   it('uses 401 for INVALID_SIGNATURE', () => {
@@ -94,12 +101,18 @@ describe('core/errors — HTTP_BY_CODE (AC-4)', () => {
 });
 
 describe('core/errors — DEFAULT_MESSAGE_BY_CODE (AC-5)', () => {
-  it('contains exactly 11 entries (exhaustive coverage)', () => {
-    expect(Object.keys(DEFAULT_MESSAGE_BY_CODE)).toHaveLength(11);
+  it('contains exactly 12 entries (exhaustive coverage)', () => {
+    expect(Object.keys(DEFAULT_MESSAGE_BY_CODE)).toHaveLength(12);
   });
 
   it('WFAC-41 T-CB-MSG: CHAIN_UNAVAILABLE default message is spec-literal', () => {
     expect(DEFAULT_MESSAGE_BY_CODE.CHAIN_UNAVAILABLE).toBe('Chain RPC temporarily unavailable');
+  });
+
+  it('WKH-148 T-OFL-MSG: OPERATOR_FUNDING_LOW default message is generic + PII-free', () => {
+    expect(DEFAULT_MESSAGE_BY_CODE.OPERATOR_FUNDING_LOW).toBe('Settlement temporarily unavailable');
+    // CD-4 — no address, no balance, no chain ID.
+    expect(DEFAULT_MESSAGE_BY_CODE.OPERATOR_FUNDING_LOW).not.toMatch(/0x[a-fA-F0-9]{8,}/);
   });
 
   it('has a non-empty, string default message for every canonical code', () => {

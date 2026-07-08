@@ -55,6 +55,9 @@ export const HTTP_BY_CODE: Record<X402ErrorCode, number> = {
   DELEGATION_INVALID: 401,
   // WFAC-41 — circuit breaker open: HTTP 503 Service Unavailable.
   CHAIN_UNAVAILABLE: 503,
+  // WKH-148 — operator wallet underfunded (relayer out of gas): HTTP 503.
+  // Transient + operator-actionable (refuel), same class as CHAIN_UNAVAILABLE.
+  OPERATOR_FUNDING_LOW: 503,
 };
 
 /**
@@ -81,6 +84,9 @@ export const DEFAULT_MESSAGE_BY_CODE: Record<X402ErrorCode, string> = {
   DELEGATION_INVALID: 'Delegation invalid',
   // WFAC-41 — circuit breaker open: transient RPC unreachability.
   CHAIN_UNAVAILABLE: 'Chain RPC temporarily unavailable',
+  // WKH-148 — operator underfunded. PII-free: NO address, NO balance, NO chain
+  // ID (those go to the server-side log only; CD-4). Generic + transient.
+  OPERATOR_FUNDING_LOW: 'Settlement temporarily unavailable',
 };
 
 /**

@@ -67,6 +67,43 @@ function sanitize(e: unknown): string {
   return raw.slice(0, 200);
 }
 
+/**
+ * WKH-148 — hardcoded default for OPERATOR_MIN_BALANCE_WEI: 0.01 native token
+ * @ 18 decimals (1e16 wei). Lets the settle pre-check work with zero config
+ * (CD-3).
+ *
+ * NIT-1 (WKH-148 CR): the literal is duplicated in `src/infra/env.ts` (the Zod
+ * `.default`). A single shared exported constant is NOT achievable here — per
+ * OWNERS.md an adapter (`src/chains/*`) may only import `src/chains/{types,abi}`
+ * + `src/infra/wallet.ts` + viem (it CANNOT import `src/infra/env.ts`), and
+ * `src/infra/*` may not import back from `src/chains/*`, so neither side can own
+ * a constant the other imports. This is the exact same duplication the sibling
+ * circuit-breaker defaults accept (CD-NEW-CB-HELPER-DEFAULTS). The two copies
+ * are pinned together by the reciprocal keep-in-sync marker below.
+ *
+ * keep in sync with: src/infra/env.ts → OPERATOR_MIN_BALANCE_WEI.default('10000000000000000')
+ */
+const OPERATOR_MIN_BALANCE_WEI_DEFAULT = 10_000_000_000_000_000n; // 1e16 = 0.01 token @ 18 decimals
+
+/**
+ * WKH-148 — read OPERATOR_MIN_BALANCE_WEI from the environment as a BigInt.
+ *
+ * Reads `process.env` directly (same pattern as `readCbNumber` for the circuit
+ * breaker) and falls back to the safe hardcoded default when unset or malformed
+ * (CD-3 — the settle pre-check requires no new config to work as today). Parsed
+ * as BigInt, NOT Number: the default (1e16) exceeds `Number.MAX_SAFE_INTEGER`,
+ * so a numeric coercion would silently lose precision. The regex guard mirrors
+ * the env.ts Zod schema (positive uint256 decimal, no leading zero) so
+ * `BigInt(raw)` never throws.
+ */
+function readOperatorMinBalanceWei(): bigint {
+  const raw = process.env['OPERATOR_MIN_BALANCE_WEI'];
+  if (raw === undefined || !/^[1-9][0-9]*$/.test(raw)) {
+    return OPERATOR_MIN_BALANCE_WEI_DEFAULT;
+  }
+  return BigInt(raw);
+}
+
 export interface BaseAdapterOpts {
   chainIdNum: number;
   name: string;
@@ -136,6 +173,19 @@ export abstract class BaseEip3009Adapter implements ChainAdapter {
   private _publicClient: PublicClient | null = null;
   private _walletClient: WalletClient | null = null;
   protected readonly _breaker: ChainCircuitBreaker;
+  /**
+   * WKH-148 — operator native-balance floor (wei) for the settle pre-check.
+   * Read once at construction from OPERATOR_MIN_BALANCE_WEI (or the safe
+   * default). BigInt so 1e16+ thresholds keep full precision.
+   */
+  protected readonly _operatorMinBalanceWei: bigint;
+  /**
+   * WKH-148 — app logger, injected lazily via `setLogger()` from
+   * `initChainBreakers()` (same call that wires the breaker logger). Used to
+   * emit the actionable (address+balance+chain) OPERATOR_FUNDING_LOW warning
+   * server-side; the HTTP body stays PII-free (CD-4). Null until injected.
+   */
+  private _logger: Logger | null = null;
 
   constructor(opts: BaseAdapterOpts) {
     this._rpcUrl = opts.rpcUrl;
@@ -169,6 +219,9 @@ export abstract class BaseEip3009Adapter implements ChainAdapter {
       resetTimeoutMs: readCbNumber('CB_RESET_TIMEOUT_MS', 10000),
       enabled: readCbBool('CB_ENABLED', true),
     });
+
+    // WKH-148 — resolve the operator native-balance floor once at construction.
+    this._operatorMinBalanceWei = readOperatorMinBalanceWei();
   }
 
   /**
@@ -217,6 +270,9 @@ export abstract class BaseEip3009Adapter implements ChainAdapter {
 
   setLogger(logger: Logger): void {
     this._breaker.setLogger(logger);
+    // WKH-148 — also retain the app logger for the settle funding pre-check
+    // (AC-2). Same injection point as the breaker logger (initChainBreakers).
+    this._logger = logger;
   }
 
   getBreakerState(): BreakerStateName | undefined {
@@ -604,6 +660,57 @@ export abstract class BaseEip3009Adapter implements ChainAdapter {
     }
     const { r, s } = sig;
     const vNum = Number(sig.v); // 27 or 28
+
+    // 2b (WKH-148). Operator funding pre-check — READ-ONLY (CD-2). Runs AFTER
+    // the off-chain validations and BEFORE `runExclusive`/`simulateContract`
+    // (DT-1): if the relayer wallet is out of native gas the settle CANNOT
+    // succeed, so reject it with an explicit OPERATOR_FUNDING_LOW (503) instead
+    // of the opaque RPC "gas required exceeds allowance", WITHOUT acquiring the
+    // per-chain mutex or paying for a failed simulate. Only `getBalance` — never
+    // a write, tx or movement of funds. Reuses `getOperatorAccount().address`
+    // (DT-2 — avoids the `Account | undefined` gap on `walletClient.account`).
+    const operatorAddress = getOperatorAccount().address;
+    let operatorBalanceWei: bigint;
+    try {
+      operatorBalanceWei = await this.getPublicClient().getBalance({ address: operatorAddress });
+    } catch (e) {
+      // DT-6 / CD-6 — a real getBalance RPC failure is NOT funding-low. Mirror
+      // the simulate/write catches EXACTLY: build a SIMULATION_FAILED result and
+      // tag it business ONLY when `classifyChainError` says so. A transport
+      // outage stays untagged so the settle() wrapper counts it toward the
+      // circuit breaker (WKH-154 invariant preserved — no new classifier
+      // category, CD-6). We never assume funding-low on a read failure.
+      const result: AdapterResult<SettleResult> = {
+        ok: false,
+        error: { code: 'SIMULATION_FAILED', message: sanitize(e), http: 500 },
+      };
+      if (classifyChainError(e) === 'business') tagBusiness(result);
+      return result;
+    }
+    if (operatorBalanceWei < this._operatorMinBalanceWei) {
+      // AC-2 — the actionable detail (chain + operator address + balance vs
+      // threshold) goes to the SERVER LOG only. The HTTP body stays PII-free
+      // (CD-4): the default message carries no address/balance/chain ID.
+      this._logger?.warn(
+        {
+          event: 'operator_funding_low',
+          chainId: this.metadata.chainId as number,
+          operator: operatorAddress,
+          balanceWei: operatorBalanceWei.toString(),
+          thresholdWei: this._operatorMinBalanceWei.toString(),
+        },
+        'operator native balance below OPERATOR_MIN_BALANCE_WEI — settle blocked, refuel gas',
+      );
+      return {
+        ok: false,
+        error: {
+          code: 'OPERATOR_FUNDING_LOW',
+          // PII-free (CD-4); mirrors DEFAULT_MESSAGE_BY_CODE.OPERATOR_FUNDING_LOW.
+          message: 'Settlement temporarily unavailable',
+          http: 503,
+        },
+      };
+    }
 
     // 3-7. On-chain section — simulate → write → wait → status → success.
     //

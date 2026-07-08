@@ -67,6 +67,9 @@ function makeNonceTrackingClients(state: { pendingNonce: number; usedNonces: num
 } {
   const operatorAccount = privateKeyToAccount(TEST_PRIVATE_KEY);
   const publicClient = {
+    // WKH-148 — healthy operator balance so the funding pre-check passes and the
+    // nonce-serialization behavior of the on-chain path is unchanged.
+    getBalance: vi.fn(async () => 10n ** 20n),
     simulateContract: vi.fn(async () => {
       // Snapshot the nonce the broadcast WOULD use right now.
       const nonce = state.pendingNonce;
