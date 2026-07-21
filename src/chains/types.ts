@@ -55,6 +55,8 @@ export interface ChainMetadata {
     readonly decimals: number;
   };
   readonly tokens: readonly EIP3009Token[];
+  /** WKH-204 — optional per-adapter method override; falls back to CHAIN_METHODS_DEFAULT. */
+  readonly supportedMethods?: readonly string[];
 }
 
 // --- x402 spec shapes (DT-2 of SDD: direct, no wrappers) ---
@@ -125,12 +127,17 @@ export interface SettleResult {
  */
 export type AdapterResult<T extends object> = Result<T>;
 
-export interface ChainAdapter {
+/**
+ * WKH-204 (AC-4) — verify-only settlement contract. Money-moving methods that
+ * do NOT require viem clients (getPublicClient/getWalletClient). Non-EVM rails
+ * (Solana) auto-broadcast from the client wallet and have no operator broadcast
+ * wallet in the EVM sense. This HU defines/types the interface; it does NOT
+ * implement a real non-EVM adapter (CD-3).
+ */
+export interface SettlementAdapter {
   readonly metadata: ChainMetadata;
   verify(params: VerifyParams): Promise<AdapterResult<VerifyResult>>;
   settle(params: SettleParams): Promise<AdapterResult<SettleResult>>;
-  getPublicClient(): PublicClient;
-  getWalletClient(): WalletClient;
   /**
    * WFAC-41 — optional introspection: current circuit breaker state for
    * this chain. Adapters that wrap verify/settle with ChainCircuitBreaker
@@ -151,6 +158,11 @@ export interface ChainAdapter {
    * forward the call to `breaker.setLogger(logger)`.
    */
   setLogger?(logger: Logger): void;
+}
+
+export interface ChainAdapter extends SettlementAdapter {
+  getPublicClient(): PublicClient;
+  getWalletClient(): WalletClient;
 }
 
 export type RegisterResult =

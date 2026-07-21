@@ -99,6 +99,35 @@ adapters hagan EIP-712 recovery inline.
 
 Origen: **WFAC-50** (DT-A + DT-K).
 
+### [4] Excepción documentada: refactor namespace-agnóstico de `core/` (WKH-204 / HU-SOL-2)
+
+La regla #1 de boundary ("si tenés que tocar `src/core/` para soportar la chain,
+parar y reevaluar") tiene una **excepción explícita y única**: el refactor
+namespace-agnóstico de WKH-204, que generalizó el core de **EVM-only**
+(keyed por `chainId` numérico) a **multi-red por namespace** (`eip155:` |
+`solana:` | futuros). Este refactor era estructural (fundación de abstracción),
+no "soporte de una chain concreta".
+
+- **Cambio de KEY**: la clave interna de `ChainRegistry` ahora es
+  `networkId: string` (`"eip155:<chainId>"`, `"solana:devnet"`, …), NO
+  `ChainId` numérico. `getAdapterByNetworkId(networkId)` es el lookup primario;
+  `getAdapter(chainId)` quedó como wrapper O(1) EVM (`eip155:${chainId}` +
+  `Map.get`) que preserva su contrato byte-idéntico.
+- **Dispatch por namespace**: `core/verify.ts` y `core/settle.ts` anteponen una
+  rama `solana:` (cluster `devnet`/`mainnet`) ANTES del cuerpo eip155 —
+  textualmente intacto. Cluster inválido → `NETWORK_MISMATCH` (400); namespace
+  válido sin adapter → `CHAIN_UNAVAILABLE` (503). NO se agregó ningún valor
+  nuevo a `X402ErrorCode`.
+- **Contrato de adapter**: se extrajo `SettlementAdapter` (verify-only, sin
+  viem clients) y `ChainAdapter extends SettlementAdapter` (parte EVM viem).
+
+**Regla para agregar una red NO-EVM a futuro** (post-WKH-204): sigue siendo
+1 archivo `src/chains/<red>.ts` + 1 línea en `registry.ts` con su
+`metadata.networkId` — **SIN volver a tocar `core/`**. La abstracción de
+namespace ya vive en el core; el core no se re-modifica por red.
+
+Origen: **WKH-204 / HU-SOL-2**.
+
 ---
 
 ## Reglas de boundary

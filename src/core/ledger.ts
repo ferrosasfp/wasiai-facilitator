@@ -73,7 +73,11 @@ export interface BuildLedgerEntryInput {
       readonly amount: string;
     };
     readonly payload: {
-      readonly authorization: { readonly from: string };
+      // WKH-204 (addendum 025-A): optional to accept the union VerifyRequest
+      // (the non-eip3009 branch does not guarantee authorization). For every
+      // eip3009 payload (the real ones in this HU) authorization.from is
+      // present → payer byte-identical.
+      readonly authorization?: { readonly from: string };
     };
   };
   readonly result:
@@ -134,7 +138,11 @@ export function buildLedgerEntry(input: BuildLedgerEntryInput): LedgerEntry {
     method: input.method,
     asset: input.parsed.accepted.asset,
     amount: input.parsed.accepted.amount, // CD-17: already string
-    payer: input.parsed.payload.authorization.from,
+    // WKH-204 (CD-10): fail-closed guard for the widened optional. A payload
+    // without `authorization` (unreachable this HU — no solana adapter) yields
+    // payer '' (satisfies `payer TEXT NOT NULL`) instead of crashing; never
+    // invents a payer. For every eip3009 payload authorization.from exists.
+    payer: input.parsed.payload.authorization?.from ?? '',
     payee: input.parsed.accepted.payTo,
     error_code: input.result.error.code,
     error_http: input.result.error.http,

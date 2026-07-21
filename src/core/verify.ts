@@ -40,6 +40,29 @@ const EIP155_RE = /^eip155:([1-9]\d*)$/u;
 const MAX_CHAINID_DIGITS = 16;
 
 export async function verifyCore(parsed: VerifyRequest): Promise<Result<VerifyResult>> {
+  // WKH-204 — namespace dispatch. Non-eip155 rails route here BEFORE the EVM body.
+  const network = parsed.accepted.network;
+  const namespace = network.substring(0, network.indexOf(':'));
+  if (namespace === 'solana') {
+    if (!/^solana:(devnet|mainnet)$/u.test(network)) {
+      return {
+        ok: false,
+        error: buildX402Error('NETWORK_MISMATCH', 'network must be solana:<devnet|mainnet>'),
+      };
+    }
+    const lookup = chainRegistry.getAdapterByNetworkId(network);
+    if (!lookup.ok) {
+      return {
+        ok: false,
+        error: buildX402Error(
+          'CHAIN_UNAVAILABLE',
+          'Network namespace recognized but no adapter registered',
+        ),
+      };
+    }
+    return lookup.adapter.verify(parsed as unknown as VerifyParams);
+  }
+
   // Step 1 — parse network string.
   const m = EIP155_RE.exec(parsed.accepted.network);
   // The regex is anchored and has a single capturing group that always

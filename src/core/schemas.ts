@@ -84,18 +84,63 @@ export const PayloadSchema = z
   .strict();
 
 /**
- * Top-level x402 POST /verify request body.
+ * Top-level x402 POST /verify request body — WKH-204 namespace union.
  * CD-8: x402Version uses z.literal(2) (not z.number()) so any other value
  * fails fast at the Zod gate.
+ *
+ * The body is a `z.union` (NOT z.discriminatedUnion: the discriminant
+ * `assetTransferMethod` lives nested inside `accepted.extra`) of two branches:
+ *   - Eip3009RequestSchema    — byte-identical to the pre-WKH-204 schema.
+ *   - NonEip3009RequestSchema — permit2/erc7710 placeholder with a permissive,
+ *     minimally-typed payload (NOT the final Solana shape — CD-3).
  */
-export const VerifyRequestSchema = z
+
+// Branch eip3009 — BYTE-IDENTICAL to the prior schema (literal + strict PayloadSchema).
+const Eip3009RequestSchema = z
   .object({
     x402Version: z.literal(2),
     resource: ResourceSchema,
-    accepted: AcceptedSchema,
+    accepted: AcceptedSchema.extend({
+      extra: AcceptedExtraSchema.extend({ assetTransferMethod: z.literal('eip3009') }),
+    }),
     payload: PayloadSchema,
   })
   .strict();
+
+// Payload placeholder no-eip3009: typed by what the core LAYER READS
+// (authorization.from → ledger, authorization.value → cap-check), permissive
+// via passthrough. NOT the final Solana shape (CD-3). NOT z.record (CD-11):
+// a record/passthrough-without-authorization reintroduces an index-signature
+// that breaks the `in` narrowing of the cap-check (TS18046).
+const NonEip3009PayloadSchema = z
+  .object({
+    signature: z
+      .string()
+      .regex(/^0x[0-9a-fA-F]+$/u)
+      .optional(),
+    // authorization optional; `from`+`value` are the only fields core reads.
+    // `.passthrough()` tolerates the eip3009 extra fields
+    // (to/validAfter/validBefore/nonce) that T-V10/T-C5 inject when reusing
+    // VALID_BODY.payload, and future non-EVM fields.
+    authorization: z
+      .object({ from: AddressHexSchema, value: Uint256StringSchema })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+
+const NonEip3009RequestSchema = z
+  .object({
+    x402Version: z.literal(2),
+    resource: ResourceSchema,
+    accepted: AcceptedSchema.extend({
+      extra: AcceptedExtraSchema.extend({ assetTransferMethod: z.enum(['permit2', 'erc7710']) }),
+    }),
+    payload: NonEip3009PayloadSchema,
+  })
+  .strict();
+
+export const VerifyRequestSchema = z.union([Eip3009RequestSchema, NonEip3009RequestSchema]);
 
 export type VerifyRequest = z.infer<typeof VerifyRequestSchema>;
 

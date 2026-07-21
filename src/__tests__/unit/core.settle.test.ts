@@ -24,7 +24,15 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { settleCore } from '../../core/settle.js';
 import { chainRegistry } from '../../chains/registry.js';
 import { asChainId } from '../../core/types.js';
-import type { ChainAdapter, SettleParams } from '../../chains/types.js';
+import type {
+  ChainAdapter,
+  SettleParams,
+  SettlementAdapter,
+  VerifyParams,
+  VerifyResult,
+  SettleResult,
+  AdapterResult,
+} from '../../chains/types.js';
 import type { VerifyRequest } from '../../core/schemas.js';
 
 // ─── fixtures ──────────────────────────────────────────────────────────────
@@ -367,5 +375,85 @@ describe('settleCore (WFAC-21 W1)', () => {
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.code).toBe('INVALID_AMOUNT');
     expect(settleSpy).not.toHaveBeenCalled();
+  });
+
+  // ─── WKH-204 (AC-3) — solana namespace dispatch (mirror of verify) ────────
+  it('AC-3: solana:devnet with no registered adapter → CHAIN_UNAVAILABLE http 503', async () => {
+    const body: VerifyRequest = {
+      ...VALID_BODY,
+      accepted: { ...VALID_BODY.accepted, network: 'solana:devnet' },
+    };
+    const res = await settleCore(body);
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.error.code).toBe('CHAIN_UNAVAILABLE');
+      expect(res.error.http).toBe(503);
+      expect(res.error.message).toContain('no adapter registered');
+    }
+  });
+
+  it('AC-3: solana:mainnet with no registered adapter → CHAIN_UNAVAILABLE http 503', async () => {
+    const body: VerifyRequest = {
+      ...VALID_BODY,
+      accepted: { ...VALID_BODY.accepted, network: 'solana:mainnet' },
+    };
+    const res = await settleCore(body);
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.error.code).toBe('CHAIN_UNAVAILABLE');
+      expect(res.error.http).toBe(503);
+    }
+  });
+
+  it('AC-3: solana:foo (invalid cluster) → NETWORK_MISMATCH http 400', async () => {
+    const body: VerifyRequest = {
+      ...VALID_BODY,
+      accepted: { ...VALID_BODY.accepted, network: 'solana:foo' },
+    };
+    const res = await settleCore(body);
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.error.code).toBe('NETWORK_MISMATCH');
+      expect(res.error.http).toBe(400);
+    }
+  });
+});
+
+// ─── WKH-204 (AC-4) — SettlementAdapter verify-only contract (type test) ─────
+describe('SettlementAdapter (AC-4)', () => {
+  it('an object with only metadata + verify + settle is assignable (no viem clients)', () => {
+    // Compile-time assertion: SettlementAdapter does NOT require
+    // getPublicClient/getWalletClient. If this stops compiling, the AC-4
+    // contract regressed.
+    const verifyOnly: SettlementAdapter = {
+      metadata: {
+        chainId: asChainId(2368),
+        name: 'settlement-only',
+        network: 'testnet',
+        networkId: 'eip155:2368',
+        rpcUrl: 'http://localhost',
+        nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+        tokens: [],
+      },
+      verify: (_params: VerifyParams): Promise<AdapterResult<VerifyResult>> =>
+        Promise.resolve({
+          ok: false,
+          error: { code: 'CHAIN_UNAVAILABLE', message: 'stub', http: 503 },
+        }),
+      settle: (_params: SettleParams): Promise<AdapterResult<SettleResult>> =>
+        Promise.resolve({
+          ok: false,
+          error: { code: 'CHAIN_UNAVAILABLE', message: 'stub', http: 503 },
+        }),
+    };
+    expect(typeof verifyOnly.verify).toBe('function');
+    expect(typeof verifyOnly.settle).toBe('function');
+    expect('getPublicClient' in verifyOnly).toBe(false);
+
+    // Compile-time assertion: ChainAdapter extends SettlementAdapter — a
+    // full EVM adapter is assignable to the narrower interface.
+    const full = makeFakeAdapter(2368, async () => VALID_SETTLE_RESULT);
+    const asSettlement: SettlementAdapter = full;
+    expect(asSettlement.metadata.networkId).toBe('eip155:2368');
   });
 });

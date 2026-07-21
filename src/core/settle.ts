@@ -37,6 +37,29 @@ export async function settleCore(
   parsed: VerifyRequest, // alias by value: SettleRequest (SDD §DT-1)
   options?: { maxAmountAtomic?: string },
 ): Promise<Result<SettleResult>> {
+  // WKH-204 — namespace dispatch (mirror of verify.ts).
+  const network = parsed.accepted.network;
+  const namespace = network.substring(0, network.indexOf(':'));
+  if (namespace === 'solana') {
+    if (!/^solana:(devnet|mainnet)$/u.test(network)) {
+      return {
+        ok: false,
+        error: buildX402Error('NETWORK_MISMATCH', 'network must be solana:<devnet|mainnet>'),
+      };
+    }
+    const lookup = chainRegistry.getAdapterByNetworkId(network);
+    if (!lookup.ok) {
+      return {
+        ok: false,
+        error: buildX402Error(
+          'CHAIN_UNAVAILABLE',
+          'Network namespace recognized but no adapter registered',
+        ),
+      };
+    }
+    return lookup.adapter.settle(parsed as unknown as SettleParams);
+  }
+
   // Step 0 — per-request amount cap (anti-abuse, public sharing hardening).
   // Rejects settles above the configured maximum BEFORE hitting the chain.
   //
@@ -49,7 +72,11 @@ export async function settleCore(
   // and the facilitator would liquidate that large `value`. Capping `value`
   // (>= accepted by the invariant) closes that hole; for a legitimate settle
   // where `value === accepted`, this is identical to the previous behavior.
-  if (options?.maxAmountAtomic !== undefined) {
+  if (
+    options?.maxAmountAtomic !== undefined &&
+    'authorization' in parsed.payload &&
+    parsed.payload.authorization !== undefined
+  ) {
     const capCheck = checkSettleAmountCap(
       parsed.payload.authorization.value,
       options.maxAmountAtomic,
