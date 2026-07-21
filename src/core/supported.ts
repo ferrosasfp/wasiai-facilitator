@@ -88,7 +88,7 @@ export function getSupportedResponse(): SupportedResponse {
     return {
       network: meta.networkId,
       name: meta.name,
-      methods: [...CHAIN_METHODS_DEFAULT],
+      methods: [...(meta.supportedMethods ?? CHAIN_METHODS_DEFAULT)],
       ...(state !== undefined ? { breakerState: state } : {}),
     };
   });

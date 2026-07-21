@@ -25,7 +25,7 @@ import type { ChainAdapter, ChainMetadata, RegisterResult } from './types.js';
 import type { ChainId } from '../core/types.js';
 
 export class ChainRegistry {
-  private readonly _adapters = new Map<ChainId, ChainAdapter>();
+  private readonly _adapters = new Map<string, ChainAdapter>();
   private _logger: Logger | undefined;
 
   setLogger(logger: Logger): void {
@@ -46,8 +46,9 @@ export class ChainRegistry {
     }
 
     const chainId = adapter.metadata.chainId;
+    const networkId = adapter.metadata.networkId;
 
-    if (this._adapters.has(chainId)) {
+    if (this._adapters.has(networkId)) {
       return {
         ok: false,
         error: {
@@ -58,9 +59,33 @@ export class ChainRegistry {
       };
     }
 
-    this._adapters.set(chainId, adapter);
+    this._adapters.set(networkId, adapter);
     this._logger?.info({ chainId, name: adapter.metadata.name }, 'Chain adapter registered');
     return { ok: true, chainId };
+  }
+
+  getAdapterByNetworkId(networkId: string):
+    | { readonly ok: true; readonly adapter: ChainAdapter }
+    | {
+        readonly ok: false;
+        readonly error: {
+          readonly code: 'NETWORK_MISMATCH';
+          readonly message: string;
+          readonly http: number;
+        };
+      } {
+    const adapter = this._adapters.get(networkId);
+    if (!adapter) {
+      return {
+        ok: false,
+        error: {
+          code: 'NETWORK_MISMATCH',
+          message: `Network not registered: ${networkId}`,
+          http: 400,
+        },
+      };
+    }
+    return { ok: true, adapter };
   }
 
   getAdapter(chainId: ChainId):
@@ -73,8 +98,8 @@ export class ChainRegistry {
           readonly http: number;
         };
       } {
-    const adapter = this._adapters.get(chainId);
-    if (!adapter) {
+    const lookup = this.getAdapterByNetworkId(`eip155:${chainId}`);
+    if (!lookup.ok) {
       return {
         ok: false,
         error: {
@@ -84,7 +109,7 @@ export class ChainRegistry {
         },
       };
     }
-    return { ok: true, adapter };
+    return lookup;
   }
 
   listAdapters(): readonly ChainMetadata[] {
@@ -96,7 +121,11 @@ export class ChainRegistry {
   }
 
   getSupportedChainIds(): readonly ChainId[] {
-    return Array.from(this._adapters.keys());
+    const out: ChainId[] = [];
+    for (const adapter of this._adapters.values()) {
+      out.push(adapter.metadata.chainId);
+    }
+    return out;
   }
 
   /**

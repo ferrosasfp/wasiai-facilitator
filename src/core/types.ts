@@ -30,6 +30,12 @@ export function asChainId(n: number): ChainId {
   return n as ChainId;
 }
 
+/** Network namespace prefix (before the first ':' in a networkId). */
+export type NetworkNamespace = 'eip155' | 'solana';
+
+/** Full network identifier string, e.g. "eip155:2368" | "solana:devnet". */
+export type NetworkId = string;
+
 export type X402ErrorCode =
   | 'INVALID_SIGNATURE'
   | 'INSUFFICIENT_BALANCE'

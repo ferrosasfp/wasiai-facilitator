@@ -1,0 +1,12 @@
+# Auto-Blindaje — HU-SOL-2 / WKH-204 (F3)
+
+### [2026-07-21] Wave 3 — La union del schema (W3.1/AC-5) rompe `routes/settle.ts` (CD-2) vía `buildLedgerEntry`
+
+- **Error**: implementé W3.1 tal cual el Story File (`VerifyRequestSchema = z.union([Eip3009RequestSchema, NonEip3009RequestSchema])` con `NonEip3009` payload `z.record(z.string(), z.unknown())`). `npm run typecheck` falló con 4 errores: uno esperado en `src/core/settle.ts:77` (cap check, in-scope) y **tres NO esperados en `src/routes/settle.ts:288/340/382`** (fuera de scope, CD-2 PROHIBIDO).
+- **Causa raíz**: `type VerifyRequest = z.infer<union>` se propaga por el alias `SettleRequest` hasta `routes/settle.ts`, que pasa el `parsed` (la union completa) a `buildLedgerEntry({ parsed, ... })`. La firma `BuildLedgerEntryInput.parsed.payload` (en `src/core/ledger.ts:64-78`) exige `authorization: { from: string }` en **TODOS** los miembros de la union. El branch `NonEip3009` con payload `Record<string, unknown>` no lo garantiza → no asignable. El Story File §W3.1 afirmó "única ripple es el cap check de settle.ts" — **esa afirmación es falsa**: `buildLedgerEntry` es una segunda ripple, y cae en un archivo prohibido por CD-2.
+- **Conflicto de constraints**: hacer typecheck-green requiere una de tres cosas, todas vetadas o rompedoras:
+  1. Editar `src/routes/settle.ts` → **viola CD-2** (PROHIBIDO routes/*).
+  2. Editar `src/core/ledger.ts` (`BuildLedgerEntryInput` + guard en línea 137) → **fuera del Scope IN exhaustivo** (8 archivos, ledger.ts no listado) + es cambio money-adjacent que necesita AR.
+  3. Hacer el payload `NonEip3009` estructuralmente con `authorization.from` → **rompe AC-5** ("Body método permit2 con payload no-eip3009 valida OK") + contradice el snippet literal del Story File.
+- **Fix (provisional)**: revertí SOLO W3.1 (schema vuelve al objeto único original). El resto de la HU (W0/W1/W2/W3.2/W4.1 + tests AC-3/AC-4/AC-6) queda implementado y verde (843 tests). **W3.1 + AC-5 quedan ESCALADOS al orquestador/Architect** — no inventé una resolución que viole CD-2 ni redefina AC-5.
+- **Aplicar en**: cualquier futura generalización de `VerifyRequestSchema` a union DEBE auditar TODOS los consumidores del tipo inferido (`routes/settle.ts` → `buildLedgerEntry`, `buildSettleIdempotencyKey`, `toCacheableSettle`; `routes/verify.ts` → `buildIdempotencyKey`), no solo el cap check. El Scope IN del Story File debe incluir `src/core/ledger.ts` o el Architect debe decidir la vía (widen `BuildLedgerEntryInput` en core/ledger.ts vs narrowing en routes).

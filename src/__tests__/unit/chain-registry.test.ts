@@ -89,6 +89,38 @@ describe('ChainRegistry', () => {
     });
   });
 
+  describe('getAdapterByNetworkId() (WKH-204 AC-6)', () => {
+    it('AC-6: hit by networkId returns the same adapter as getAdapter(chainId)', () => {
+      const adapter = makeMockAdapter(2368);
+      registry.register(adapter);
+
+      const byNetwork = registry.getAdapterByNetworkId('eip155:2368');
+      const byChain = registry.getAdapter(asChainId(2368));
+
+      expect(byNetwork.ok).toBe(true);
+      expect(byChain.ok).toBe(true);
+      if (byNetwork.ok && byChain.ok) {
+        expect(byNetwork.adapter).toBe(adapter);
+        expect(byNetwork.adapter).toBe(byChain.adapter);
+      }
+    });
+
+    it('AC-6: registration is keyed by networkId', () => {
+      registry.register(makeMockAdapter(43113));
+      const lookup = registry.getAdapterByNetworkId('eip155:43113');
+      expect(lookup.ok).toBe(true);
+    });
+
+    it('AC-6: miss returns NETWORK_MISMATCH + http 400 (never throws)', () => {
+      const lookup = registry.getAdapterByNetworkId('solana:devnet');
+      expect(lookup.ok).toBe(false);
+      if (!lookup.ok) {
+        expect(lookup.error.code).toBe('NETWORK_MISMATCH');
+        expect(lookup.error.http).toBe(400);
+      }
+    });
+  });
+
   describe('listAdapters()', () => {
     it('AC-2: returns array of metadata with no duplicate chainIds', () => {
       registry.register(makeMockAdapter(2368));

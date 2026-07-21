@@ -281,4 +281,45 @@ describe('verifyCore', () => {
       expect(r.network).toBe('eip155:2368');
     }
   });
+
+  // ─── WKH-204 (AC-3) — solana namespace dispatch ──────────────────────────
+  it('AC-3: solana:devnet with no registered adapter → CHAIN_UNAVAILABLE http 503', async () => {
+    const body: VerifyRequest = {
+      ...VALID_BODY,
+      accepted: { ...VALID_BODY.accepted, network: 'solana:devnet' },
+    };
+    const res = await verifyCore(body);
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.error.code).toBe('CHAIN_UNAVAILABLE');
+      expect(res.error.http).toBe(503);
+      expect(res.error.message).toContain('no adapter registered');
+    }
+  });
+
+  it('AC-3: solana:mainnet with no registered adapter → CHAIN_UNAVAILABLE http 503', async () => {
+    const body: VerifyRequest = {
+      ...VALID_BODY,
+      accepted: { ...VALID_BODY.accepted, network: 'solana:mainnet' },
+    };
+    const res = await verifyCore(body);
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.error.code).toBe('CHAIN_UNAVAILABLE');
+      expect(res.error.http).toBe(503);
+    }
+  });
+
+  it('AC-3: solana:foo (invalid cluster) → NETWORK_MISMATCH http 400', async () => {
+    const body: VerifyRequest = {
+      ...VALID_BODY,
+      accepted: { ...VALID_BODY.accepted, network: 'solana:foo' },
+    };
+    const res = await verifyCore(body);
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.error.code).toBe('NETWORK_MISMATCH');
+      expect(res.error.http).toBe(400);
+    }
+  });
 });
