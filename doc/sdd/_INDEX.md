@@ -26,7 +26,7 @@
 | 022 | 2026-07-07 | [SUPERSEDED] Settle concurrency nonce mutex (WKH-154 phase 1) | bugfix | QUALITY | SUPERSEDED | — |
 | 023 | 2026-07-07 | Circuit breaker: transport vs business (WKH-154) | bugfix | QUALITY | DONE | fix/154-facilitator-cb-transport-vs-business |
 | 024 | 2026-07-07 | Error explícito OPERATOR_FUNDING_LOW en /settle (WKH-148) | bugfix+security | FAST+AR | in progress | fix/148-operator-funding-low |
-| 025 | 2026-07-20 | Facilitator multi-red: generalizar dispatch EVM-only → orquestador por namespace (WKH-204 / HU-SOL-2, alias interno HU-SOL-F1 / WFAC-TBD) | architecture | QUALITY | in progress | feat/025-hu-sol-f1-facilitator-multichain |
+| 025 | 2026-07-21 | Facilitator multi-red: generalizar dispatch EVM-only → orquestador por namespace (WKH-204 / HU-SOL-2) | architecture | QUALITY | DONE (HELD — no merge; prod/Railway) | feat/025-hu-sol-f1-facilitator-multichain (50922c4) |
 
 <!--
 Formato por entrada:
