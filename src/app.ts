@@ -25,6 +25,11 @@ import { metricsRoute } from './routes/metrics.js';
 // EVM/testnet boot runs byte-identically and POST /solana/sponsor 404s (CD-13).
 import { solanaSponsorRoute } from './routes/solana-sponsor.js';
 import { isSponsorEnabled } from './infra/solana-fee-payer.js';
+// WKH-216 / HU-SOL-13 (Wave 13c) — Solana escrow release (opt-in-off). Registered
+// ONLY when isReleaseEnabled() (flag + parseable release-authority key); otherwise
+// the EVM boot is byte-identical and POST /solana/escrow/release 404s (CD-5, TF8).
+import { solanaEscrowReleaseRoute } from './routes/solana-escrow.js';
+import { isReleaseEnabled } from './infra/solana-release-authority.js';
 import { initChainBreakers } from './chains/init-breakers.js';
 import { initDomainCheck } from './chains/init-domain-check.js';
 // Side-effect import: registers built-in chain adapters (kite, avalanche) in chainRegistry.
@@ -399,6 +404,11 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   // route is not registered and POST /solana/sponsor 404s naturally (CD-13, AC-9).
   if (isSponsorEnabled()) {
     await app.register(solanaSponsorRoute);
+  }
+  // WKH-216 / HU-SOL-13 — opt-in-off: register the escrow release route ONLY when
+  // the release-authority flag is on AND the key is present+parseable (CD-5, TF8).
+  if (isReleaseEnabled()) {
+    await app.register(solanaEscrowReleaseRoute);
   }
   await app.register(supportedRoute);
   await app.register(openapiRoute);

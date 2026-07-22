@@ -22,6 +22,7 @@
     "qa": "npm run typecheck && npm run lint && npm run format:check && npm run test"
   },
   "dependencies": {
+    "@coral-xyz/anchor": "0.30.1",
     "@fastify/cors": "^11.2.0",
     "@fastify/helmet": "^13.0.0",
     "@fastify/rate-limit": "^10.3.0",
