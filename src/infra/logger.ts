@@ -37,6 +37,12 @@ const REDACT_FIELDS: readonly string[] = [
   'serviceKey',
   'service_key',
   'SUPABASE_SERVICE_KEY',
+  // WKH-217 / HU-SOL-14 — Solana fee-payer signing key + PoP HMAC secret (AC-10).
+  'SOLANA_FEE_PAYER_PRIVATE_KEY',
+  'feePayerPrivateKey',
+  'SOLANA_SPONSOR_POP_SECRET',
+  'popProof',
+  'partialSignedTx',
   'secret',
   'token',
   'password',

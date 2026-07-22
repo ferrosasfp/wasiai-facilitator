@@ -185,6 +185,51 @@ export const EnvSchema = z
       // eslint-disable-next-line no-secrets/no-secrets -- public on-chain SPL Token program id (base58 pubkey), not a secret.
       .default('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'), // SPL Token classic
 
+    // WKH-217 / HU-SOL-14 — Solana fee-payer sponsorship (opt-in-off). ALL of
+    // these are optional/defaulted and live OUTSIDE `.superRefine`, so an unset
+    // config keeps the EVM/testnet-only boot byte-identical (CD-13, AC-9). The
+    // sponsorship route is registered only when SOLANA_FEE_PAYER_SPONSOR_ENABLED
+    // is 'true' AND SOLANA_FEE_PAYER_PRIVATE_KEY is present+parseable (opt-in).
+    //
+    // SECURITY: SOLANA_FEE_PAYER_PRIVATE_KEY (JSON byte-array of 64) is a SECRET.
+    // Its FORM is validated in src/infra/solana-fee-payer.ts (not here), and it
+    // is NEVER logged (AC-10) — the pino redaction list in src/infra/logger.ts
+    // masks it defensively.
+    SOLANA_FEE_PAYER_PRIVATE_KEY: z.string().min(1).optional(),
+    // Flag OFF by default (CD-10/CD-13). Enum-transform (NOT z.coerce.boolean(),
+    // which would read 'false' as truthy — same pattern as RATE_LIMIT_ENABLED).
+    SOLANA_FEE_PAYER_SPONSOR_ENABLED: z
+      .enum(['true', 'false'])
+      .default('false')
+      .transform((v) => v === 'true'),
+    // Whitelist programId for the `deposit` ix (CD-4). Public on-chain address.
+    SOLANA_ESCROW_PROGRAM_ID: z
+      .string()
+      .min(1)
+      // eslint-disable-next-line no-secrets/no-secrets -- public on-chain escrow program id (base58 pubkey), not a secret.
+      .default('BBQ9TcriBT7tqe5czR72CkUyxYg6z8pH7nk161yh79WA'),
+    // ComputeBudget caps (AC-4 / CD-5) — tx without a tope is rejected by CR-1.
+    SOLANA_SPONSOR_MAX_COMPUTE_UNITS: z.coerce.number().int().min(1).default(300000),
+    SOLANA_SPONSOR_MAX_PRIORITY_FEE_MICROLAMPORTS: z.coerce.number().int().min(0).default(50000),
+    // Per-tx fee ceiling in lamports (0.0001 SOL). Derived fee upper bound must
+    // stay <= this or CR-1/the primitive reject.
+    SOLANA_SPONSOR_MAX_FEE_LAMPORTS: z.coerce.number().int().min(1).default(100000),
+    // Per-caller route rate-limit (AC-6) — first anti-abuse layer.
+    SOLANA_SPONSOR_RATE_LIMIT_MAX: z.coerce.number().int().min(1).default(20),
+    SOLANA_SPONSOR_RATE_LIMIT_WINDOW_SEC: z.coerce.number().int().min(1).default(60),
+    // Aggregate daily fee ceiling (fail-closed, AC-6). STRING for precision
+    // (same pattern as SETTLE_MAX_AMOUNT_ATOMIC — parsed to BigInt at use site).
+    // Default 500000000 lamports = 0.5 SOL.
+    SOLANA_SPONSOR_DAILY_MAX_LAMPORTS: z
+      .string()
+      .regex(/^[1-9][0-9]*$/, { message: 'must be a positive lamports decimal (no leading zero)' })
+      .default('500000000'),
+    // Broadcast retries before SPONSOR_BROADCAST_EXPIRED (AC-5).
+    SOLANA_SPONSOR_MAX_REBROADCASTS: z.coerce.number().int().min(0).default(3),
+    // HMAC secret for the PoP/KYC attestation (AC-7). Unset ⇒ PoP rejects EVERY
+    // request (fail-closed) — the route surfaces 403 SPONSOR_POP_INVALID.
+    SOLANA_SPONSOR_POP_SECRET: z.string().min(1).optional(),
+
     // ---- Anti-abuse caps (public-sharing hardening) ------------------------
     // Per-settle max authorized amount (atomic units; uint256 decimal string).
     // Default 100 PYUSD at 18 decimals = 100 * 1e18.
