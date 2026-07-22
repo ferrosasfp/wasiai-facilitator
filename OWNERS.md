@@ -22,7 +22,7 @@ en la abstracción, no una excepción válida.
 | Módulo                    | Puede importar                                          | PROHIBIDO importar                                                         |
 |---------------------------|---------------------------------------------------------|----------------------------------------------------------------------------|
 | `src/core/`               | `src/infra/*`, tipos compartidos, Zod                   | `src/chains/*` (salvo vía registry), `src/methods/*` (vía dispatch), `src/routes/*` |
-| `src/chains/<chain>.ts`   | `src/chains/types.ts`, `src/chains/abi/*.ts` (ver [3]), `src/infra/wallet.ts` (para Account operator — WFAC-50 DT-J), viem | `src/core/*` (runtime), `src/methods/*`, `src/routes/*`, otras chains      |
+| `src/chains/<chain>.ts`   | `src/chains/types.ts`, `src/chains/abi/*.ts` (ver [3]), `src/infra/wallet.ts` (para Account operator — WFAC-50 DT-J), `src/infra/solana-dedup.ts` (dedup durable no-EVM — ver [5]), viem, `@solana/web3.js` (v1, red no-EVM) | `src/core/*` (runtime), `src/methods/*`, `src/routes/*`, otras chains, `src/infra/supabase.ts` (directo) |
 | `src/chains/registry.ts`  | Todos los `src/chains/<chain>.ts` (explícitos)          | `src/core/*`, `src/methods/*`, `src/routes/*`                              |
 | `src/methods/<method>/`   | `src/chains/types.ts` (solo tipos), `src/core/types.ts` (solo tipos), `src/core/errors.ts` [1], viem, ABIs propias | `src/core/*` (salvo excepciones [1]), `src/chains/registry.ts`, otros methods |
 | `src/routes/`             | `src/core/*`, `src/infra/*`, Zod schemas                | `src/chains/*`, `src/methods/*` (se accede vía `core.verify/settle`)       |
@@ -127,6 +127,27 @@ no "soporte de una chain concreta".
 namespace ya vive en el core; el core no se re-modifica por red.
 
 Origen: **WKH-204 / HU-SOL-2**.
+
+### [5] Excepción documentada: `src/chains/solana-adapter.ts` ↔ `src/infra/solana-dedup.ts` (WKH-205 / HU-SOL-6)
+
+`src/chains/solana-adapter.ts` **MAY** hacer runtime import de `src/infra/solana-dedup.ts`
+(dedup durable Postgres del money-path no-EVM: `isSolanaSignatureSettled` +
+`recordSolanaSignature`). Es el análogo no-EVM de `src/infra/wallet.ts` para el
+broadcast EVM: el adapter Solana verify-only necesita una barrera anti-replay
+durable (`UNIQUE(signature)`), y esa barrera vive en la capa infra (única que
+puede importar `@supabase/supabase-js`).
+
+- **El adapter NO importa `src/infra/supabase.ts` directo** — solo el wrapper
+  `solana-dedup.ts` (mismo patrón que `core/ledger.ts` accede a Supabase solo
+  vía `getSupabaseClient`).
+- `src/infra/solana-dedup.ts` sigue el boundary de `src/infra/*`: MAY import
+  `@supabase/supabase-js` (vía `infra/supabase.ts`), `pino` (type-only); MUST
+  NOT import `src/chains/*`, `src/core/*`, `src/methods/*`, `src/routes/*`.
+- El adapter lee `process.env` DIRECTO (NO importa `src/infra/env.ts`), igual
+  que los adapters EVM (`base-adapter.ts` lee `process.env` para el circuit
+  breaker / OPERATOR_MIN_BALANCE_WEI).
+
+Origen: **WKH-205 / HU-SOL-6**.
 
 ---
 

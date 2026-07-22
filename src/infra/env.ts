@@ -174,6 +174,17 @@ export const EnvSchema = z
       .regex(/^0x[0-9a-fA-F]{40}$/, { message: 'must be 0x + 40 hex chars' })
       .optional(),
 
+    // WKH-205 — Solana adapter (opt-in). El adapter se registra en
+    // src/chains/index.ts solo si SOLANA_RPC_URL y SOLANA_USDC_MINT están
+    // presentes. NINGUNA en .superRefine (opt-in, no rompe boot testnet-only).
+    SOLANA_RPC_URL: z.string().min(1).optional(),
+    SOLANA_USDC_MINT: z.string().min(1).optional(),
+    SOLANA_TOKEN_PROGRAM_ID: z
+      .string()
+      .min(1)
+      // eslint-disable-next-line no-secrets/no-secrets -- public on-chain SPL Token program id (base58 pubkey), not a secret.
+      .default('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'), // SPL Token classic
+
     // ---- Anti-abuse caps (public-sharing hardening) ------------------------
     // Per-settle max authorized amount (atomic units; uint256 decimal string).
     // Default 100 PYUSD at 18 decimals = 100 * 1e18.

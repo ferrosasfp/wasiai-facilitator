@@ -21,18 +21,18 @@
  */
 
 import type { Logger } from 'pino';
-import type { ChainAdapter, ChainMetadata, RegisterResult } from './types.js';
+import type { ChainAdapter, ChainMetadata, RegisterResult, SettlementAdapter } from './types.js';
 import type { ChainId } from '../core/types.js';
 
 export class ChainRegistry {
-  private readonly _adapters = new Map<string, ChainAdapter>();
+  private readonly _adapters = new Map<string, SettlementAdapter>();
   private _logger: Logger | undefined;
 
   setLogger(logger: Logger): void {
     this._logger = logger;
   }
 
-  register(adapter: ChainAdapter): RegisterResult {
+  register(adapter: SettlementAdapter): RegisterResult {
     // CD-6 runtime guard: adapter shape check (AC-6).
     if (!this._isValidAdapter(adapter)) {
       return {
@@ -65,7 +65,7 @@ export class ChainRegistry {
   }
 
   getAdapterByNetworkId(networkId: string):
-    | { readonly ok: true; readonly adapter: ChainAdapter }
+    | { readonly ok: true; readonly adapter: SettlementAdapter }
     | {
         readonly ok: false;
         readonly error: {
@@ -109,7 +109,19 @@ export class ChainRegistry {
         },
       };
     }
-    return lookup;
+    if (!this._isChainAdapter(lookup.adapter)) {
+      // Never happens: an eip155:* adapter is always a ChainAdapter. The
+      // duck-typed guard makes the narrowing a SANE cast + O(1) (CD-7).
+      return {
+        ok: false,
+        error: {
+          code: 'NETWORK_MISMATCH',
+          message: `Chain not registered: ${chainId}`,
+          http: 400,
+        },
+      };
+    }
+    return { ok: true, adapter: lookup.adapter };
   }
 
   listAdapters(): readonly ChainMetadata[] {
@@ -139,9 +151,12 @@ export class ChainRegistry {
     this._logger = undefined;
   }
 
-  private _isValidAdapter(candidate: ChainAdapter): boolean {
+  private _isValidAdapter(candidate: SettlementAdapter): boolean {
     // Runtime shape guard — TS enforces at compile-time, this catches
-    // objects passed via unsafe casts or from external boundaries.
+    // objects passed via unsafe casts or from external boundaries. WKH-205:
+    // validates the SettlementAdapter base shape only (EVM + non-EVM). The
+    // viem-client checks (getPublicClient/getWalletClient) moved to the
+    // narrowing guard `_isChainAdapter` used by `getAdapter(chainId)`.
     return (
       typeof candidate === 'object' &&
       candidate !== null &&
@@ -149,9 +164,21 @@ export class ChainRegistry {
       candidate.metadata !== null &&
       typeof candidate.metadata.chainId === 'number' &&
       typeof candidate.verify === 'function' &&
-      typeof candidate.settle === 'function' &&
-      typeof candidate.getPublicClient === 'function' &&
-      typeof candidate.getWalletClient === 'function'
+      typeof candidate.settle === 'function'
+    );
+  }
+
+  /**
+   * WKH-205 — duck-typed narrowing from `SettlementAdapter` to `ChainAdapter`
+   * (the EVM viem-client subtype). Used by `getAdapter(chainId)` so its
+   * `{ ok:true; adapter: ChainAdapter }` contract stays byte-identical while
+   * the Map now holds the wider `SettlementAdapter`. Every `eip155:*` adapter
+   * is a `ChainAdapter`, so the guard is a SANE O(1) cast, never a blind one.
+   */
+  private _isChainAdapter(a: SettlementAdapter): a is ChainAdapter {
+    return (
+      typeof (a as ChainAdapter).getPublicClient === 'function' &&
+      typeof (a as ChainAdapter).getWalletClient === 'function'
     );
   }
 }
