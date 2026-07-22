@@ -29,6 +29,8 @@ import {
   AddressHexSchema,
   Uint256StringSchema,
   Eip3009AuthorizationSchema,
+  Base58PubkeySchema,
+  Base58SignatureSchema,
 } from '../methods/eip3009/schemas.js';
 // Note: Bytes32HexSchema is reachable transitively via Eip3009AuthorizationSchema
 // (used for `authorization.nonce`). We do NOT re-import it here — it would be
@@ -140,9 +142,69 @@ const NonEip3009RequestSchema = z
   })
   .strict();
 
-export const VerifyRequestSchema = z.union([Eip3009RequestSchema, NonEip3009RequestSchema]);
+// ─── HU-SOL-9 / WKH-208 · rama Solana base58 (3ª rama del union) ────────────
+// Representa el request Solana no-custodial en base58 (NO 0x-hex) tal como lo
+// construye chaski `verifySolanaSettlement` y lo consume
+// solana-adapter.ts::_parseSolanaInput (accepted.{network,asset,payTo,amount} +
+// payload.{signature,reference?}). NO hay `extra` (el dispatch solana hace
+// early-return antes del check assetTransferMethod). `.strict()` lo rechaza.
+const SolanaAcceptedSchema = z
+  .object({
+    scheme: z.literal('exact'),
+    network: z
+      .string()
+      .regex(/^solana:(devnet|mainnet)$/u, 'network must be solana:<devnet|mainnet>'),
+    amount: Uint256StringSchema, // u64 ⊂ uint256 — reusa el primitivo existente
+    asset: Base58PubkeySchema, // mint base58 (NO 0x-hex)
+    payTo: Base58PubkeySchema, // beneficiary base58 (NO 0x-hex)
+    maxTimeoutSeconds: z.number().int().positive(),
+  })
+  .strict();
 
-export type VerifyRequest = z.infer<typeof VerifyRequestSchema>;
+const SolanaPayloadSchema = z
+  .object({
+    signature: Base58SignatureSchema, // tx sig finalizada (NO 0x-hex, NO objeto authorization)
+    reference: Base58PubkeySchema.optional(),
+  })
+  .strict();
+
+const SolanaRequestSchema = z
+  .object({
+    x402Version: z.literal(2),
+    resource: ResourceSchema,
+    accepted: SolanaAcceptedSchema,
+    payload: SolanaPayloadSchema,
+  })
+  .strict();
+
+// The exported TYPE intentionally reflects ONLY the two EVM branches — it is
+// BYTE-IDENTICAL to the pre-HU-SOL-9 inferred type. The Solana runtime path
+// early-returns in core/{verify,settle}.ts (namespace dispatch) BEFORE any
+// `.accepted.extra` / `.payload.authorization` read, and the Solana-specific
+// fields are consumed by solana-adapter.ts via its own sanctioned boundary cast
+// (`params.payload as unknown as {...}`). Widening this type to include the
+// Solana branch would break settle.ts/verify.ts/routes reads of `.extra` /
+// `.authorization` (CD-4': those files are out of scope).
+export type VerifyRequest =
+  | z.infer<typeof Eip3009RequestSchema>
+  | z.infer<typeof NonEip3009RequestSchema>;
+
+// CD-1: `z.union` devuelve la PRIMERA rama que matchea. Un body EVM matchea
+// rama 1/2 igual que hoy; la 3ª rama (Solana) va ÚLTIMA → nunca altera el
+// `.success` de un body que ya matcheaba ni de uno que fallaba las 2 EVM.
+//
+// El RUNTIME valida las 3 ramas (una request Solana base58 PASA). El tipo de
+// salida se asevera como `VerifyRequest` (solo EVM) mediante un cast de
+// frontera sancionado (mismo patrón `as unknown as` de core/settle.ts:144):
+// desacopla la validación en runtime (3 ramas) del tipo estático que consumen
+// settle.ts/verify.ts/routes (EVM), que jamás leen los campos Solana como
+// `VerifyRequest`. Sin este cast, `safeParse().data` sería la unión de 3 ramas
+// y rompería `const parsed: SettleRequest = parseResult.data` en las rutas.
+export const VerifyRequestSchema = z.union([
+  Eip3009RequestSchema,
+  NonEip3009RequestSchema,
+  SolanaRequestSchema,
+]) as unknown as z.ZodType<VerifyRequest, z.ZodTypeDef, unknown>;
 
 // ─── WFAC-21 extension ──────────────────────────────────────────────────
 /**
