@@ -10,7 +10,7 @@
 // EscrowState discriminator [19,90,148,111,55,130,229,108]; layout sender/beneficiary/authority/mint
 // (pubkey), amount(u64), deadline(i64), status(enum Deposited|Released|Refunded), bump(u8).
 export const escrowIdl = {
-  address: 'BBQ9TcriBT7tqe5czR72CkUyxYg6z8pH7nk161yh79WA',
+  address: 'DR5GoMT7sAKzD6wZMKJPeknS3Y6fzgZUNevi7xiESE4x',
   metadata: {
     name: 'escrow',
     version: '0.1.0',

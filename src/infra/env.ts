@@ -207,7 +207,7 @@ export const EnvSchema = z
       .string()
       .min(1)
       // eslint-disable-next-line no-secrets/no-secrets -- public on-chain escrow program id (base58 pubkey), not a secret.
-      .default('BBQ9TcriBT7tqe5czR72CkUyxYg6z8pH7nk161yh79WA'),
+      .default('DR5GoMT7sAKzD6wZMKJPeknS3Y6fzgZUNevi7xiESE4x'),
     // ComputeBudget caps (AC-4 / CD-5) — tx without a tope is rejected by CR-1.
     SOLANA_SPONSOR_MAX_COMPUTE_UNITS: z.coerce.number().int().min(1).default(300000),
     SOLANA_SPONSOR_MAX_PRIORITY_FEE_MICROLAMPORTS: z.coerce.number().int().min(0).default(50000),
