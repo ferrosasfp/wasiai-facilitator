@@ -28,7 +28,7 @@
 | 024 | 2026-07-07 | Error explícito OPERATOR_FUNDING_LOW en /settle (WKH-148) | bugfix+security | FAST+AR | in progress | fix/148-operator-funding-low |
 | 025 | 2026-07-21 | Facilitator multi-red: generalizar dispatch EVM-only → orquestador por namespace (WKH-204 / HU-SOL-2) | architecture | QUALITY | DONE (HELD — no merge; prod/Railway) | feat/025-hu-sol-f1-facilitator-multichain (50922c4) |
 | 026 | 2026-07-21 | Facilitator: adaptador Solana verify+dedup (WKH-205 / HU-SOL-6) | chain-impl+security | QUALITY+AR | DONE (HELD) (artefactos AR/CR/validation faltantes en git) | feat/026-wkh-205-solana-adapter (fabaa63) |
-| 027 | 2026-07-22 | Gasless / fee-payer sponsorship — relayer propio Solana, reconstruye/valida tx antes de co-firmar (WKH-217 / HU-SOL-14, cross-repo con chaski-v3) | security+chain-impl | QUALITY | in progress | feat/027-wkh-217-solana-feepayer-sponsorship |
+| 027 | 2026-07-22 | Gasless / fee-payer sponsorship — relayer propio Solana, reconstruye/valida tx antes de co-firmar (WKH-217 / HU-SOL-14, cross-repo con chaski-v3) | security+chain-impl | QUALITY | DONE (HELD) | feat/027-wkh-217-solana-feepayer-sponsorship (6670fa9) |
 
 <!--
 Formato por entrada:
