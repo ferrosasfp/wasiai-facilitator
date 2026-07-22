@@ -18,6 +18,7 @@ import { chainRegistry } from './registry.js';
 import { kiteTestnetAdapter, kiteMainnetAdapter } from './kite.js';
 import { avalancheFujiAdapter, avalancheMainnetAdapter } from './avalanche.js';
 import { baseSepoliaAdapter, baseMainnetAdapter } from './base.js';
+import { solanaAdapter } from './solana-adapter.js';
 
 chainRegistry.register(kiteTestnetAdapter);
 // Optional adapters — registered only when fully configured.
@@ -38,3 +39,7 @@ if (avalancheFujiAdapter !== null) chainRegistry.register(avalancheFujiAdapter);
 if (avalancheMainnetAdapter !== null) chainRegistry.register(avalancheMainnetAdapter);
 if (baseSepoliaAdapter !== null) chainRegistry.register(baseSepoliaAdapter);
 if (baseMainnetAdapter !== null) chainRegistry.register(baseMainnetAdapter);
+// WKH-205 — Solana (verify-only, non-EVM). Opt-in-off: registered only when
+// SOLANA_RPC_URL + SOLANA_USDC_MINT are set (the factory returns null otherwise),
+// so the EVM suite is byte-identical when Solana is unconfigured (AC-6).
+if (solanaAdapter !== null) chainRegistry.register(solanaAdapter);

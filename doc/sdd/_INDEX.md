@@ -27,6 +27,9 @@
 | 023 | 2026-07-07 | Circuit breaker: transport vs business (WKH-154) | bugfix | QUALITY | DONE | fix/154-facilitator-cb-transport-vs-business |
 | 024 | 2026-07-07 | Error explícito OPERATOR_FUNDING_LOW en /settle (WKH-148) | bugfix+security | FAST+AR | in progress | fix/148-operator-funding-low |
 | 025 | 2026-07-21 | Facilitator multi-red: generalizar dispatch EVM-only → orquestador por namespace (WKH-204 / HU-SOL-2) | architecture | QUALITY | DONE (HELD — no merge; prod/Railway) | feat/025-hu-sol-f1-facilitator-multichain (50922c4) |
+| 026 | 2026-07-21 | Facilitator: adaptador Solana verify+dedup (WKH-205 / HU-SOL-6) | chain-impl+security | QUALITY+AR | DONE (HELD) (artefactos AR/CR/validation faltantes en git) | feat/026-wkh-205-solana-adapter (fabaa63) |
+| 027 | 2026-07-22 | Gasless / fee-payer sponsorship — relayer propio Solana, reconstruye/valida tx antes de co-firmar (WKH-217 / HU-SOL-14, cross-repo con chaski-v3) | security+chain-impl | QUALITY | DONE (HELD) | feat/027-wkh-217-solana-feepayer-sponsorship (6670fa9) |
+| 028 | 2026-07-22 | Escrow Solana: verify vault + release autorizado + refund trustless (WKH-216 / HU-SOL-13, companion a chaski-v3 waves 13b/13c, stacked sobre feat/027) | security+chain-impl | QUALITY | DONE (HELD) | feat/029bc-hu-sol-13bc-escrow-facilitator (d0ae09d) |
 
 <!--
 Formato por entrada:
