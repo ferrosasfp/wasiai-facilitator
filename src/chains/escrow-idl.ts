@@ -6,7 +6,12 @@
 // chaski-v3/src/infrastructure/solana/escrow-idl.ts (artefacto de solana-programs, CD-1). Se COPIA,
 // NO se edita. SOLO se usa para BorshAccountsCoder(escrowIdl).decode("EscrowState", data) — decodifica
 // la CUENTA on-chain (DT-4b/13b), NUNCA valida la tx `release` (eso es CR-1 raw-bytes, CD-12).
-// El `address` (BBQ9…79WA) es la ÚNICA fuente del program id. Verificado contra AH-12: cuenta
+// El campo `address` del objeto `escrowIdl` de abajo es la ÚNICA fuente del program id: hoy es
+// DR5G…SE4x, el program REALMENTE deployado en devnet (mismo `declare_id!` que solana-programs).
+// No lo edites acá — se actualiza regenerando el IDL desde solana-programs.
+// NOTA HISTÓRICA: un id anterior (BBQ9…79WA) figuraba en este comentario como si fuera la fuente,
+// pero NUNCA se deployó y su keypair se perdió: es un id MUERTO, no lo resucites ni lo uses.
+// Verificado contra AH-12: cuenta
 // EscrowState discriminator [19,90,148,111,55,130,229,108]; layout sender/beneficiary/authority/mint
 // (pubkey), amount(u64), deadline(i64), status(enum Deposited|Released|Refunded), bump(u8).
 export const escrowIdl = {
