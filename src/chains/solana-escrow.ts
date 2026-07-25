@@ -40,7 +40,7 @@ const ASSOCIATED_TOKEN_PROGRAM_ID = 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8kn
 
 /** Escrow program id (PDA derivation). Public on-chain pubkey (== escrowIdl.address). */
 // eslint-disable-next-line no-secrets/no-secrets -- public on-chain escrow program id (base58 pubkey), not a secret.
-export const ESCROW_PROGRAM_ID_DEFAULT = 'BBQ9TcriBT7tqe5czR72CkUyxYg6z8pH7nk161yh79WA';
+export const ESCROW_PROGRAM_ID_DEFAULT = 'DR5GoMT7sAKzD6wZMKJPeknS3Y6fzgZUNevi7xiESE4x';
 
 /** Escrow status, normalized from the anchor enum object to a stable string. */
 export type EscrowStatusStr = 'Deposited' | 'Released' | 'Refunded' | 'Unknown';

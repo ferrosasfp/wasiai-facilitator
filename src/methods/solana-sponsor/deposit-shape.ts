@@ -16,7 +16,7 @@
  * `SOLANA_ESCROW_PROGRAM_ID`; this is the default (devnet program).
  */
 // eslint-disable-next-line no-secrets/no-secrets -- public on-chain escrow program id (base58 pubkey), not a secret.
-export const ESCROW_PROGRAM_ID_DEFAULT = 'BBQ9TcriBT7tqe5czR72CkUyxYg6z8pH7nk161yh79WA';
+export const ESCROW_PROGRAM_ID_DEFAULT = 'DR5GoMT7sAKzD6wZMKJPeknS3Y6fzgZUNevi7xiESE4x';
 
 /**
  * Anchor discriminator of the `deposit` instruction — first 8 bytes of `ix.data`

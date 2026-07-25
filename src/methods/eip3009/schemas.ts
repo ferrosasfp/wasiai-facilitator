@@ -12,6 +12,7 @@
  */
 
 import { z } from 'zod';
+import { PublicKey } from '@solana/web3.js';
 
 /** 0x-prefixed 32-byte hex (bytes32 / nonce). */
 export const Bytes32HexSchema = z
@@ -80,3 +81,25 @@ export const AcceptedSchema = z
   .passthrough();
 
 export type AcceptedValidated = z.infer<typeof AcceptedSchema>;
+
+// ─── HU-SOL-9 / WKH-208 · Solana base58 primitives (aditivo puro) ───────────
+// Boundary OWNERS: primitivos viven acá; core/schemas.ts los reusa (no duplica).
+// Mismo criterio que src/chains/solana-adapter.ts::isBase58Pubkey /
+// isBase58Signature (CD-9): lo que pasa el Zod pasa el parse del adapter.
+
+/** base58 pubkey (32-byte) — MISMO criterio que solana-adapter.ts::isBase58Pubkey. */
+export const Base58PubkeySchema = z.string().refine((s) => {
+  try {
+    // PublicKey ctor valida base58 + longitud 32-byte (throw en otro caso).
+    new PublicKey(s);
+    return true;
+  } catch {
+    return false;
+  }
+}, 'must be a base58 pubkey');
+
+/** base58 tx signature — MISMO criterio que solana-adapter.ts::isBase58Signature. */
+export const Base58SignatureSchema = z
+  .string()
+  .regex(/^[1-9A-HJ-NP-Za-km-z]+$/u, 'base58')
+  .refine((s) => s.length >= 64 && s.length <= 120, 'solana signature length');
