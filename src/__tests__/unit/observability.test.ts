@@ -183,10 +183,16 @@ describe('P1 OP-05 — dependency-aware health status', () => {
   });
 
   it('HS-5: a chain whose RPC probe fails is reported "unreachable" and degrades', async () => {
-    // Register an adapter whose getPublicClient().getChainId() rejects.
+    // Register an adapter whose probeRpc() rejects with a hard connection error
+    // (delegating to getPublicClient().getChainId() exactly like the real
+    // BaseEip3009Adapter does). 'connection'-class failures are reported on the
+    // FIRST probe — no hysteresis (fix/health-probe-non-evm).
     const { chainRegistry } = await import('../../chains/registry.js');
     const { refreshHealthStatusNow } = await import('../../core/health-status.js');
     chainRegistry._resetForTesting();
+    const getChainIdDown = async (): Promise<number> => {
+      throw new Error('ECONNREFUSED');
+    };
     const fakeAdapter = {
       metadata: {
         chainId: 999001 as unknown as number,
@@ -199,13 +205,11 @@ describe('P1 OP-05 — dependency-aware health status', () => {
       },
       verify: vi.fn(),
       settle: vi.fn(),
-      getPublicClient: () =>
-        ({
-          getChainId: async () => {
-            throw new Error('ECONNREFUSED');
-          },
-        }) as never,
+      getPublicClient: () => ({ getChainId: getChainIdDown }) as never,
       getWalletClient: vi.fn(),
+      probeRpc: async (): Promise<void> => {
+        await getChainIdDown();
+      },
     };
     chainRegistry.register(fakeAdapter as never);
 
@@ -222,6 +226,7 @@ describe('P1 OP-05 — dependency-aware health status', () => {
     const { chainRegistry } = await import('../../chains/registry.js');
     const { refreshHealthStatusNow } = await import('../../core/health-status.js');
     chainRegistry._resetForTesting();
+    const getChainIdUp = async (): Promise<number> => 999002;
     const fakeAdapter = {
       metadata: {
         chainId: 999002 as unknown as number,
@@ -234,8 +239,13 @@ describe('P1 OP-05 — dependency-aware health status', () => {
       },
       verify: vi.fn(),
       settle: vi.fn(),
-      getPublicClient: () => ({ getChainId: async () => 999002 }) as never,
+      getPublicClient: () => ({ getChainId: getChainIdUp }) as never,
       getWalletClient: vi.fn(),
+      // fix/health-probe-non-evm: the probe is the ADAPTER's job now; mirror the
+      // real BaseEip3009Adapter, which delegates to getPublicClient().getChainId().
+      probeRpc: async (): Promise<void> => {
+        await getChainIdUp();
+      },
     };
     chainRegistry.register(fakeAdapter as never);
 
