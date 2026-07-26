@@ -139,6 +139,28 @@ export interface SettlementAdapter {
   verify(params: VerifyParams): Promise<AdapterResult<VerifyResult>>;
   settle(params: SettleParams): Promise<AdapterResult<SettleResult>>;
   /**
+   * Liveness sonda del RPC de ESTA chain — REQUIRED (never optional).
+   *
+   * Contract:
+   *   - resolves (void) when the chain's RPC answered;
+   *   - throws/rejects when it did not.
+   *
+   * WHY it lives on the adapter: `src/core/health-status.ts` used to probe every
+   * registered adapter with two viem calls (`getPublicClient().getChainId()`),
+   * which is impossible for a non-EVM adapter by construction — so Solana was
+   * reported `rpc: 'unreachable'` forever and `/health` was permanently
+   * `degraded: true`. A health module must NOT know about chain families; each
+   * adapter answers for its own rail. Being REQUIRED (not `probeRpc?()`) is the
+   * whole point: a new adapter cannot compile without a probe, so it can never
+   * be silently mis-probed again.
+   *
+   * Implementation guidance: use the CHEAPEST round-trip available (node-config
+   * data, not ledger state) — `eth_chainId` on EVM, `getVersion` on Solana. The
+   * caller bounds the call with a short timeout and never awaits it on the
+   * request path, so an implementation MUST NOT add retries/backoff of its own.
+   */
+  probeRpc(): Promise<void>;
+  /**
    * WFAC-41 — optional introspection: current circuit breaker state for
    * this chain. Adapters that wrap verify/settle with ChainCircuitBreaker
    * (KiteAdapter, AvalancheFujiAdapter) expose this; stubs without breakers

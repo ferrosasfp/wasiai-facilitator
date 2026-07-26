@@ -268,6 +268,23 @@ export abstract class BaseEip3009Adapter implements ChainAdapter {
     return this._walletClient;
   }
 
+  /**
+   * `SettlementAdapter.probeRpc()` — EVM liveness sonda.
+   *
+   * `eth_chainId` is the cheapest round-trip to an EVM node: it is answered from
+   * node config, touches no state/history and takes no block-tag argument. It is
+   * the exact call `src/core/health-status.ts` used to make inline before the
+   * probe became the adapter's own responsibility, so the EVM health path is
+   * behaviour-identical (same client, same viem fallback transport).
+   *
+   * Deliberately NOT wrapped in the circuit breaker: a health sonda must report
+   * the RPC's real state, not the breaker's opinion of it (an OPEN breaker would
+   * short-circuit the probe and hide RPC recovery).
+   */
+  async probeRpc(): Promise<void> {
+    await this.getPublicClient().getChainId();
+  }
+
   setLogger(logger: Logger): void {
     this._breaker.setLogger(logger);
     // WKH-148 — also retain the app logger for the settle funding pre-check

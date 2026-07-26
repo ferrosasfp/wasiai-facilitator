@@ -30,6 +30,7 @@
 | 026 | 2026-07-21 | Facilitator: adaptador Solana verify+dedup (WKH-205 / HU-SOL-6) | chain-impl+security | QUALITY+AR | DONE (HELD) (artefactos AR/CR/validation faltantes en git) | feat/026-wkh-205-solana-adapter (fabaa63) |
 | 027 | 2026-07-22 | Gasless / fee-payer sponsorship — relayer propio Solana, reconstruye/valida tx antes de co-firmar (WKH-217 / HU-SOL-14, cross-repo con chaski-v3) | security+chain-impl | QUALITY | DONE (HELD) | feat/027-wkh-217-solana-feepayer-sponsorship (6670fa9) |
 | 028 | 2026-07-22 | Escrow Solana: verify vault + release autorizado + refund trustless (WKH-216 / HU-SOL-13, companion a chaski-v3 waves 13b/13c, stacked sobre feat/027) | security+chain-impl | QUALITY | DONE (HELD) | feat/029bc-hu-sol-13bc-escrow-facilitator (d0ae09d) |
+| 030 | 2026-07-26 | `/health` miente en rojo permanente: sonda RPC EVM-only → `probeRpc()` obligatorio en `SettlementAdapter` (+ histéresis anti-flapping por 429 de Solana devnet) | bugfix+observability | FAST+AR | F3 DONE (sin push, sin merge) | fix/health-probe-non-evm |
 
 <!--
 Formato por entrada:

@@ -4,9 +4,36 @@
  * Surfaces readiness signals WITHOUT leaking secrets and WITHOUT making the
  * `/health` liveness probe block on dependency latency:
  *   - Redis reachability (real PING, via src/core/idempotency.ts helper).
- *   - Per-chain RPC reachability (cheap `getChainId()` probe per registered
- *     adapter, bounded by a short timeout).
+ *   - Per-chain RPC reachability (each adapter's own `probeRpc()`, bounded by a
+ *     short timeout).
  *   - Operator wallet presence (env var SET / NOT SET — never the value).
+ *
+ * DESIGN (why the probe is delegated to the adapter): this module used to probe
+ * every registered adapter with two viem/EVM calls inline
+ * (`getPublicClient().getChainId()`) and to resolve the adapter by numeric
+ * chainId (`eip155:<id>` key). Both are EVM-only assumptions, so the non-EVM
+ * Solana adapter — registered as `solana:<cluster>`, with no viem client by
+ * design — was reported `rpc: 'unreachable'` on EVERY refresh and `/health`
+ * answered `degraded: true` permanently. A health module that is always red
+ * trains operators to ignore it, which is worse than no health at all. Fix:
+ *   1. resolve the adapter by `metadata.networkId` (family-agnostic key), and
+ *   2. call `adapter.probeRpc()` — REQUIRED by `SettlementAdapter`, so a new
+ *      adapter cannot compile without a probe and can never be mis-probed
+ *      silently. This module now knows NOTHING about chain families.
+ *
+ * DESIGN (why hysteresis on transient failures): the public Solana devnet RPC
+ * rate-limits aggressively (HTTP 429) and `Connection` retries 429 internally,
+ * so a rate-limited refresh surfaces here as a probe timeout. Flipping
+ * `degraded` on every such blip would replace a health that lies in red with one
+ * that flaps. So probe failures are CLASSIFIED:
+ *   - 'connection' (ECONNREFUSED / DNS / TLS / bad adapter) → unambiguous:
+ *     `unreachable` on the FIRST failure, exactly as before.
+ *   - 'transient' (429 / rate limit / timeout / 502-504 / socket reset) →
+ *     tolerated while `consecutiveFailures < TRANSIENT_FAILURE_THRESHOLD`; the
+ *     chain keeps `rpc: 'ok'` but the (additive) `consecutiveFailures` +
+ *     `lastFailureKind` fields expose the blip, so tolerating is never silent.
+ *     A real outage still lands as `unreachable` on the next refresh (~1 TTL).
+ * Any successful probe resets that chain's counter.
  *
  * DESIGN (why a cache): probing a live Redis/RPC on every `/health` request
  * couples the liveness probe to dependency latency — a dead RPC would make
@@ -37,12 +64,40 @@ const RPC_PROBE_TIMEOUT_MS = 1500;
 /** How long a cached snapshot is served before a background refresh is kicked. */
 const SNAPSHOT_TTL_MS = 5000;
 
+/**
+ * Consecutive TRANSIENT probe failures tolerated before a chain is reported
+ * `unreachable`. 2 = one blip is forgiven, a second consecutive one is not.
+ * 'connection'-class failures ignore this threshold (reported immediately).
+ */
+const TRANSIENT_FAILURE_THRESHOLD = 2;
+
+/** Failure classification of a probe rejection (see module DESIGN note). */
+type ProbeFailureKind = 'transient' | 'connection';
+
+/**
+ * Errors that mean "the RPC is there but did not answer THIS time": rate limits
+ * (the public Solana devnet RPC 429s aggressively), our own probe timeout,
+ * gateway 5xx and socket resets. Everything else is treated as a hard
+ * 'connection' failure (ECONNREFUSED, DNS/TLS, or a malformed adapter).
+ */
+const TRANSIENT_PROBE_ERROR_RE =
+  /\b429\b|too many requests|rate limit|rate-limit|timeout|timed out|ETIMEDOUT|EAI_AGAIN|ECONNRESET|socket hang up|\b50[234]\b/i;
+
 export interface ChainHealth {
   readonly chainId: number;
   readonly name: string;
   readonly network: string;
   /** 'ok' = RPC reachable; 'unreachable' = probe failed/timed out. */
   readonly rpc: 'ok' | 'unreachable';
+  /**
+   * ADDITIVE (optional — omitted entirely on a clean probe, so the healthy
+   * response stays byte-identical to the pre-fix shape): consecutive failed
+   * probes for this chain. Present with `rpc: 'ok'` when a TRANSIENT failure is
+   * still being tolerated (see module DESIGN note on hysteresis).
+   */
+  readonly consecutiveFailures?: number;
+  /** ADDITIVE (optional): classification of the last failed probe. */
+  readonly lastFailureKind?: ProbeFailureKind;
 }
 
 export interface HealthStatusDetail {
@@ -68,8 +123,46 @@ let _snapshot: HealthStatusDetail | null = null;
 let _refreshing: Promise<void> | null = null;
 
 /**
- * Probe a single adapter's RPC with a bounded `getChainId()` call. Returns
- * 'ok' on success, 'unreachable' on any error or timeout. Never throws.
+ * Consecutive-failure counters keyed by `metadata.networkId` (the same key the
+ * registry uses, so it is family-agnostic). Only holds entries for chains whose
+ * LAST probe failed — a success deletes the entry.
+ */
+const _probeFailures = new Map<string, { count: number; kind: ProbeFailureKind }>();
+
+/** Classify a probe rejection as a tolerable blip vs a hard connection failure. */
+function classifyProbeError(err: unknown): ProbeFailureKind {
+  const text = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+  return TRANSIENT_PROBE_ERROR_RE.test(text) ? 'transient' : 'connection';
+}
+
+/**
+ * Record a failed probe for `networkId` and decide what to REPORT for it.
+ * Hysteresis: a 'transient' failure below the threshold keeps `rpc: 'ok'` (with
+ * the additive counters exposing the blip); a 'connection' failure, or a
+ * transient one at/over the threshold, reports 'unreachable'.
+ */
+function reportFailure(
+  networkId: string,
+  kind: ProbeFailureKind,
+): Pick<ChainHealth, 'rpc' | 'consecutiveFailures' | 'lastFailureKind'> {
+  const count = (_probeFailures.get(networkId)?.count ?? 0) + 1;
+  _probeFailures.set(networkId, { count, kind });
+  const tolerated = kind === 'transient' && count < TRANSIENT_FAILURE_THRESHOLD;
+  return {
+    rpc: tolerated ? 'ok' : 'unreachable',
+    consecutiveFailures: count,
+    lastFailureKind: kind,
+  };
+}
+
+/**
+ * Probe a single adapter's RPC via its OWN `probeRpc()`, bounded by a short
+ * timeout. Returns 'ok' on success, 'unreachable' on a hard/repeated failure.
+ * NEVER throws — a broken adapter degrades the report, never the probe.
+ *
+ * This function is deliberately chain-family-agnostic: it resolves the adapter
+ * by `metadata.networkId` and touches NO viem/`getPublicClient()`/`getChainId()`
+ * API, so non-EVM adapters (Solana) are probed correctly by construction.
  */
 async function probeChain(meta: ChainMetadata): Promise<ChainHealth> {
   const base = {
@@ -77,21 +170,27 @@ async function probeChain(meta: ChainMetadata): Promise<ChainHealth> {
     name: meta.name,
     network: meta.networkId,
   };
-  const lookup = chainRegistry.getAdapter(meta.chainId);
+  // networkId (NOT chainId): `getAdapter(chainId)` only resolves `eip155:<id>`
+  // and narrows to the viem `ChainAdapter`, so it structurally misses every
+  // non-EVM rail (`solana:<cluster>`) — the root cause of the permanent
+  // `degraded: true` in production.
+  const lookup = chainRegistry.getAdapterByNetworkId(meta.networkId);
   if (!lookup.ok) {
-    return { ...base, rpc: 'unreachable' };
+    // Not registered under its own networkId — a hard, non-transient defect.
+    return { ...base, ...reportFailure(meta.networkId, 'connection') };
   }
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const client = lookup.adapter.getPublicClient();
     const timeout = new Promise<never>((_resolve, reject) => {
       timer = setTimeout(() => reject(new Error('rpc probe timeout')), RPC_PROBE_TIMEOUT_MS);
     });
-    // `getChainId()` is the cheapest authenticated round-trip to the RPC.
-    await Promise.race([client.getChainId(), timeout]);
+    // The adapter owns the cheapest round-trip for its own rail (EVM
+    // `eth_chainId`, Solana `getVersion`) — see SettlementAdapter.probeRpc.
+    await Promise.race([lookup.adapter.probeRpc(), timeout]);
+    _probeFailures.delete(meta.networkId);
     return { ...base, rpc: 'ok' };
-  } catch {
-    return { ...base, rpc: 'unreachable' };
+  } catch (err) {
+    return { ...base, ...reportFailure(meta.networkId, classifyProbeError(err)) };
   } finally {
     if (timer) clearTimeout(timer);
   }
@@ -192,8 +291,9 @@ export async function refreshHealthStatusNow(): Promise<HealthStatusDetail> {
   return snap;
 }
 
-/** @internal — tests only. Clears the cached snapshot. */
+/** @internal — tests only. Clears the cached snapshot + the hysteresis counters. */
 export function resetHealthStatusForTesting(): void {
   _snapshot = null;
   _refreshing = null;
+  _probeFailures.clear();
 }

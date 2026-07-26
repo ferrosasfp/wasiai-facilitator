@@ -354,6 +354,31 @@ export class SolanaAdapter implements SettlementAdapter {
     };
   }
 
+  /**
+   * `SettlementAdapter.probeRpc()` — Solana liveness sonda (non-EVM).
+   *
+   * WHY `getVersion()`: it is the closest analogue to EVM `eth_chainId` — the
+   * node answers it from its own build/feature config, so it reads NO ledger
+   * state, takes NO commitment argument and cannot be delayed by finality lag.
+   * The alternatives are all strictly heavier or noisier for a liveness check:
+   *   - `getSlot()`  → reads ledger state and takes a commitment; a lagging
+   *     'finalized' slot makes the probe latency depend on consensus.
+   *   - `getLatestBlockhash()` → same plus a bigger payload; it is a
+   *     transaction-building call, not a ping.
+   *   - `getGenesisHash()` → would also pin the cluster identity, but cluster
+   *     correctness is already enforced on the money path by the exact-mint +
+   *     program-id pins (CD-1); a liveness sonda must stay a ping.
+   *
+   * The caller (`src/core/health-status.ts`) bounds this with a short timeout,
+   * so no retry/backoff is added here. NOTE: `Connection` retries HTTP 429 with
+   * backoff internally (`disableRetryOnRateLimit` option, web3.js v1), so a
+   * rate-limited public devnet RPC surfaces as the caller's probe timeout — which
+   * the caller classifies as TRANSIENT and tolerates once (anti-flapping).
+   */
+  async probeRpc(): Promise<void> {
+    await this._connection.getVersion();
+  }
+
   async verify(params: VerifyParams): Promise<AdapterResult<VerifyResult>> {
     const core = await this._verifyCore(params);
     if (!core.ok) return core;
