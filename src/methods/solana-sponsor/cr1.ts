@@ -52,6 +52,27 @@ const BASE_FEE_LAMPORTS_PER_SIG = 5000n;
 const CB_SET_COMPUTE_UNIT_LIMIT = 2;
 const CB_SET_COMPUTE_UNIT_PRICE = 3;
 
+/**
+ * Solana runtime defaults applied when the tx carries NO `SetComputeUnitLimit`:
+ * the limit is `200_000 * <non-ComputeBudget ix>`, capped at `1_400_000`.
+ * MEASURED with solana-bankrun (2 signers, `SetComputeUnitPrice(50_000)`, no
+ * `SetComputeUnitLimit`): 1 business ix ⇒ the fee-payer is charged 20 000
+ * lamports, 2 ⇒ 30 000, 3 ⇒ 40 000, while CU *consumed* was only 300/450/600.
+ * The priority fee is charged on the LIMIT, never on consumption.
+ */
+const DEFAULT_CU_PER_BUSINESS_IX = 200_000;
+/**
+ * The runtime's per-tx ceiling. NOTE: with the allowlist capped at 2 business ix
+ * this branch is UNREACHABLE (it needs 7), so it is documentation of the runtime
+ * rule rather than tested behaviour — no vector exercises it, and none can.
+ */
+const MAX_CU_PER_TX = 1_400_000;
+
+/** The limit the runtime will apply when the client omits `SetComputeUnitLimit`. */
+function implicitComputeUnitLimit(businessIxCount: number): number {
+  return Math.min(DEFAULT_CU_PER_BUSINESS_IX * businessIxCount, MAX_CU_PER_TX);
+}
+
 function reject(reason: string): Cr1Result {
   return { ok: false, reason };
 }
@@ -110,9 +131,13 @@ export function validateDepositForSponsor(
     if (cbIx.length > 2) {
       return reject('TOO_MANY_COMPUTE_BUDGET_IX');
     }
-    // Conservative default: absent a SetComputeUnitLimit, assume the max cap so
-    // the derived priority fee is an upper bound.
-    let computeUnits = cfg.maxComputeUnits;
+    // Conservative default (AR-G4 BLQ-MEDIO-1): absent a SetComputeUnitLimit the
+    // runtime applies `200_000 * businessIx`, NOT a constant — so pinning this to
+    // `cfg.maxComputeUnits` under-reserved the 2-ix form (declared 25 000 vs 30 000
+    // actually charged) and turned `feeUpperBoundLamports` into a lower bound,
+    // which in turn made the daily lamport cap under-count real spend. Mirroring
+    // the runtime rule keeps the value a true upper bound for EVERY form.
+    let computeUnits = implicitComputeUnitLimit(businessIx.length);
     let priceMicroLamports = 0n;
     let sawLimit = false;
     let sawPrice = false;
@@ -139,6 +164,13 @@ export function validateDepositForSponsor(
         // RequestUnits/RequestHeapFrame/unknown — not allowed (CD-5).
         return reject('UNSUPPORTED_COMPUTE_BUDGET_IX');
       }
+    }
+    // An IMPLICIT limit above our cap must reject too (AR-G4 BLQ-MEDIO-1):
+    // `COMPUTE_UNITS_ABOVE_MAX` above only fires when the client DECLARES a limit,
+    // so without this a 2-ix tx that simply OMITS the ix runs under 400 000 CU
+    // against a configured max of 300 000 — the cap evaded by omission.
+    if (!sawLimit && computeUnits > cfg.maxComputeUnits) {
+      return reject('IMPLICIT_COMPUTE_UNITS_ABOVE_MAX');
     }
 
     // ── Check 4: discriminator + `deposit` structure ────────────────────────
@@ -232,8 +264,21 @@ export function validateDepositForSponsor(
       // deposit's OWN `escrow_state`, the program declares it without `mut` in
       // `RegisterEscrow` (lib.rs:403-416) so it cannot be written by that ix, and
       // Check 5 still guarantees it is not the fee-payer.
+      //
+      // ⚠️ AR-G4 MNR-2 — the two `regSender` branches below are UNREACHABLE on the
+      // wire: the deposit marks `sender` signer+writable, so the same union forces
+      // both to `true` in ix[1]. They are kept as belt-and-braces for a caller that
+      // hands CR-1 an in-memory `Transaction`, but do NOT read them as real coverage
+      // of the production path (`V-12` asserts an enum production cannot emit). This
+      // is the same reasoning trap as the story's `escrow_state` line, benign side up.
       if (!regSender.isSigner || !regSender.isWritable) return reject('SECOND_IX_ACCOUNTS_INVALID');
       if (regEscrowState.isSigner) return reject('SECOND_IX_ACCOUNTS_INVALID');
+      // `escrow_index`'s PUBKEY is deliberately NOT derived here (AR-G4 MNR-1). CR-1
+      // does not derive `escrow_state`, `vault` or `mint` for the deposit either
+      // (Check 4 validates only the three program ids), so deriving the PDA for this
+      // one account would be incoherent with the module's own contract; the on-chain
+      // `seeds = ["escrow-index", sender]` is the real guard, and a mismatch costs the
+      // sponsor only the base fee, already bounded by the rate limit + daily cap.
       if (regEscrowIndex.isSigner || !regEscrowIndex.isWritable) {
         return reject('SECOND_IX_ACCOUNTS_INVALID');
       }

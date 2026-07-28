@@ -311,6 +311,15 @@ describe('CR-1 validateDepositForSponsor', () => {
 // Every vector below asserts the EXACT `reason` (the 2 drain vectors are the
 // deliberate exception: there, "does not sign" is the whole requirement).
 //
+// ⚠️ RECORDED CHANGE OF REJECTOR (AR-G4 BLQ-BAJO-1) — not a regression:
+// pre-R3, deleting Check 5 turned `T5`, `T5b`, `T6`, `T7` and `CR-MNR-4` red. Post-R3
+// only `T7` and `CR-MNR-4` still respond, because `T5`/`T5b`/`T6` inject a SECOND
+// business ix (a SystemProgram/SPL transfer) and now die earlier — in Check 2 by
+// count, or in Check 4b/b1 by programId — before Check 5 is reached. They only
+// assert `ok === false`, so the change of rejector is invisible in their output. The
+// set guarding Check 5 therefore narrowed from 5 vectors to 2, which is why `V-8`
+// below was added: it restores coverage on the atomic form, on the real path.
+//
 // ⚠️ Vectors marked [RT] go through the REAL production path
 // (serialize → `parseSponsorTx` → CR-1, routes/solana-sponsor.ts:148-152) instead
 // of handing an in-memory `Transaction` to CR-1. That distinction is NOT cosmetic:
@@ -408,6 +417,23 @@ function txOf(feePayer: PublicKey, ...ix: TransactionInstruction[]): Transaction
 }
 
 /**
+ * A 2-business-ix tx ALWAYS carries an explicit `SetComputeUnitLimit`.
+ * Post AR-G4/BLQ-MEDIO-1 that is a hard requirement, not decoration: absent the
+ * ix the runtime would apply `200_000 * 2 = 400_000` CU, above the configured
+ * 300_000 cap, and CR-1 rejects with `IMPLICIT_COMPUTE_UNITS_ABOVE_MAX` before it
+ * ever reaches Check 4b (pinned by `V-13`). R4 must emit this ix, sized against
+ * R1/T11's WORST case (79 826 CU), never against a single sample.
+ */
+const ATOMIC_CU_LIMIT = 200_000;
+function atomicTx(feePayer: PublicKey, ...ix: TransactionInstruction[]): Transaction {
+  return txOf(
+    feePayer,
+    ComputeBudgetProgram.setComputeUnitLimit({ units: ATOMIC_CU_LIMIT }),
+    ...ix,
+  );
+}
+
+/**
  * [RT] Serialize → `parseSponsorTx` → CR-1: the EXACT sequence production runs.
  * `sender` must sign so the message header reserves its signature slot.
  */
@@ -432,7 +458,7 @@ describe('CR-1 R3 — atomic deposit + register_escrow (2 business ix)', () => {
   // ── T-R3-1 ★ happy, 2 ix (AC-R3-1) ─────────────────────────────────────────
   it('T-R3-1: deposit + well-formed bound register_escrow → ok', () => {
     const { deposit, register } = buildAtomicPair();
-    const r = validateDepositForSponsor(txOf(feePayer, deposit, register), feePayer, CFG);
+    const r = validateDepositForSponsor(atomicTx(feePayer, deposit, register), feePayer, CFG);
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.feeUpperBoundLamports).toBeGreaterThan(0n);
   });
@@ -463,7 +489,7 @@ describe('CR-1 R3 — atomic deposit + register_escrow (2 business ix)', () => {
     const foreign = Keypair.generate().publicKey;
     const { deposit, register } = buildAtomicPair({ programId: foreign });
     expect(register.programId.equals(ESCROW_PK)).toBe(false); // fixture honesty
-    const r = validateDepositForSponsor(txOf(feePayer, deposit, register), feePayer, CFG);
+    const r = validateDepositForSponsor(atomicTx(feePayer, deposit, register), feePayer, CFG);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe('SECOND_IX_PROGRAM_NOT_WHITELISTED');
   });
@@ -475,7 +501,7 @@ describe('CR-1 R3 — atomic deposit + register_escrow (2 business ix)', () => {
     for (const { name, disc } of NON_REGISTER_DISCRIMINATORS) {
       const { deposit, register } = buildAtomicPair({ disc });
       expect(Array.from(register.data.subarray(0, 8))).toEqual([...disc]); // fixture honesty
-      const r = validateDepositForSponsor(txOf(feePayer, deposit, register), feePayer, CFG);
+      const r = validateDepositForSponsor(atomicTx(feePayer, deposit, register), feePayer, CFG);
       expect(r.ok, name).toBe(false);
       if (!r.ok) expect(r.reason, name).toBe('SECOND_IX_BAD_DISCRIMINATOR');
     }
@@ -486,7 +512,7 @@ describe('CR-1 R3 — atomic deposit + register_escrow (2 business ix)', () => {
     for (const dataLen of [25, 23]) {
       const { deposit, register } = buildAtomicPair({ dataLen });
       expect(register.data.length, `len ${dataLen}`).toBe(dataLen); // fixture honesty
-      const r = validateDepositForSponsor(txOf(feePayer, deposit, register), feePayer, CFG);
+      const r = validateDepositForSponsor(atomicTx(feePayer, deposit, register), feePayer, CFG);
       expect(r.ok, `len ${dataLen}`).toBe(false);
       if (!r.ok) expect(r.reason, `len ${dataLen}`).toBe('SECOND_IX_BAD_DATA_LEN');
     }
@@ -497,7 +523,7 @@ describe('CR-1 R3 — atomic deposit + register_escrow (2 business ix)', () => {
     for (const variant of ['extraAccount', 'dropAccount'] as const) {
       const { deposit, register } = buildAtomicPair({ [variant]: true });
       expect(register.keys.length, variant).toBe(variant === 'extraAccount' ? 5 : 3); // honesty
-      const r = validateDepositForSponsor(txOf(feePayer, deposit, register), feePayer, CFG);
+      const r = validateDepositForSponsor(atomicTx(feePayer, deposit, register), feePayer, CFG);
       expect(r.ok, variant).toBe(false);
       if (!r.ok) expect(r.reason, variant).toBe('SECOND_IX_ACCOUNTS_INVALID');
     }
@@ -513,7 +539,7 @@ describe('CR-1 R3 — atomic deposit + register_escrow (2 business ix)', () => {
   it('T-R3-8: 2nd ix escrow_state marked signer → SECOND_IX_ACCOUNTS_INVALID', () => {
     const { deposit, register } = buildAtomicPair({ escrowStateSigner: true });
     expect(register.keys[1]?.isSigner).toBe(true); // fixture honesty
-    const r = validateDepositForSponsor(txOf(feePayer, deposit, register), feePayer, CFG);
+    const r = validateDepositForSponsor(atomicTx(feePayer, deposit, register), feePayer, CFG);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe('SECOND_IX_ACCOUNTS_INVALID');
   });
@@ -524,7 +550,7 @@ describe('CR-1 R3 — atomic deposit + register_escrow (2 business ix)', () => {
       const { deposit, register } = buildAtomicPair({ [variant]: true });
       if (variant === 'escrowIndexSigner') expect(register.keys[2]?.isSigner).toBe(true);
       else expect(register.keys[2]?.isWritable).toBe(false); // fixture honesty
-      const r = validateDepositForSponsor(txOf(feePayer, deposit, register), feePayer, CFG);
+      const r = validateDepositForSponsor(atomicTx(feePayer, deposit, register), feePayer, CFG);
       expect(r.ok, variant).toBe(false);
       if (!r.ok) expect(r.reason, variant).toBe('SECOND_IX_ACCOUNTS_INVALID');
     }
@@ -537,7 +563,7 @@ describe('CR-1 R3 — atomic deposit + register_escrow (2 business ix)', () => {
       if (variant === 'wrongSystemProgram')
         expect(register.keys[3]?.pubkey.equals(SYS_PK)).toBe(false);
       else expect(register.keys[3]?.isWritable).toBe(true); // fixture honesty
-      const r = validateDepositForSponsor(txOf(feePayer, deposit, register), feePayer, CFG);
+      const r = validateDepositForSponsor(atomicTx(feePayer, deposit, register), feePayer, CFG);
       expect(r.ok, variant).toBe(false);
       if (!r.ok) expect(r.reason, variant).toBe('SECOND_IX_ACCOUNTS_INVALID');
     }
@@ -549,7 +575,7 @@ describe('CR-1 R3 — atomic deposit + register_escrow (2 business ix)', () => {
     const other = Keypair.generate().publicKey;
     const register = buildRegisterEscrowIx({ sender: other, escrowState, rid });
     expect(register.keys[0]?.pubkey.equals(deposit.keys[0]!.pubkey)).toBe(false); // honesty
-    const r = validateDepositForSponsor(txOf(feePayer, deposit, register), feePayer, CFG);
+    const r = validateDepositForSponsor(atomicTx(feePayer, deposit, register), feePayer, CFG);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe('SECOND_IX_NOT_BOUND_TO_DEPOSIT');
   });
@@ -563,7 +589,7 @@ describe('CR-1 R3 — atomic deposit + register_escrow (2 business ix)', () => {
       rid,
     });
     expect(register.keys[1]?.pubkey.equals(deposit.keys[2]!.pubkey)).toBe(false); // honesty
-    const r = validateDepositForSponsor(txOf(feePayer, deposit, register), feePayer, CFG);
+    const r = validateDepositForSponsor(atomicTx(feePayer, deposit, register), feePayer, CFG);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe('SECOND_IX_NOT_BOUND_TO_DEPOSIT');
   });
@@ -572,7 +598,7 @@ describe('CR-1 R3 — atomic deposit + register_escrow (2 business ix)', () => {
   it('T-R3-13: 2nd ix remittance_id ≠ deposit remittance_id → SECOND_IX_NOT_BOUND_TO_DEPOSIT', () => {
     const { deposit, register } = buildAtomicPair({ rid: Buffer.alloc(16, 9) });
     expect(register.data.subarray(8, 24).equals(deposit.data.subarray(8, 24))).toBe(false); // honesty
-    const r = validateDepositForSponsor(txOf(feePayer, deposit, register), feePayer, CFG);
+    const r = validateDepositForSponsor(atomicTx(feePayer, deposit, register), feePayer, CFG);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe('SECOND_IX_NOT_BOUND_TO_DEPOSIT');
   });
@@ -582,7 +608,7 @@ describe('CR-1 R3 — atomic deposit + register_escrow (2 business ix)', () => {
     const { deposit, escrowState, rid } = buildAtomicPair();
     const register = buildRegisterEscrowIx({ sender: feePayer, escrowState, rid });
     expect(register.keys[0]?.pubkey.equals(feePayer)).toBe(true); // fixture honesty
-    const r = validateDepositForSponsor(txOf(feePayer, deposit, register), feePayer, CFG);
+    const r = validateDepositForSponsor(atomicTx(feePayer, deposit, register), feePayer, CFG);
     expect(r.ok).toBe(false); // reason may be SECOND_IX_* or FEE_PAYER_*: what matters is NOT signing
   });
 
@@ -590,14 +616,14 @@ describe('CR-1 R3 — atomic deposit + register_escrow (2 business ix)', () => {
   it('★★ T-R3-15: 2nd ix escrow_index === feePayer → reject, NOT signed', () => {
     const { deposit, register } = buildAtomicPair({ escrowIndex: feePayer });
     expect(register.keys[2]?.pubkey.equals(feePayer)).toBe(true); // fixture honesty
-    const r = validateDepositForSponsor(txOf(feePayer, deposit, register), feePayer, CFG);
+    const r = validateDepositForSponsor(atomicTx(feePayer, deposit, register), feePayer, CFG);
     expect(r.ok).toBe(false);
   });
 
   // ── T-R3-16 ★★ DRAIN: 2 legit ix + a 3rd transfer from the fee-payer ────────
   it('★★ T-R3-16: 2 legit business ix + SystemProgram.transfer({from:feePayer}) → NOT_EXACTLY_ONE_BUSINESS_IX', () => {
     const { deposit, register } = buildAtomicPair();
-    const tx = txOf(feePayer, deposit, register, systemTransfer(feePayer));
+    const tx = atomicTx(feePayer, deposit, register, systemTransfer(feePayer));
     const r = validateDepositForSponsor(tx, feePayer, CFG);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe('NOT_EXACTLY_ONE_BUSINESS_IX');
@@ -606,7 +632,7 @@ describe('CR-1 R3 — atomic deposit + register_escrow (2 business ix)', () => {
   // ── T-R3-17 order inverted: register first ──────────────────────────────────
   it('T-R3-17: register_escrow at position 0 and deposit at 1 → BAD_DISCRIMINATOR', () => {
     const { deposit, register } = buildAtomicPair();
-    const r = validateDepositForSponsor(txOf(feePayer, register, deposit), feePayer, CFG);
+    const r = validateDepositForSponsor(atomicTx(feePayer, register, deposit), feePayer, CFG);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe('BAD_DISCRIMINATOR');
   });
@@ -617,12 +643,16 @@ describe('CR-1 R3 — atomic deposit + register_escrow (2 business ix)', () => {
     // rejects BEFORE b3 can look at the discriminator. The story predicted
     // SECOND_IX_BAD_DISCRIMINATOR; the real gate order makes it BAD_DATA_LEN.
     const { deposit } = buildAtomicPair();
-    const dup = validateDepositForSponsor(txOf(feePayer, deposit, deposit), feePayer, CFG);
+    const dup = validateDepositForSponsor(atomicTx(feePayer, deposit, deposit), feePayer, CFG);
     expect(dup.ok).toBe(false);
     if (!dup.ok) expect(dup.reason).toBe('SECOND_IX_BAD_DATA_LEN');
     // Same intent, past the length gate: a deposit discriminator in a 24-byte ix.
     const pair = buildAtomicPair({ disc: DEPOSIT_DISCRIMINATOR });
-    const r = validateDepositForSponsor(txOf(feePayer, pair.deposit, pair.register), feePayer, CFG);
+    const r = validateDepositForSponsor(
+      atomicTx(feePayer, pair.deposit, pair.register),
+      feePayer,
+      CFG,
+    );
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe('SECOND_IX_BAD_DISCRIMINATOR');
   });
@@ -630,7 +660,11 @@ describe('CR-1 R3 — atomic deposit + register_escrow (2 business ix)', () => {
   // ── T-R3-19 three business ix ───────────────────────────────────────────────
   it('T-R3-19: 3 business ix (deposit + register + register) → NOT_EXACTLY_ONE_BUSINESS_IX', () => {
     const { deposit, register } = buildAtomicPair();
-    const r = validateDepositForSponsor(txOf(feePayer, deposit, register, register), feePayer, CFG);
+    const r = validateDepositForSponsor(
+      atomicTx(feePayer, deposit, register, register),
+      feePayer,
+      CFG,
+    );
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe('NOT_EXACTLY_ONE_BUSINESS_IX');
   });
@@ -641,15 +675,98 @@ describe('CR-1 R3 — atomic deposit + register_escrow (2 business ix)', () => {
   // Vectors added beyond the story's 20 (V-*): attacker-driven and round-trip.
   // ───────────────────────────────────────────────────────────────────────────
 
-  // ── V-1: the 2nd ix must NOT cost the sponsor more than the 1-ix form ───────
-  it('V-1: the atomic form adds no signer ⇒ identical feeUpperBound to the 1-ix form', () => {
+  // ── V-1 ★★: the declared bound vs what the CLUSTER ACTUALLY CHARGES ─────────
+  //
+  // ⚠️ This vector replaces a vacuous one (AR-G4). The first version asserted that
+  // `feeUpperBoundLamports` was IDENTICAL for the 1-ix and 2-ix forms. That was
+  // true (25 000 = 25 000) and it passed — but it compared OUR OWN prediction to
+  // itself while the real cost rose 50%. The lesson: never assert a number we
+  // computed; assert it against the number the runtime charges.
+  //
+  // Every literal below was MEASURED with solana-bankrun (2 signers, real
+  // `processTransaction`, fee-payer balance before/after), NOT derived from the
+  // code under test:
+  //   price 50 000 µL, NO SetComputeUnitLimit: 1 business ix → 20 000 lamports,
+  //                                            2 → 30 000, 3 → 40 000
+  //   price 50 000 µL, SetComputeUnitLimit(200 000): → 20 000
+  //   price 50 000 µL, SetComputeUnitLimit(300 000): → 25 000
+  //   no price ix at all:                            → 10 000 (base only)
+  // CU actually consumed in those runs was 300/450/600: the priority fee follows
+  // the LIMIT, never consumption.
+  // Goes through the WIRE so `numSigners` is really 2 (feePayer + sender), matching
+  // the measurement's conditions. An unsigned in-memory tx reports 1 signer and the
+  // comparison against the measured lamports would be meaningless.
+  it('★★ V-1 [RT]: feeUpperBoundLamports vs the lamports the runtime really charges (measured)', () => {
+    const price = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 50_000 });
+    // (a) legacy 1 ix, no SetComputeUnitLimit ⇒ runtime limit 200 000 ⇒ charged 20 000.
+    const kpA = Keypair.generate();
+    const one = validateViaWire(
+      txOf(feePayer, price, buildDepositIx({ sender: kpA.publicKey })),
+      kpA,
+      feePayer,
+    );
+    expect(one.ok).toBe(true);
+    if (one.ok) expect(one.feeUpperBoundLamports).toBe(20_000n); // == measured, exact
+    // (b) atomic 2 ix with SetComputeUnitLimit(200 000) ⇒ charged 20 000.
+    const kpB = Keypair.generate();
+    const pairB = buildAtomicPair({}, { sender: kpB.publicKey });
+    const two = validateViaWire(
+      txOf(
+        feePayer,
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
+        price,
+        pairB.deposit,
+        pairB.register,
+      ),
+      kpB,
+      feePayer,
+    );
+    expect(two.ok).toBe(true);
+    if (two.ok) expect(two.feeUpperBoundLamports).toBe(20_000n); // == measured, exact
+    // (c) the form that used to under-reserve (2 ix, no limit ⇒ really 30 000 charged
+    //     while CR-1 declared 25 000) is now REJECTED, so it can never be signed.
+    const kpC = Keypair.generate();
+    const pairC = buildAtomicPair({}, { sender: kpC.publicKey });
+    const under = validateViaWire(
+      txOf(feePayer, price, pairC.deposit, pairC.register),
+      kpC,
+      feePayer,
+    );
+    expect(under.ok).toBe(false);
+    if (!under.ok) expect(under.reason).toBe('IMPLICIT_COMPUTE_UNITS_ABOVE_MAX');
+  });
+
+  // ── V-13 ★★: the CU cap can no longer be evaded by OMITTING the ix ──────────
+  it('★★ V-13: 2 business ix without SetComputeUnitLimit → IMPLICIT_COMPUTE_UNITS_ABOVE_MAX', () => {
+    // Implicit limit = 200_000 * 2 = 400_000 > cfg.maxComputeUnits (300_000).
     const { deposit, register } = buildAtomicPair();
-    const two = validateDepositForSponsor(txOf(feePayer, deposit, register), feePayer, CFG);
-    const one = validateDepositForSponsor(txOf(feePayer, deposit), feePayer, CFG);
-    expect(two.ok && one.ok).toBe(true);
-    if (two.ok && one.ok) {
-      expect(two.feeUpperBoundLamports).toBe(one.feeUpperBoundLamports);
-    }
+    const r = validateDepositForSponsor(txOf(feePayer, deposit, register), feePayer, CFG);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe('IMPLICIT_COMPUTE_UNITS_ABOVE_MAX');
+  });
+
+  it('V-13b: 1 business ix without SetComputeUnitLimit is STILL accepted (200_000 <= cap)', () => {
+    // The new gate must not touch the legacy form: this is the compatibility half
+    // of V-13, and the reason the rule is `200_000 * n` and not a flat rejection.
+    const r = validateDepositForSponsor(txOf(feePayer, buildDepositIx()), feePayer, CFG);
+    expect(r.ok).toBe(true);
+  });
+
+  it('V-13c: 2 business ix WITH SetComputeUnitLimit above the cap → COMPUTE_UNITS_ABOVE_MAX', () => {
+    // The declared path keeps its own, distinct enum — the two gates do not merge.
+    const { deposit, register } = buildAtomicPair();
+    const r = validateDepositForSponsor(
+      txOf(
+        feePayer,
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
+        deposit,
+        register,
+      ),
+      feePayer,
+      CFG,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe('COMPUTE_UNITS_ABOVE_MAX');
   });
 
   // ── V-2 ★★: a LONE register_escrow must never be sponsored ──────────────────
@@ -672,7 +789,7 @@ describe('CR-1 R3 — atomic deposit + register_escrow (2 business ix)', () => {
     // on the wire. Without it, T-R3-1 can be green while the money-path is dead.
     const senderKp = Keypair.generate();
     const { deposit, register } = buildAtomicPair({}, { sender: senderKp.publicKey });
-    const r = validateViaWire(txOf(feePayer, deposit, register), senderKp, feePayer);
+    const r = validateViaWire(atomicTx(feePayer, deposit, register), senderKp, feePayer);
     expect(r.ok).toBe(true);
   });
 
@@ -681,15 +798,20 @@ describe('CR-1 R3 — atomic deposit + register_escrow (2 business ix)', () => {
     // messages carry tx-level flags, so the deposit's `mut` leaks into ix[1].
     const senderKp = Keypair.generate();
     const { deposit, register } = buildAtomicPair({}, { sender: senderKp.publicKey });
-    const tx = txOf(feePayer, deposit, register);
-    expect(tx.instructions[1]?.keys[1]?.isWritable).toBe(false); // in memory: read-only
+    const tx = atomicTx(feePayer, deposit, register);
+    // ix[0] is the SetComputeUnitLimit, so the register is ix[2]. Identify it
+    // positively FIRST, so an index slip cannot turn this vector into a tautology.
+    expect(tx.instructions.length).toBe(3);
+    expect(tx.instructions[2]?.programId.equals(ESCROW_PK)).toBe(true);
+    expect(tx.instructions[2]?.keys.length).toBe(4);
+    expect(tx.instructions[2]?.keys[1]?.isWritable).toBe(false); // in memory: read-only
     tx.partialSign(senderKp);
     const parsed = parseSponsorTx(
       tx.serialize({ requireAllSignatures: false, verifySignatures: false }).toString('base64'),
     );
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
-    expect(parsed.tx.instructions[1]?.keys[1]?.isWritable).toBe(true); // on the wire: writable
+    expect(parsed.tx.instructions[2]?.keys[1]?.isWritable).toBe(true); // on the wire: writable
   });
 
   // ── V-4 [RT]: the legacy 1-ix form through the real path ────────────────────
@@ -711,7 +833,7 @@ describe('CR-1 R3 — atomic deposit + register_escrow (2 business ix)', () => {
     });
     expect(deposit.data.length).toBe(8); // fixture honesty
     const register = buildRegisterEscrowIx({ sender, escrowState });
-    const r = validateDepositForSponsor(txOf(feePayer, deposit, register), feePayer, CFG);
+    const r = validateDepositForSponsor(atomicTx(feePayer, deposit, register), feePayer, CFG);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe('SECOND_IX_NOT_BOUND_TO_DEPOSIT');
   });
@@ -723,15 +845,48 @@ describe('CR-1 R3 — atomic deposit + register_escrow (2 business ix)', () => {
     expect(r.ok).toBe(true); // pre-R3 behaviour, byte-identical
   });
 
-  // ── V-7 ★★ [RT]: the drain vector through the real path ─────────────────────
-  it('★★ V-7 [RT]: escrow_index === feePayer on the wire → reject, NOT signed', () => {
+  // ── V-7 [RT]: fee-payer as escrow_index on the wire ─────────────────────────
+  //
+  // ⚠️ CORRECTED LABEL (AR-G4 BLQ-BAJO-1): this is NOT "the drain vector through the
+  // real path". On the wire the fee-payer is a REQUIRED SIGNER, so the union marks
+  // this account `isSigner` and b5's `regEscrowIndex.isSigner` rejects it before
+  // Check 5 is ever consulted — the vector stays green with Check 5 deleted. It
+  // documents b5's defence in depth; `V-8` below is the one that pins Check 5 on the
+  // real path. Asserting the exact rejector is what makes that distinction visible.
+  it('V-7 [RT]: escrow_index === feePayer on the wire → rejected by b5, not by Check 5', () => {
     const senderKp = Keypair.generate();
     const { deposit, register } = buildAtomicPair(
       { escrowIndex: feePayer },
       { sender: senderKp.publicKey },
     );
-    const r = validateViaWire(txOf(feePayer, deposit, register), senderKp, feePayer);
+    const r = validateViaWire(atomicTx(feePayer, deposit, register), senderKp, feePayer);
     expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe('SECOND_IX_ACCOUNTS_INVALID'); // b5, NOT Check 5
+  });
+
+  // ── V-8 ★★ [RT]: THE worst drain, and Check 5 is its only rejector ───────────
+  //
+  // AR-G4 BLQ-BAJO-1: `deposit.sender === feePayer` with the register CORRECTLY
+  // BOUND to it, on the wire. Such a tx would debit the fee-payer's own USDC ATA and
+  // charge it the rent of both the escrow and the index. Nothing else stops it:
+  // `T7` covers only the 1-ix form, and `T-R3-14` uses a DIFFERENT regSender so it
+  // dies in b6 and never reaches here. Under M7 the AR measured this exact shape as
+  // *** ACCEPTED — SPONSOR SIGNS A DRAIN ***, so this is the vector that gives the
+  // atomic form real coverage of the anti-drain core on the production path.
+  it('★★ V-8 [RT]: deposit.sender === feePayer with a BOUND register → FEE_PAYER_REFERENCED_IN_INSTRUCTION', () => {
+    const feePayerKp = Keypair.generate();
+    const fp = feePayerKp.publicKey;
+    // The whole pair is built around the fee-payer as the sender, so b1..b6 all pass
+    // and Check 5 is the only gate left.
+    const { deposit, register } = buildAtomicPair({}, { sender: fp });
+    expect(deposit.keys[0]?.pubkey.equals(fp)).toBe(true); // fixture honesty
+    expect(register.keys[0]?.pubkey.equals(fp)).toBe(true); // bound to the SAME sender
+    expect(register.data.subarray(8, 24).equals(deposit.data.subarray(8, 24))).toBe(true);
+    const tx = atomicTx(fp, deposit, register);
+    // sender === feePayer, so the fee-payer's own key is the only signature slot.
+    const r = validateViaWire(tx, feePayerKp, fp);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe('FEE_PAYER_REFERENCED_IN_INSTRUCTION');
   });
 
   // ── V-9: position-0 discipline (no discriminator search) ────────────────────
@@ -740,7 +895,7 @@ describe('CR-1 R3 — atomic deposit + register_escrow (2 business ix)', () => {
     const escrowState = Keypair.generate().publicKey;
     const a = buildRegisterEscrowIx({ sender, escrowState });
     const b = buildRegisterEscrowIx({ sender, escrowState });
-    const r = validateDepositForSponsor(txOf(feePayer, a, b), feePayer, CFG);
+    const r = validateDepositForSponsor(atomicTx(feePayer, a, b), feePayer, CFG);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe('BAD_DISCRIMINATOR');
   });
@@ -750,7 +905,7 @@ describe('CR-1 R3 — atomic deposit + register_escrow (2 business ix)', () => {
     const reference = Keypair.generate().publicKey;
     const { deposit, register } = buildAtomicPair({}, { reference });
     expect(deposit.keys[8]?.pubkey.equals(reference)).toBe(true); // fixture honesty
-    const r = validateDepositForSponsor(txOf(feePayer, deposit, register), feePayer, CFG);
+    const r = validateDepositForSponsor(atomicTx(feePayer, deposit, register), feePayer, CFG);
     expect(r.ok).toBe(true);
   });
 
@@ -761,7 +916,7 @@ describe('CR-1 R3 — atomic deposit + register_escrow (2 business ix)', () => {
     const { deposit, register } = buildAtomicPair({ rid });
     expect(register.data.subarray(8, 23).equals(deposit.data.subarray(8, 23))).toBe(true); // 15 bytes equal
     expect(register.data[23]).not.toBe(deposit.data[23]); // fixture honesty
-    const r = validateDepositForSponsor(txOf(feePayer, deposit, register), feePayer, CFG);
+    const r = validateDepositForSponsor(atomicTx(feePayer, deposit, register), feePayer, CFG);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe('SECOND_IX_NOT_BOUND_TO_DEPOSIT');
   });
@@ -770,7 +925,7 @@ describe('CR-1 R3 — atomic deposit + register_escrow (2 business ix)', () => {
   it('V-12: 2nd ix sender not marked signer → SECOND_IX_ACCOUNTS_INVALID', () => {
     const { deposit, register } = buildAtomicPair({ senderNotSigner: true });
     expect(register.keys[0]?.isSigner).toBe(false); // fixture honesty
-    const r = validateDepositForSponsor(txOf(feePayer, deposit, register), feePayer, CFG);
+    const r = validateDepositForSponsor(atomicTx(feePayer, deposit, register), feePayer, CFG);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe('SECOND_IX_ACCOUNTS_INVALID');
   });
