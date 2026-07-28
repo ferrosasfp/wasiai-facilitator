@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { ESCROW_PROGRAM_ID_DEFAULT } from '../chains/escrow-program-id.js';
 
 /**
  * Environment variables schema.
@@ -203,11 +204,8 @@ export const EnvSchema = z
       .default('false')
       .transform((v) => v === 'true'),
     // Whitelist programId for the `deposit` ix (CD-4). Public on-chain address.
-    SOLANA_ESCROW_PROGRAM_ID: z
-      .string()
-      .min(1)
-      // eslint-disable-next-line no-secrets/no-secrets -- public on-chain escrow program id (base58 pubkey), not a secret.
-      .default('DR5GoMT7sAKzD6wZMKJPeknS3Y6fzgZUNevi7xiESE4x'),
+    // Default derived from `escrowIdl.address` — the SINGLE source (CD-15).
+    SOLANA_ESCROW_PROGRAM_ID: z.string().min(1).default(ESCROW_PROGRAM_ID_DEFAULT),
     // ComputeBudget caps (AC-4 / CD-5). A tx WITHOUT a SetComputeUnitLimit is NOT
     // rejected outright: CR-1 assumes the runtime default (`200_000 * business ix`)
     // and rejects only if THAT exceeds this cap — so 1 ix (200 000) passes and 2 ix

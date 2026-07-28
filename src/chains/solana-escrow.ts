@@ -29,6 +29,7 @@ import { createHash } from 'node:crypto';
 import { PublicKey } from '@solana/web3.js';
 import { BorshAccountsCoder, type BN, type Idl } from '@coral-xyz/anchor';
 import { escrowIdl } from './escrow-idl.js';
+import { ESCROW_PROGRAM_ID_DEFAULT } from './escrow-program-id.js';
 
 /** SPL Token classic program id (ATA derivation seed). Public on-chain pubkey. */
 // eslint-disable-next-line no-secrets/no-secrets -- public on-chain SPL Token program id (base58 pubkey), not a secret.
@@ -38,9 +39,12 @@ const TOKEN_PROGRAM_ID = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
 // eslint-disable-next-line no-secrets/no-secrets -- public on-chain Associated Token program id (base58 pubkey), not a secret.
 const ASSOCIATED_TOKEN_PROGRAM_ID = 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL';
 
-/** Escrow program id (PDA derivation). Public on-chain pubkey (== escrowIdl.address). */
-// eslint-disable-next-line no-secrets/no-secrets -- public on-chain escrow program id (base58 pubkey), not a secret.
-export const ESCROW_PROGRAM_ID_DEFAULT = 'DR5GoMT7sAKzD6wZMKJPeknS3Y6fzgZUNevi7xiESE4x';
+/**
+ * Escrow program id (PDA derivation). Derived from `escrowIdl.address` — the
+ * SINGLE source (CD-15). Re-exported here so this module's public API is
+ * unchanged for its consumers.
+ */
+export { ESCROW_PROGRAM_ID_DEFAULT };
 
 /** Escrow status, normalized from the anchor enum object to a stable string. */
 export type EscrowStatusStr = 'Deposited' | 'Released' | 'Refunded' | 'Unknown';
