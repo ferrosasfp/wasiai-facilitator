@@ -37,6 +37,12 @@ coverage/
 .nexus/
 CLAUDE.md
 
+# Internal delivery artefacts: specs, story files, QA/review reports and
+# retros. Contain operational data (wallets, infra refs) and self-reported
+# findings that do not belong in a public repo.
+doc/sdd/
+BACKLOG.md
+
 # Railway CLI cache
 .railway/
 
