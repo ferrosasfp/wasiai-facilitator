@@ -9,7 +9,7 @@
  * knowledge, documented in Hardhat defaults). No RPC, no keys from env.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { privateKeyToAccount } from 'viem/accounts';
 import type { Address, TypedDataDomain } from 'viem';
 import { verifyEip3009 } from '../../../../methods/eip3009/verify.js';
@@ -398,17 +398,42 @@ describe('verifyEip3009', () => {
       expect(result.ok).toBe(true);
     });
 
+    /**
+     * T-H5 asserts the TIGHTEST possible non-expired window: `validBefore` is
+     * exactly one second ahead of now, so `verify.ts` must accept it (the check
+     * is `validBefore <= now` → reject; an off-by-one there turns this green
+     * boundary red — that is precisely what this test pins).
+     *
+     * A window that narrow cannot be built against the real clock. The test reads
+     * `Date.now()`, signs (async), and `verifyEip3009` re-reads `Date.now()`; if
+     * the second boundary falls between the two reads, `validBefore == now` and
+     * the authorization is rejected as EXPIRED_AUTHORIZATION. Measured gap under
+     * full-suite load: 0-15 ms, i.e. it loses that race roughly once every ~1000
+     * runs — a real flake, just a rare one.
+     *
+     * Fix: remove the dependency on the real clock, do NOT widen the window or
+     * the timeout (that would hide the race while keeping it). Only `Date` is
+     * faked (`toFake: ['Date']`) so timers/microtasks keep working normally and
+     * the `await` on the signature cannot hang. `try/finally` restores the real
+     * clock even if the assertion throws, so nothing leaks into sibling tests.
+     */
     it('T-H5: validBefore === nowSec + 1 is OK', async () => {
-      const nowSec = Math.floor(Date.now() / 1000);
-      const params = await makeValidParams({
-        nowSec,
-        messageOverrides: {
-          validAfter: BigInt(nowSec - 10),
-          validBefore: BigInt(nowSec + 1),
-        },
-      });
-      const result = await verifyEip3009(params, TEST_TOKEN, TEST_CHAIN_ID);
-      expect(result.ok).toBe(true);
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+        const nowSec = Math.floor(Date.now() / 1000);
+        const params = await makeValidParams({
+          nowSec,
+          messageOverrides: {
+            validAfter: BigInt(nowSec - 10),
+            validBefore: BigInt(nowSec + 1),
+          },
+        });
+        const result = await verifyEip3009(params, TEST_TOKEN, TEST_CHAIN_ID);
+        expect(result.ok).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('T-H6: uint256 overflow in value is rejected as INVALID_SIGNATURE', async () => {

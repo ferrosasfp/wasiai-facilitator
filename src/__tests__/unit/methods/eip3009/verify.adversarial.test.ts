@@ -378,17 +378,29 @@ describe('Suite 1 — adversarial verifyEip3009', () => {
       expect(r.ok).toBe(true);
     });
 
+    // Twin of T-H5 in verify.test.ts, and it carries the SAME real-clock race:
+    // a 1-second window built from `Date.now()` that `verifyEip3009` re-reads.
+    // If the second boundary falls between the two reads the authorization is
+    // rejected as EXPIRED and this goes red for no reason. Freeze `Date` only
+    // (timers untouched, so the `await` on the signature cannot hang), and
+    // restore it in `finally` so nothing leaks into sibling tests.
     it('BOUNDARY: validBefore === now + 1 → accepted (now < validBefore)', async () => {
-      const nowSec = Math.floor(Date.now() / 1000);
-      const params = await makeParams({
-        nowSec,
-        messageOverrides: {
-          validAfter: BigInt(nowSec - 10),
-          validBefore: BigInt(nowSec + 1),
-        },
-      });
-      const r = await verifyEip3009(params, TOKEN, CHAIN_ID);
-      expect(r.ok).toBe(true);
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+        const nowSec = Math.floor(Date.now() / 1000);
+        const params = await makeParams({
+          nowSec,
+          messageOverrides: {
+            validAfter: BigInt(nowSec - 10),
+            validBefore: BigInt(nowSec + 1),
+          },
+        });
+        const r = await verifyEip3009(params, TOKEN, CHAIN_ID);
+        expect(r.ok).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 
