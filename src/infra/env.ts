@@ -208,7 +208,11 @@ export const EnvSchema = z
       .min(1)
       // eslint-disable-next-line no-secrets/no-secrets -- public on-chain escrow program id (base58 pubkey), not a secret.
       .default('DR5GoMT7sAKzD6wZMKJPeknS3Y6fzgZUNevi7xiESE4x'),
-    // ComputeBudget caps (AC-4 / CD-5) — tx without a tope is rejected by CR-1.
+    // ComputeBudget caps (AC-4 / CD-5). A tx WITHOUT a SetComputeUnitLimit is NOT
+    // rejected outright: CR-1 assumes the runtime default (`200_000 * business ix`)
+    // and rejects only if THAT exceeds this cap — so 1 ix (200 000) passes and 2 ix
+    // (400 000) does not. The older claim that any tx without a tope is rejected was
+    // false, and it is what hid AR-G4 BLQ-MEDIO-1 (see cr1.ts, Check 3).
     SOLANA_SPONSOR_MAX_COMPUTE_UNITS: z.coerce.number().int().min(1).default(300000),
     SOLANA_SPONSOR_MAX_PRIORITY_FEE_MICROLAMPORTS: z.coerce.number().int().min(0).default(50000),
     // Per-tx fee ceiling in lamports (0.0001 SOL). Derived fee upper bound must
