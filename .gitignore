@@ -31,9 +31,11 @@ pnpm-debug.log*
 coverage/
 .nyc_output/
 
-# Claude Code local settings (keep .claude/agents/ and .claude/commands/ tracked)
-.claude/settings.json
-.claude/settings.local.json
+# Local agent tooling: system prompts, slash commands and generated project
+# context. Internal to the development workflow, not part of the service.
+.claude/
+.nexus/
+CLAUDE.md
 
 # Railway CLI cache
 .railway/
