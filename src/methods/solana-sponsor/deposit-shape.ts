@@ -14,9 +14,12 @@
 /**
  * Escrow program id whitelisted for the `deposit` ix. Overridable via
  * `SOLANA_ESCROW_PROGRAM_ID`; this is the default (devnet program).
+ *
+ * Derived from `escrowIdl.address` — the SINGLE source (CD-15). The re-exported
+ * module is dependency-free data, so CD-12 holds: this does NOT pull anchor into
+ * the raw-bytes validation path.
  */
-// eslint-disable-next-line no-secrets/no-secrets -- public on-chain escrow program id (base58 pubkey), not a secret.
-export const ESCROW_PROGRAM_ID_DEFAULT = 'DR5GoMT7sAKzD6wZMKJPeknS3Y6fzgZUNevi7xiESE4x';
+export { ESCROW_PROGRAM_ID_DEFAULT } from '../../chains/escrow-program-id.js';
 
 /**
  * Anchor discriminator of the `deposit` instruction — first 8 bytes of `ix.data`
