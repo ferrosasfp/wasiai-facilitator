@@ -21,8 +21,15 @@
 import { ComputeBudgetProgram, PublicKey, type Transaction } from '@solana/web3.js';
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
+  DEPOSIT_ACCOUNT_INDEX,
   DEPOSIT_DISCRIMINATOR,
   DEPOSIT_POSITIONAL_ACCOUNTS,
+  REGISTER_ESCROW_ACCOUNT_INDEX,
+  REGISTER_ESCROW_DATA_LEN,
+  REGISTER_ESCROW_DISCRIMINATOR,
+  REGISTER_ESCROW_POSITIONAL_ACCOUNTS,
+  REMITTANCE_ID_LEN,
+  REMITTANCE_ID_OFFSET,
   SYSTEM_PROGRAM_ID,
   TOKEN_PROGRAM_ID,
 } from './deposit-shape.js';
@@ -74,10 +81,14 @@ export function validateDepositForSponsor(
     const instructions = tx.instructions;
     const computeBudgetPk = ComputeBudgetProgram.programId;
 
-    // ── Check 2: exactly 1 business ix, escrow-whitelisted programId ─────────
+    // ── Check 2: 1 or 2 business ix, escrow-whitelisted programId ────────────
     const businessIx = instructions.filter((ix) => !ix.programId.equals(computeBudgetPk));
     const cbIx = instructions.filter((ix) => ix.programId.equals(computeBudgetPk));
-    if (businessIx.length !== 1) {
+    // HU-SOL-20/R3: 1 (legacy form, byte-identical path) or 2 (`deposit` +
+    // `register_escrow`, atomic) are allowed. 0 or >=3 keep rejecting with the
+    // SAME enum (vectors T4a/T4b are untouched). Position 0 is ALWAYS the
+    // `deposit`: no discriminator search, deterministic and fail-closed.
+    if (businessIx.length !== 1 && businessIx.length !== 2) {
       return reject('NOT_EXACTLY_ONE_BUSINESS_IX');
     }
     const deposit = businessIx[0];
@@ -170,6 +181,90 @@ export function validateDepositForSponsor(
     const remaining = keys.slice(DEPOSIT_POSITIONAL_ACCOUNTS);
     if (remaining.some((k) => k.isSigner || k.isWritable)) {
       return reject('REMAINING_ACCOUNT_FLAGS_INVALID');
+    }
+
+    // ── Check 4b: if a 2nd business ix exists it MUST be EXACTLY `register_escrow`
+    // of the same escrow program, bound to THIS deposit (HU-SOL-20/R3). Strict
+    // allowlist: programId + pinned discriminator + exact data length + exactly 4
+    // accounts with fixed flags + sender/escrow_state/remittance_id binding. Any
+    // deviation ⇒ reject WITHOUT signing. Everything new lives inside this `if`,
+    // so the 1-business-ix path executes not a single new line (AC-R3-2).
+    if (businessIx.length === 2) {
+      const reg = businessIx[1];
+      if (reg === undefined) return reject('SECOND_IX_ACCOUNTS_INVALID');
+      // b1 — same escrow program (never another programId, nor ComputeBudget, nor SPL).
+      if (!reg.programId.equals(escrowPk)) return reject('SECOND_IX_PROGRAM_NOT_WHITELISTED');
+      // b2 — EXACT length (8 + 16). Not one byte more: closes the silent "extra arg".
+      if (reg.data.length !== REGISTER_ESCROW_DATA_LEN) return reject('SECOND_IX_BAD_DATA_LEN');
+      // b3 — pinned discriminator, compared byte-wise (CD-12: no anchor, no runtime IDL trust).
+      const regDisc = Buffer.from(reg.data.subarray(0, REGISTER_ESCROW_DISCRIMINATOR.length));
+      if (!regDisc.equals(Buffer.from([...REGISTER_ESCROW_DISCRIMINATOR]))) {
+        return reject('SECOND_IX_BAD_DISCRIMINATOR');
+      }
+      // b4 — EXACTLY 4 accounts: no remaining ones, none extra.
+      if (reg.keys.length !== REGISTER_ESCROW_POSITIONAL_ACCOUNTS) {
+        return reject('SECOND_IX_ACCOUNTS_INVALID');
+      }
+      const regSender = reg.keys[REGISTER_ESCROW_ACCOUNT_INDEX.SENDER];
+      const regEscrowState = reg.keys[REGISTER_ESCROW_ACCOUNT_INDEX.ESCROW_STATE];
+      const regEscrowIndex = reg.keys[REGISTER_ESCROW_ACCOUNT_INDEX.ESCROW_INDEX];
+      const regSystemProgram = reg.keys[REGISTER_ESCROW_ACCOUNT_INDEX.SYSTEM_PROGRAM];
+      if (
+        regSender === undefined ||
+        regEscrowState === undefined ||
+        regEscrowIndex === undefined ||
+        regSystemProgram === undefined
+      ) {
+        return reject('SECOND_IX_ACCOUNTS_INVALID');
+      }
+      // b5 — EXACT flags per position. An extra writable is an account the tx can mutate.
+      //
+      // ⚠️ WHY `regEscrowState` is only checked for NON-SIGNER and not for non-writable:
+      // in a Solana LEGACY message, is-signer/is-writable are TRANSACTION-level
+      // properties (message header + accountKeys ordering), NOT per-instruction ones.
+      // The production path is serialize → `parseSponsorTx` → `Transaction.from`
+      // (broadcast.ts:96-118), and on that round-trip every meta of a given pubkey
+      // collapses to the UNION over all instructions. `escrow_state` is legitimately
+      // writable in the `deposit` (IDL: deposit.escrow_state.writable = true), so it
+      // ALWAYS comes back writable in the 2nd ix too. Asserting non-writable here
+      // would reject every legitimate atomic tx and take the money-path down.
+      // No drain is enabled by allowing it: the account is pinned by b6 to be the
+      // deposit's OWN `escrow_state`, the program declares it without `mut` in
+      // `RegisterEscrow` (lib.rs:403-416) so it cannot be written by that ix, and
+      // Check 5 still guarantees it is not the fee-payer.
+      if (!regSender.isSigner || !regSender.isWritable) return reject('SECOND_IX_ACCOUNTS_INVALID');
+      if (regEscrowState.isSigner) return reject('SECOND_IX_ACCOUNTS_INVALID');
+      if (regEscrowIndex.isSigner || !regEscrowIndex.isWritable) {
+        return reject('SECOND_IX_ACCOUNTS_INVALID');
+      }
+      if (regSystemProgram.isSigner || regSystemProgram.isWritable) {
+        return reject('SECOND_IX_ACCOUNTS_INVALID');
+      }
+      if (!regSystemProgram.pubkey.equals(new PublicKey(SYSTEM_PROGRAM_ID))) {
+        return reject('SECOND_IX_ACCOUNTS_INVALID');
+      }
+      // b6 — BINDING to the deposit: same sender, same escrow_state, same remittance_id.
+      // Without it an attacker could pair a legitimate deposit with the register of
+      // something else. The deposit's data length is asserted ONLY here, so the
+      // 1-ix path stays byte-identical.
+      if (data.length < REMITTANCE_ID_OFFSET + REMITTANCE_ID_LEN) {
+        return reject('SECOND_IX_NOT_BOUND_TO_DEPOSIT');
+      }
+      const depEscrowState = keys[DEPOSIT_ACCOUNT_INDEX.ESCROW_STATE];
+      if (depEscrowState === undefined) return reject('SECOND_IX_NOT_BOUND_TO_DEPOSIT');
+      const depRid = Buffer.from(
+        data.subarray(REMITTANCE_ID_OFFSET, REMITTANCE_ID_OFFSET + REMITTANCE_ID_LEN),
+      );
+      const regRid = Buffer.from(
+        reg.data.subarray(REMITTANCE_ID_OFFSET, REMITTANCE_ID_OFFSET + REMITTANCE_ID_LEN),
+      );
+      if (
+        !regSender.pubkey.equals(sender.pubkey) ||
+        !regEscrowState.pubkey.equals(depEscrowState.pubkey) ||
+        !regRid.equals(depRid)
+      ) {
+        return reject('SECOND_IX_NOT_BOUND_TO_DEPOSIT');
+      }
     }
 
     // ── Check 5: fee-payer is NEVER referenced by ANY instruction (AC-3/AC-8) ─

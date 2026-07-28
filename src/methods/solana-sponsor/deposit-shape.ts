@@ -61,3 +61,31 @@ export const DEPOSIT_ACCOUNT_INDEX = {
   ASSOCIATED_TOKEN_PROGRAM: 6,
   SYSTEM_PROGRAM: 7,
 } as const;
+
+/**
+ * HU-SOL-20 / R3 — pinned shape of the ONLY 2nd business instruction CR-1 accepts:
+ * `register_escrow` of the SAME escrow program. Pinned from the IDL produced by
+ * `anchor build` in solana-programs (HU-SOL-20/R1) and re-vendored here by R2a
+ * (`src/chains/escrow-idl.ts:365`), NEVER from a literal in a doc.
+ *
+ * Read back from the built artifact on 2026-07-28:
+ *   discriminator [200,17,194,170,224,144,127,166]
+ *   accounts      [sender, escrow_state, escrow_index, system_program]
+ */
+export const REGISTER_ESCROW_DISCRIMINATOR: readonly number[] = [
+  200, 17, 194, 170, 224, 144, 127, 166,
+];
+
+/** `register_escrow` carries EXACTLY these 4 accounts, in this order, and NO remaining ones. */
+export const REGISTER_ESCROW_POSITIONAL_ACCOUNTS = 4;
+export const REGISTER_ESCROW_ACCOUNT_INDEX = {
+  SENDER: 0, // signer + writable (pays the index rent)
+  ESCROW_STATE: 1, // non-signer (see cr1.ts Check 4b/b5 on why writability is NOT asserted here)
+  ESCROW_INDEX: 2, // writable, non-signer (PDA ["escrow-index", sender])
+  SYSTEM_PROGRAM: 3, // === SYSTEM_PROGRAM_ID
+} as const;
+
+/** ix-data layout: 8 discriminator bytes + [u8;16] remittance_id = EXACTLY 24 bytes. */
+export const REMITTANCE_ID_OFFSET = 8;
+export const REMITTANCE_ID_LEN = 16;
+export const REGISTER_ESCROW_DATA_LEN = REMITTANCE_ID_OFFSET + REMITTANCE_ID_LEN; // 24
