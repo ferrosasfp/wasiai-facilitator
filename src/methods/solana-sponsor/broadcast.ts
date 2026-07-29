@@ -46,7 +46,12 @@ export type SponsorErrorCode =
   | 'SPONSOR_UNSUPPORTED_TX'
   | 'SPONSOR_DAILY_CAP'
   | 'SPONSOR_BROADCAST_EXPIRED'
-  | 'SPONSOR_BROADCAST_FAILED';
+  | 'SPONSOR_BROADCAST_FAILED'
+  // WKH-302: only reachable when a caller passes `onSigned` (payout). The two
+  // existing `switch (result.code)` sites (routes/solana-sponsor.ts,
+  // routes/solana-escrow.ts) both have a `default:` and neither does `never`
+  // exhaustiveness, so adding this member does not change their behaviour.
+  | 'SPONSOR_PERSIST_FAILED';
 
 /**
  * Injected structural validator (CD-11). Generic contract reused by every
@@ -81,6 +86,17 @@ export interface CosignOpts {
    * blockhash, pre-sign reject). Best-effort; must never throw.
    */
   readonly onFeeReleased?: (lamports: bigint) => Promise<void>;
+  /** WKH-302: mutex key. Defaults to FEE_PAYER_SENTINEL_ID (sponsor/release). */
+  readonly mutexId?: number;
+  /**
+   * WKH-302 (invariant I2): invoked AFTER signing and BEFORE serializing and
+   * broadcasting. If it returns `{ ok:false }` the primitive does NOT broadcast and
+   * resolves `SPONSOR_PERSIST_FAILED`. Callers that do not pass it are unaffected.
+   *
+   * This is what lets a durable ledger record the signature+blockhash BEFORE the tx
+   * can possibly land, so a row without a signature PROVES nothing was broadcast.
+   */
+  readonly onSigned?: (tx: Transaction) => Promise<{ ok: boolean }>;
 }
 
 export type CosignResult =
@@ -177,30 +193,48 @@ export async function cosignAndBroadcast(
   }
 
   // Steps 5-6 — blockhash freshness + sign + broadcast, SERIALIZED per fee-payer.
-  const result = await runExclusive(FEE_PAYER_SENTINEL_ID, async (): Promise<CosignResult> => {
-    const connection = new Connection(opts.rpcUrl, 'confirmed');
-    const blockhash = tx.recentBlockhash;
-    if (blockhash === undefined || blockhash.length === 0) {
-      return { ok: false, code: 'SPONSOR_REJECTED', reason: 'MISSING_BLOCKHASH' };
-    }
+  const result = await runExclusive(
+    opts.mutexId ?? FEE_PAYER_SENTINEL_ID,
+    async (): Promise<CosignResult> => {
+      const connection = new Connection(opts.rpcUrl, 'confirmed');
+      const blockhash = tx.recentBlockhash;
+      if (blockhash === undefined || blockhash.length === 0) {
+        return { ok: false, code: 'SPONSOR_REJECTED', reason: 'MISSING_BLOCKHASH' };
+      }
 
-    // Step 5 — blockhash fresh BEFORE signing (never sign a stale tx).
-    let fresh: boolean;
-    try {
-      fresh = await isBlockhashFresh(connection, blockhash);
-    } catch {
-      // RPC error on the freshness probe → fail-closed, never sign.
-      return { ok: false, code: 'SPONSOR_BROADCAST_EXPIRED', reason: 'BLOCKHASH_CHECK_FAILED' };
-    }
-    if (!fresh) {
-      return { ok: false, code: 'SPONSOR_BROADCAST_EXPIRED', reason: 'STALE_BLOCKHASH' };
-    }
+      // Step 5 — blockhash fresh BEFORE signing (never sign a stale tx).
+      let fresh: boolean;
+      try {
+        fresh = await isBlockhashFresh(connection, blockhash);
+      } catch {
+        // RPC error on the freshness probe → fail-closed, never sign.
+        return { ok: false, code: 'SPONSOR_BROADCAST_EXPIRED', reason: 'BLOCKHASH_CHECK_FAILED' };
+      }
+      if (!fresh) {
+        return { ok: false, code: 'SPONSOR_BROADCAST_EXPIRED', reason: 'STALE_BLOCKHASH' };
+      }
 
-    // Step 6 — co-sign as fee-payer, then broadcast with bounded rebroadcast.
-    tx.partialSign(opts.feePayerKeypair);
-    const raw = tx.serialize();
-    return broadcastWithRebroadcast(connection, raw, blockhash, opts.maxRebroadcasts);
-  });
+      // Step 6 — co-sign as fee-payer, then broadcast with bounded rebroadcast.
+      tx.partialSign(opts.feePayerKeypair);
+      // WKH-302 (I2): persist signature+blockhash BETWEEN signing and broadcasting.
+      // A Solana signature exists before the tx is transmitted, so this ordering is
+      // free — and it is what makes "no signature recorded" a PROOF that nothing was
+      // sent. If persistence fails we must NOT broadcast: we would be unable to tell
+      // a retry whether it already paid.
+      if (opts.onSigned) {
+        const persisted = await opts.onSigned(tx);
+        if (!persisted.ok) {
+          return {
+            ok: false,
+            code: 'SPONSOR_PERSIST_FAILED',
+            reason: 'PERSIST_BEFORE_BROADCAST_FAILED',
+          };
+        }
+      }
+      const raw = tx.serialize();
+      return broadcastWithRebroadcast(connection, raw, blockhash, opts.maxRebroadcasts);
+    },
+  );
 
   // AR-MNR-1 (data-integrity / auto-DoS): the daily-cap INCR at step 4 RESERVED
   // the fee upper bound BEFORE any spend. Release it for every terminal outcome

@@ -80,7 +80,9 @@ export class FakeSolanaChain {
   /** signature base58 → recorded tx (for getTransaction / getParsedTransaction). */
   private readonly _txs = new Map<string, RecordedTx>();
 
-  private _blockhash = 'FakeBlockhash11111111111111111111111111111111';
+  // Must be REAL base58 that decodes to 32 bytes: `Transaction.recentBlockhash`
+  // is decoded on serialize, so a pretty-but-invalid literal fails everything.
+  private _blockhash = '11111111111111111111111111111111';
   private _blockhashValid = true;
 
   // ── injectable failure controls ───────────────────────────────────────────
