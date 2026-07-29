@@ -342,12 +342,20 @@ describe('T-AC5 — replay returns the previous signature, never a second paymen
 
 describe('AR BLQ-2 — un RPC que no contesta NO autoriza re-firmar', () => {
   it('★ pago hecho + verify que no puede mirar + blockhash muerto ⇒ NO se paga dos veces', async () => {
-    // Ronda 1: se paga de verdad, pero la confirmación no llega y el blockhash
-    // rota. La fila queda `signed` con la firma persistida (invariante I2).
+    // Ronda 1: se paga de verdad, la confirmación no llega Y el nodo tampoco puede
+    // confirmar la firma, así que la fila queda en `signed` (no `confirmed`) con la
+    // firma persistida — que es EXACTAMENTE el estado del ledger que reportó el AR.
+    //
+    // ⚠️ Este detalle es el que hace válida la reproducción: si la ronda 1 dejara la
+    // fila en `confirmed`, la rama de `confirmed` atajaría el caso y el bug quedaría
+    // enmascarado. Verificado con la mutación: con la fila `confirmed` el mutante
+    // sobrevive; con la fila `signed` muere.
     chain.dropConfirmation = true;
     chain.failBlockhashProbeAfterSend = true;
+    chain.failTxLookup = true;
     const first = await post(payload());
     expect(chain.balanceOf(agentAta)).toBe(AMOUNT); // el agente YA cobró
+    expect(h.ledger.rows.at(0)?.status).toBe('signed');
     const firstSignature = String(h.ledger.rows.at(0)?.signature ?? '');
     expect(firstSignature.length).toBeGreaterThan(0);
     expect(first?.statusCode).toBeDefined();
@@ -358,7 +366,7 @@ describe('AR BLQ-2 — un RPC que no contesta NO autoriza re-firmar', () => {
     // EN ADELANTE, no que no haya entrado antes.
     chain.dropConfirmation = false;
     chain.failBlockhashProbeAfterSend = false;
-    chain.failTxLookup = true; // no se puede determinar el estado on-chain
+    // failTxLookup sigue en true: el nodo no puede decir si esa firma aterrizó.
     chain.rotateBlockhash(Keypair.generate().publicKey.toBase58());
 
     const second = await post(payload());
