@@ -14,7 +14,13 @@ import type * as SupabaseModule from '../../infra/supabase.js';
 
 const h = vi.hoisted(() => ({
   chain: { current: null as unknown },
-  ledger: { rows: [] as Record<string, unknown>[], down: false, failUpdates: false },
+  ledger: {
+    rows: [] as Record<string, unknown>[],
+    down: false,
+    failUpdates: false,
+    /** INSERT throws (transient/network) while UPDATEs keep working. */
+    insertThrows: false,
+  },
 }));
 
 interface FakeConn {
@@ -68,6 +74,7 @@ vi.mock('../../infra/supabase.js', async (importActual) => ({
         if (table !== 'facilitator_solana_payouts') return noopTable();
         return {
           insert: (obj: Record<string, unknown>) => {
+            if (h.ledger.insertThrows) return Promise.reject(new Error('connection reset'));
             const dup = h.ledger.rows.some(
               (r) => r.caller_key_id === obj.caller_key_id && r.intent_id === obj.intent_id,
             );
@@ -230,6 +237,7 @@ beforeEach(async () => {
   h.ledger.rows = [];
   h.ledger.down = false;
   h.ledger.failUpdates = false;
+  h.ledger.insertThrows = false;
   agent = Keypair.generate().publicKey;
   operatorAta = chain.registerAta(operatorKp.publicKey, mintKp.publicKey, DECIMALS, OPERATOR_START);
   agentAta = chain.registerAta(agent, mintKp.publicKey, DECIMALS, 0n);
@@ -421,6 +429,45 @@ describe('T-I1-b / T-CONC — a young claim never proceeds to sign', () => {
     expect(res?.statusCode).toBe(200);
     expect(chain.balanceOf(agentAta)).toBe(AMOUNT);
     expect(chain.appliedSignatures).toHaveLength(1);
+  });
+});
+
+describe('T-I1-a (money level) — a failed CLAIM can never become a payment', () => {
+  it('★ INSERT throws while a claim already exists → 500, and the book does NOT move', async () => {
+    // Why this scenario and not just "the store is down": with the whole store
+    // down, markSigned also fails and invariant I2 blocks the broadcast anyway, so
+    // a fail-OPEN claim is invisible. The harmful shape is a claim that fails while
+    // UPDATEs still work AND a `claimed` row already exists — then a fail-open claim
+    // would sign, markSigned would find that row, and the payout would go out while
+    // another request holds the intent. That is the double-payment this guard stops.
+    h.ledger.rows.push({
+      caller_key_id: knownKeyId(),
+      intent_id: 'run-1:0',
+      network: 'solana:devnet',
+      pay_to: agent.toBase58(),
+      mint: MINT,
+      amount_atomic: AMOUNT.toString(),
+      status: 'claimed',
+      signature: null,
+      recent_blockhash: null,
+      attempts: 1,
+      claimed_at: new Date().toISOString(),
+    });
+    h.ledger.insertThrows = true;
+
+    const res = await post(payload());
+    expect(res?.statusCode).toBe(500);
+    expect(errorCode(res)).toBe('PAYOUT_STORE_UNAVAILABLE');
+    expect(chain.balanceOf(agentAta)).toBe(0n);
+    expect(chain.balanceOf(operatorAta)).toBe(OPERATOR_START);
+    expect(chain.appliedSignatures).toHaveLength(0);
+  });
+
+  it('the control: with the INSERT working, that same request pays exactly once', async () => {
+    h.ledger.insertThrows = false;
+    const res = await post(payload());
+    expect(res?.statusCode).toBe(200);
+    expect(chain.balanceOf(agentAta)).toBe(AMOUNT);
   });
 });
 
