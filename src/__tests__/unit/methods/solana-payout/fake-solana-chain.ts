@@ -83,7 +83,10 @@ export class FakeSolanaChain {
   // Must be REAL base58 that decodes to 32 bytes: `Transaction.recentBlockhash`
   // is decoded on serialize, so a pretty-but-invalid literal fails everything.
   private _blockhash = '11111111111111111111111111111111';
-  private _blockhashValid = true;
+  // Validity is tracked PER HASH, not by one global flag. A single flag would make
+  // "the old blockhash died" also kill the FRESH one the retry fetches — which
+  // silently turns a re-sign test into an expiry test.
+  private _validBlockhashes = new Set<string>(['11111111111111111111111111111111']);
 
   // ── injectable failure controls ───────────────────────────────────────────
   /** Number of upcoming `sendRawTransaction` calls that throw a transient error. */
@@ -129,14 +132,29 @@ export class FakeSolanaChain {
     return [...this._txs.keys()];
   }
 
+  /** Offer `blockhash` as the current one, valid from now on. */
   setBlockhash(blockhash: string): void {
     this._blockhash = blockhash;
-    this._blockhashValid = true;
+    this._validBlockhashes.add(blockhash);
   }
 
-  /** Make the current blockhash unusable — nothing signed against it can land. */
+  /**
+   * Kill EVERY blockhash, including the current one, and offer nothing fresh:
+   * no transaction can land. Models a cluster we cannot get a usable hash from.
+   */
   expireBlockhash(): void {
-    this._blockhashValid = false;
+    this._validBlockhashes.clear();
+  }
+
+  /**
+   * Time passes: every previously issued blockhash dies and the cluster starts
+   * offering a NEW, valid one. This is the realistic shape of "the old tx can
+   * never land, but a retry can sign a fresh one".
+   */
+  rotateBlockhash(next: string): void {
+    this._validBlockhashes.clear();
+    this._blockhash = next;
+    this._validBlockhashes.add(next);
   }
 
   // ── Connection surface ────────────────────────────────────────────────────
@@ -148,8 +166,8 @@ export class FakeSolanaChain {
     return Promise.resolve({ blockhash: this._blockhash, lastValidBlockHeight: 1000 });
   }
 
-  isBlockhashValid(_blockhash: string): Promise<{ value: boolean }> {
-    return Promise.resolve({ value: this._blockhashValid });
+  isBlockhashValid(blockhash: string): Promise<{ value: boolean }> {
+    return Promise.resolve({ value: this._validBlockhashes.has(blockhash) });
   }
 
   getBalance(pubkey: PublicKey): Promise<number> {
@@ -190,15 +208,18 @@ export class FakeSolanaChain {
       this.failNextSend -= 1;
       return Promise.reject(new Error('TRANSIENT_SEND_ERROR'));
     }
-    if (!this._blockhashValid) {
-      return Promise.reject(new Error('BLOCKHASH_NOT_FOUND'));
-    }
-
     let tx: Transaction;
     try {
       tx = Transaction.from(Buffer.from(raw));
     } catch {
       return Promise.reject(new Error('DESERIALIZE_FAILED'));
+    }
+
+    // The cluster rejects a tx whose OWN blockhash is dead — checked against the
+    // tx's hash, not against a global flag.
+    const txBlockhash = tx.recentBlockhash;
+    if (txBlockhash === undefined || !this._validBlockhashes.has(txBlockhash)) {
+      return Promise.reject(new Error('BLOCKHASH_NOT_FOUND'));
     }
 
     const sigEntry = tx.signatures.at(0);
