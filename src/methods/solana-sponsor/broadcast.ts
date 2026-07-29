@@ -311,6 +311,15 @@ async function broadcastWithRebroadcast(
       });
       sent = true;
     } catch {
+      // R-1: un envío que TIRA también cuenta como "pudo haber salido". Un timeout
+      // o un socket caído ocurren perfectamente DESPUÉS de que el nodo aceptó la tx
+      // y la reenvió al cluster, así que el throw no prueba que no haya llegado.
+      //
+      // Y este mismo bucle ya lo asumía: el `continue` de abajo reintenta LA MISMA
+      // tx firmada, algo que sólo es seguro porque la red dedupea por firma. El
+      // bucle trataba el envío fallido como "puede haber llegado" y el flag como
+      // "no llegó" — dos criterios opuestos en el mismo archivo.
+      sent = true;
       continue; // transient send error → rebroadcast
     }
 

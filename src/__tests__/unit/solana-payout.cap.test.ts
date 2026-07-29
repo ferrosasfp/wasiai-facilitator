@@ -187,7 +187,18 @@ describe('releasePayoutDailyAtomic — compensating decrement', () => {
     mockClient.decrby.mockResolvedValue(-40_000_000);
     mockClient.set.mockResolvedValue('OK');
     await releasePayoutDailyAtomic(40_000_000n, 1_000_000_000n, logger, 'k');
-    expect(mockClient.set).toHaveBeenCalledWith('k', '0');
+    // KEEPTTL: normalizar el contador no puede costarle el vencimiento a la clave
+    // diaria (quedaría persistente para siempre).
+    expect(mockClient.set).toHaveBeenCalledWith('k', '0', 'KEEPTTL');
+  });
+
+  it('★ el clamp compara en BigInt (nada de Number sobre un contador atómico)', async () => {
+    // Un total negativo por encima de 2^53 tiene que seguir detectándose. Con
+    // `Number()` el redondeo puede devolver 0 o perder el signo en el borde.
+    mockClient.decrby.mockResolvedValue('-9007199254740993');
+    mockClient.set.mockResolvedValue('OK');
+    await releasePayoutDailyAtomic(1n, 1_000_000_000n, logger, 'k');
+    expect(mockClient.set).toHaveBeenCalledWith('k', '0', 'KEEPTTL');
   });
 });
 

@@ -175,8 +175,12 @@ export async function releasePayoutDailyAtomic(
     // negativo es tope evadido para todo ese día. Si el saldo quedó bajo cero,
     // significa que estamos liberando algo que esa clave nunca acumuló: se
     // normaliza a 0 en vez de dejar crédito fantasma.
-    if (Number(remaining) < 0) {
-      await client.set(dailyKey, '0').catch(() => undefined);
+    // BigInt, no Number(): este archivo prohíbe `Number()` sobre contadores
+    // atómicos y la excepción "es sólo un signo" es justo como vuelve la costumbre.
+    if (BigInt(String(remaining)) < 0n) {
+      // KEEPTTL: un `set` pelado BORRA el vencimiento y deja la clave diaria viva
+      // para siempre; además pisaría una reserva concurrente sobre esa misma clave.
+      await client.set(dailyKey, '0', 'KEEPTTL').catch(() => undefined);
       logger.warn(
         { scope: 'payout-daily', key: dailyKey },
         'payout daily release drove the counter negative — clamped to 0',

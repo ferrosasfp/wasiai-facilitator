@@ -15,8 +15,12 @@ const h = vi.hoisted(() => ({
   chain: { current: null as unknown },
   ledger: { rows: [] as Record<string, unknown>[], down: false },
   rate: { current: { ok: true } as { ok: boolean; reason?: string } },
-  daily: { current: { ok: true } as { ok: boolean; reason?: string } },
-  released: { atomic: [] as bigint[] },
+  daily: {
+    current: { ok: true } as { ok: boolean; reason?: string },
+    // Clave que la reserva "congela". La liberación DEBE llegar con ésta.
+    key: 'solana:payout:daily:FROZEN-AT-RESERVATION:2026-07-29',
+  },
+  released: { atomic: [] as bigint[], keys: [] as (string | undefined)[] },
 }));
 
 interface FakeConn {
@@ -135,8 +139,17 @@ function readCol(r: Record<string, unknown>, col: string): unknown {
 
 vi.mock('../../core/solana-payout-cap.js', () => ({
   checkAndIncrPayoutRate: () => Promise.resolve(h.rate.current),
-  checkAndIncrPayoutDailyAtomic: () => Promise.resolve(h.daily.current),
-  releasePayoutDailyAtomic: (amount: bigint) => {
+  // R-4: la reserva devuelve una clave CONGELADA, y el mock de liberación anota
+  // cuál recibió. Sin esto el doble era ciego a la costura: pasar `keyId` en vez de
+  // `reservedDailyKey` dejaba la suite entera en verde, mientras en producción el
+  // decremento caía sobre una clave basura y NINGUNA liberación tocaba el contador
+  // real — el tope diario convertido en trinquete que sólo sube.
+  checkAndIncrPayoutDailyAtomic: () =>
+    Promise.resolve(
+      h.daily.current.ok ? { ...h.daily.current, dailyKey: h.daily.key } : h.daily.current,
+    ),
+  releasePayoutDailyAtomic: (amount: bigint, _cap: bigint, _logger: unknown, key?: string) => {
+    h.released.keys.push(key);
     h.released.atomic.push(amount);
     return Promise.resolve();
   },
@@ -242,6 +255,7 @@ beforeEach(async () => {
   h.rate.current = { ok: true };
   h.daily.current = { ok: true };
   h.released.atomic = [];
+  h.released.keys = [];
   agent = Keypair.generate().publicKey;
   operatorAta = chain.registerAta(operatorKp.publicKey, mintKp.publicKey, DECIMALS, OPERATOR_START);
   agentAta = chain.registerAta(agent, mintKp.publicKey, DECIMALS, 0n);
@@ -376,6 +390,17 @@ describe('T-CAP-3 — the reservation is kept only when the tx may have landed',
     expect(h.released.atomic).toEqual([]);
   });
 
+  it('★ R-4: la liberación usa la clave CONGELADA en la reserva, no una recalculada', async () => {
+    // La costura entre reserva y liberación. Pasar `keyId` (o recalcular la fecha)
+    // en vez de la clave congelada compila, deja la suite verde y en producción
+    // decrementa una clave que nadie incrementó: el contador real nunca baja.
+    chain.expireBlockhash(); // rechazo posterior al paso 8 ⇒ hay liberación
+    const res = await post(payload());
+    expect(res?.statusCode).toBe(409);
+    expect(h.released.atomic).toEqual([AMOUNT]);
+    expect(h.released.keys).toEqual([h.daily.key]);
+  });
+
   it('★ BROADCAST_EXPIRED PRE-ENVÍO (never landed) → the daily reservation is RELEASED', async () => {
     // Este caso entra por el camino donde el veredicto SÍ es cierto: el blockhash
     // muere ANTES de cualquier send, así que nada se transmitió.
@@ -423,6 +448,102 @@ describe('T-CAP-3 — the reservation is kept only when the tx may have landed',
     expect(chain.balanceOf(agentAta)).toBe(AMOUNT);
     expect(chain.appliedSignatures).toEqual([body.signature]);
     expect(h.released.atomic).toEqual([]); // hubo gasto: la reserva se conserva
+  });
+});
+
+describe('R-3 — PROPIEDAD: si el libro se movió, la respuesta no puede decir "no se gastó"', () => {
+  // Los cinco puntos de retorno de `broadcastWithRebroadcast` posteriores a un
+  // envío. Antes había un test por síntoma; esto es UNA propiedad ejercitada por
+  // los cinco caminos, que es lo que impide que un refactor reintroduzca el
+  // bloqueante original sin poner nada en rojo.
+  //
+  // Contabilidad de sondas: 1 PRE-FIRMA (paso 5 de cosignAndBroadcast) + una al
+  // tope de cada intento del bucle (4, con maxRebroadcasts=3) + 1 posterior al
+  // bucle. Olvidar la pre-firma hacía que el caso volviera ANTES de cualquier
+  // envío — lo cazó la aserción de premisa (`balanceOf === AMOUNT`), que está justo
+  // para eso: sin ella, dos de estos casos habrían pasado sin probar nada.
+  const PATHS: { name: string; script: ('ok' | 'expired' | 'throw')[] }[] = [
+    { name: 'sonda tiró DENTRO del bucle', script: ['ok', 'ok', 'throw'] },
+    { name: 'blockhash vencido DENTRO del bucle', script: ['ok', 'ok', 'expired'] },
+    {
+      name: 'sonda tiró DESPUÉS del bucle',
+      script: ['ok', 'ok', 'ok', 'ok', 'ok', 'throw'],
+    },
+    {
+      name: 'blockhash vencido DESPUÉS del bucle',
+      script: ['ok', 'ok', 'ok', 'ok', 'ok', 'expired'],
+    },
+    {
+      name: 'reintentos agotados (BROADCAST_FAILED)',
+      script: ['ok', 'ok', 'ok', 'ok', 'ok', 'ok'],
+    },
+  ];
+
+  // Espejo de la lista del gateway (`PAYOUT_NO_SPEND_CODES`). Si el facilitator
+  // contesta uno de éstos, el gateway concluye que el leg NO se pagó y dispara
+  // reembolso y/o re-envío.
+  const NO_SPEND_CODES = new Set([
+    'INVALID_PAYLOAD',
+    'NETWORK_MISMATCH',
+    'INVALID_AMOUNT',
+    'PAYOUT_NOT_ENABLED',
+    'PAYOUT_RATE_LIMITED',
+    'PAYOUT_DAILY_CAP',
+    'PAYOUT_FUNDING_LOW',
+    'PAYOUT_RPC_UNAVAILABLE',
+    'PAYOUT_STORE_UNAVAILABLE',
+    'PAYOUT_INTENT_CONFLICT',
+    'PAYOUT_BROADCAST_EXPIRED',
+  ]);
+
+  for (const { name, script } of PATHS) {
+    it(`★ ${name}: el libro se movió ⇒ la respuesta NO es de no-gasto`, async () => {
+      chain.dropConfirmation = true; // ninguna confirmación llega
+      chain.failTxLookup = true; // y tampoco se puede verificar la firma
+      chain.blockhashProbeScript = [...script];
+
+      const res = await post(payload());
+
+      // Premisa de la propiedad: comprobamos que el dinero SÍ se movió. Si esto
+      // fuera 0, el caso no probaría nada y el test sería vacuo.
+      expect(chain.balanceOf(agentAta)).toBe(AMOUNT);
+      expect(chain.balanceOf(operatorAta)).toBe(OPERATOR_START - AMOUNT);
+
+      // La propiedad.
+      const code = String(JSON.parse(res?.body ?? '{}').error?.code ?? '');
+      expect(NO_SPEND_CODES.has(code)).toBe(false);
+
+      // Y la reserva se conserva: hubo gasto real.
+      expect(h.released.atomic).toEqual([]);
+    });
+  }
+
+  it('★ R-1: el envío TIRA después de que el nodo la tomó ⇒ tampoco es "no se gastó"', async () => {
+    // El sexto camino, y el que el flag `sent` capturaba mal: un timeout o un
+    // socket caído POSTERIORES a que el nodo aceptó la tx. El agente cobra y el
+    // cliente ve una excepción.
+    //
+    // Que este caso cuente como "pudo haber salido" no es una interpretación: el
+    // propio bucle ya lo asumía, porque su `continue` reintenta LA MISMA tx firmada
+    // y eso sólo es seguro porque la red dedupea por firma.
+    chain.throwAfterApplying = true;
+    chain.failTxLookup = true; // y después no se puede verificar la firma
+    chain.blockhashProbeScript = ['ok', 'ok', 'expired'];
+
+    const res = await post(payload());
+
+    expect(chain.balanceOf(agentAta)).toBe(AMOUNT); // cobró
+    const code = String(JSON.parse(res?.body ?? '{}').error?.code ?? '');
+    expect(NO_SPEND_CODES.has(code)).toBe(false);
+    expect(code).toBe('PAYOUT_BROADCAST_UNKNOWN');
+    expect(h.released.atomic).toEqual([]); // la reserva se conserva
+  });
+
+  it('control: sin envío, un blockhash vencido SÍ puede decir "no se gastó"', () => {
+    // Desarma la propiedad: si el libro no se movió, `PAYOUT_BROADCAST_EXPIRED` es
+    // legítimo. Sin este control, un fix que dejara de emitir EXPIRED en TODOS los
+    // casos pasaría los cinco de arriba sin proteger nada.
+    expect(NO_SPEND_CODES.has('PAYOUT_BROADCAST_EXPIRED')).toBe(true);
   });
 });
 

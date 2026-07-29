@@ -111,6 +111,22 @@ export class FakeSolanaChain {
    * alcanzaría.
    */
   failTxLookup = false;
+  /**
+   * R-3 — guion de la sonda de frescura, consumido en orden por cada llamada a
+   * `isBlockhashValid`. Permite alcanzar DETERMINÍSTICAMENTE los cinco puntos de
+   * retorno de `broadcastWithRebroadcast` (sonda que tira o blockhash vencido,
+   * dentro del bucle y después de él, más el agotamiento de reintentos), que es lo
+   * que hace falta para ejercitar la propiedad "si el libro se movió, la respuesta
+   * no puede ser un código de no-gasto". Vacío ⇒ comportamiento normal.
+   */
+  blockhashProbeScript: ('ok' | 'expired' | 'throw')[] = [];
+  /**
+   * R-1 — el envío APLICA la tx y DESPUÉS tira. Modela lo único que el flag `sent`
+   * tiene que capturar: un timeout o un socket caído posteriores a que el nodo ya
+   * aceptó la tx y la reenvió al cluster. El agente cobra, y el cliente ve una
+   * excepción. Distinto de `failNextSend`, que tira ANTES de aplicar nada.
+   */
+  throwAfterApplying = false;
 
   // ── setup helpers ─────────────────────────────────────────────────────────
 
@@ -181,6 +197,11 @@ export class FakeSolanaChain {
   }
 
   isBlockhashValid(blockhash: string): Promise<{ value: boolean }> {
+    if (this.blockhashProbeScript.length > 0) {
+      const step = this.blockhashProbeScript.shift();
+      if (step === 'throw') return Promise.reject(new Error('BLOCKHASH_PROBE_UNAVAILABLE'));
+      return Promise.resolve({ value: step === 'ok' });
+    }
     if (this.failBlockhashProbeAfterSend && this._txs.size > 0) {
       // Ya hubo al menos un envío aplicado: a partir de acá el nodo no contesta.
       return Promise.reject(new Error('BLOCKHASH_PROBE_UNAVAILABLE'));
@@ -305,6 +326,11 @@ export class FakeSolanaChain {
       post,
       staticKeys: tx.instructions.flatMap((ix) => ix.keys.map((k) => k.pubkey.toBase58())),
     });
+    if (this.throwAfterApplying) {
+      // El nodo YA la tomó (el libro se movió y la firma quedó registrada), pero el
+      // cliente ve una excepción. Ése es el caso que `sent` tiene que capturar.
+      return Promise.reject(new Error('SOCKET_HANGUP_AFTER_SUBMIT'));
+    }
     return Promise.resolve(signature);
   }
 

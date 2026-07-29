@@ -11,8 +11,11 @@
  * `uiTokenAmount.amount`; `uiAmount` is NEVER read (CD-10) — it is a float and
  * rounds. Same criterion as the verify block of `src/chains/solana-adapter.ts`.
  *
- * NEVER throws: an RPC error yields `{ valid:false, reason }` so the caller can
- * fail closed instead of crashing mid-decision.
+ * NEVER throws. Devuelve uno de TRES estados (`PayoutVerification`), nunca un
+ * booleano: un fallo de RPC es `indeterminate`, NO una negativa. Ese colapso —
+ * "no pude mirar" leído como "miré y no está" — es exactamente lo que causó el
+ * doble pago de BLQ-2, así que el tipo existe para que el call-site no pueda
+ * repetirlo.
  *
  * Boundary: imports `@solana/web3.js` (type-only) + `./payout-shape.js`. No env, no
  * route, no keypair.
@@ -67,9 +70,20 @@ interface TokenBalanceLike {
 }
 
 /**
- * Re-read `signature` on-chain and assert it credited AT LEAST `amountAtomic` of
- * `mint` to `payTo`. Returns `{ valid:false, reason }` for every negative outcome —
- * missing tx, on-chain error, no matching balance entry, short delta, RPC failure.
+ * Re-lee `signature` on-chain y decide si acreditó AL MENOS `amountAtomic` de
+ * `mint` a `payTo`. Clasifica en tres, y la frontera importa:
+ *
+ *  · `confirmed`     — la cadena confirma el crédito.
+ *  · `absent`        — la cadena RESPONDIÓ y ese pago no está: la tx se ejecutó y
+ *                      falló, no tocó el balance del destino, o acreditó de menos.
+ *                      También el caso "el nodo no la tiene en su historia", que es
+ *                      la respuesta más DÉBIL: por eso `absent` nunca autoriza sola
+ *                      volver a gastar (el call-site exige además blockhash muerto).
+ *  · `indeterminate` — NO se pudo preguntar: RPC caído, balances ilegibles, monto
+ *                      esperado no parseable. Nunca autoriza re-firmar.
+ *
+ * ⚠️ El fallo de RPC NO va con las negativas demostradas. Meterlo ahí es el colapso
+ * que causó BLQ-2 (doble pago de un intent ya pagado).
  */
 export async function verifyPayoutSignature(
   connection: Connection,
