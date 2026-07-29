@@ -39,7 +39,21 @@ const DAILY_KEY_PREFIX = 'solana:payout:daily:';
 // 48h TTL so yesterday's daily key expires naturally across the UTC boundary.
 const DAILY_TTL_SECONDS = 48 * 3600;
 
-export type PayoutCapResult = { ok: true } | { ok: false; reason: string };
+export type PayoutCapResult =
+  | {
+      ok: true;
+      /**
+       * AR BLQ-4 — clave EXACTA del contador que quedó incrementado. La liberación
+       * DEBE usar ésta, no recalcular la fecha: entre reservar y liberar hay claim,
+       * blockhash, firma, broadcast con reintentos y confirmaciones, y esa ventana
+       * cruza la medianoche UTC sin esfuerzo. Recalculando, un request que reserva
+       * el día N y falla el día N+1 devolvía el crédito a la clave EQUIVOCADA: la
+       * del día N quedaba inflada y la del N+1 quedaba en NEGATIVO (el `decrby`
+       * crea la clave), o sea tope evadido en los dos días.
+       */
+      dailyKey?: string;
+    }
+  | { ok: false; reason: string };
 
 type CapLogger = Pick<Logger, 'warn' | 'debug'>;
 
@@ -117,7 +131,8 @@ export async function checkAndIncrPayoutDailyAtomic(
     if (total > dailyMaxAtomic) {
       return { ok: false, reason: 'daily_exceeded' };
     }
-    return { ok: true };
+    // Se devuelve la clave CONGELADA en el momento de reservar (BLQ-4).
+    return { ok: true, dailyKey: key };
   } catch (err) {
     logger.warn({ err, scope: 'payout-daily' }, 'payout daily check failed — fail-closed');
     return { ok: false, reason: 'store_error_failclosed' };
@@ -142,17 +157,31 @@ export async function releasePayoutDailyAtomic(
   amountAtomic: bigint,
   dailyMaxAtomic: bigint,
   logger: CapLogger,
-  keyId?: string,
+  /**
+   * AR BLQ-4 — la clave devuelta por la reserva. Es OBLIGATORIA en la práctica:
+   * recalcular la fecha acá es el bug. Se acepta `undefined` sólo para el caso en
+   * que nunca hubo reserva (nada que liberar).
+   */
+  dailyKey?: string,
 ): Promise<void> {
   if (dailyMaxAtomic <= 0n) return; // disabled — nothing was incremented
   if (amountAtomic <= 0n) return;
+  if (dailyKey === undefined || dailyKey.length === 0) return; // no hubo reserva
   const client = getRedisClient();
   if (!client) return; // best-effort: no store → nothing to release
-  const partition = keyId !== undefined && keyId.length > 0 ? keyId : 'shared';
-  const dateKey = new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
-  const key = `${DAILY_KEY_PREFIX}${partition}:${dateKey}`;
   try {
-    await client.decrby(key, amountAtomic.toString());
+    const remaining = await client.decrby(dailyKey, amountAtomic.toString());
+    // Un `decrby` sobre una clave inexistente la CREA en negativo, y un contador
+    // negativo es tope evadido para todo ese día. Si el saldo quedó bajo cero,
+    // significa que estamos liberando algo que esa clave nunca acumuló: se
+    // normaliza a 0 en vez de dejar crédito fantasma.
+    if (Number(remaining) < 0) {
+      await client.set(dailyKey, '0').catch(() => undefined);
+      logger.warn(
+        { scope: 'payout-daily', key: dailyKey },
+        'payout daily release drove the counter negative — clamped to 0',
+      );
+    }
   } catch (err) {
     logger.warn({ err, scope: 'payout-daily' }, 'payout daily release failed — non-fatal');
   }

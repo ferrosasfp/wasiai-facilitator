@@ -364,21 +364,65 @@ describe('T-CAP-1 / T-CAP-2 — caps reject without moving the book', () => {
 });
 
 describe('T-CAP-3 — the reservation is kept only when the tx may have landed', () => {
-  it('★ BROADCAST_FAILED (may have landed) → the daily debit is KEPT', async () => {
+  it('★ confirmación caída pero la cadena confirma el pago → 200 y el débito se CONSERVA', async () => {
+    // Antes esto contestaba 502 "no pude confirmar". Ahora, tras un envío exitoso,
+    // se consulta la firma persistida: la cadena dice que el pago está, así que el
+    // fallo era de OBSERVACIÓN y no de dinero. La reserva se conserva igual, que es
+    // lo que este test siempre quiso fijar (hubo gasto real).
     chain.dropConfirmation = true;
     const res = await post(payload());
-    expect(res?.statusCode).toBe(502);
-    expect(JSON.parse(res?.body ?? '{}').error.code).toBe('PAYOUT_BROADCAST_FAILED');
+    expect(res?.statusCode).toBe(200);
+    expect(chain.balanceOf(agentAta)).toBe(AMOUNT);
     expect(h.released.atomic).toEqual([]);
   });
 
-  it('★ BROADCAST_EXPIRED (never landed) → the daily reservation is RELEASED', async () => {
+  it('★ BROADCAST_EXPIRED PRE-ENVÍO (never landed) → the daily reservation is RELEASED', async () => {
+    // Este caso entra por el camino donde el veredicto SÍ es cierto: el blockhash
+    // muere ANTES de cualquier send, así que nada se transmitió.
     chain.expireBlockhash();
     const res = await post(payload());
     expect(res?.statusCode).toBe(409);
     expect(JSON.parse(res?.body ?? '{}').error.code).toBe('PAYOUT_BROADCAST_EXPIRED');
     expect(h.released.atomic).toEqual([AMOUNT]);
     expect(chain.balanceOf(agentAta)).toBe(0n);
+    expect(chain.appliedSignatures).toHaveLength(0); // nada salió a la red
+  });
+
+  // ── AR BLQ-1 — reproducción: el agente COBRA y la ruta contestaba "no se gastó" ──
+  it('★ BLQ-1: el cluster acepta la tx, la confirmación se cae y el blockhash rota', async () => {
+    // Éste es el camino POST-ENVÍO, que el test de arriba nunca tocaba: la sonda de
+    // frescura falla DESPUÉS de un sendRawTransaction exitoso, y su catch significa
+    // "no pude preguntar", no "el blockhash venció".
+    chain.dropConfirmation = true; // la confirmación se cae (websocket)
+    chain.failBlockhashProbeAfterSend = true; // y la sonda posterior no contesta
+    chain.failTxLookup = true; // el nodo tampoco contesta el verify ⇒ no sé
+    const res = await post(payload());
+
+    // El agente COBRÓ: eso es lo que mide el libro.
+    expect(chain.balanceOf(agentAta)).toBe(AMOUNT);
+    expect(chain.balanceOf(operatorAta)).toBe(OPERATOR_START - AMOUNT);
+
+    // Por lo tanto la respuesta NO puede afirmar que no se gastó.
+    const code = JSON.parse(res?.body ?? '{}').error?.code;
+    expect(code).not.toBe('PAYOUT_BROADCAST_EXPIRED');
+    expect(res?.statusCode).toBe(502);
+    expect(code).toBe('PAYOUT_BROADCAST_UNKNOWN');
+
+    // Y la reserva del tope diario se CONSERVA: hubo gasto real.
+    expect(h.released.atomic).toEqual([]);
+  });
+
+  it('★ BLQ-1: si la firma persistida SÍ verifica on-chain, la respuesta es 200', async () => {
+    // La evidencia existía (invariante I2 la dejó en el ledger) y antes nadie la
+    // consultaba. Ahora se consulta antes de emitir un veredicto.
+    chain.failBlockhashProbeAfterSend = true;
+    const res = await post(payload());
+    expect(res?.statusCode).toBe(200);
+    const body = JSON.parse(res?.body ?? '{}');
+    expect(body.alreadySettled).toBe(false);
+    expect(chain.balanceOf(agentAta)).toBe(AMOUNT);
+    expect(chain.appliedSignatures).toEqual([body.signature]);
+    expect(h.released.atomic).toEqual([]); // hubo gasto: la reserva se conserva
   });
 });
 

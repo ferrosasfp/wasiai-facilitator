@@ -340,6 +340,76 @@ describe('T-AC5 — replay returns the previous signature, never a second paymen
   });
 });
 
+describe('AR BLQ-2 — un RPC que no contesta NO autoriza re-firmar', () => {
+  it('★ pago hecho + verify que no puede mirar + blockhash muerto ⇒ NO se paga dos veces', async () => {
+    // Ronda 1: se paga de verdad, pero la confirmación no llega y el blockhash
+    // rota. La fila queda `signed` con la firma persistida (invariante I2).
+    chain.dropConfirmation = true;
+    chain.failBlockhashProbeAfterSend = true;
+    const first = await post(payload());
+    expect(chain.balanceOf(agentAta)).toBe(AMOUNT); // el agente YA cobró
+    const firstSignature = String(h.ledger.rows.at(0)?.signature ?? '');
+    expect(firstSignature.length).toBeGreaterThan(0);
+    expect(first?.statusCode).toBeDefined();
+
+    // Ronda 2: el nodo no puede contestar por esa firma ("no pude mirar"), y el
+    // blockhash viejo está muerto. Antes: verify → valid:false → revert → re-firma
+    // → DOBLE PAGO. Un blockhash vencido prueba que esa tx no puede entrar DE ACÁ
+    // EN ADELANTE, no que no haya entrado antes.
+    chain.dropConfirmation = false;
+    chain.failBlockhashProbeAfterSend = false;
+    chain.failTxLookup = true; // no se puede determinar el estado on-chain
+    chain.rotateBlockhash(Keypair.generate().publicKey.toBase58());
+
+    const second = await post(payload());
+
+    // LA aserción, contra el libro: el saldo NO se duplicó.
+    expect(chain.balanceOf(agentAta)).toBe(AMOUNT);
+    expect(chain.balanceOf(operatorAta)).toBe(OPERATOR_START - AMOUNT);
+    expect(chain.appliedSignatures).toHaveLength(1);
+    expect(second?.statusCode).toBe(409);
+    expect(errorCode(second)).toBe('PAYOUT_IN_PROGRESS');
+    // Y la evidencia del primer pago sigue en el ledger (el revert la borraba).
+    expect(String(h.ledger.rows.at(0)?.signature ?? '')).toBe(firstSignature);
+  });
+
+  it('control: con el verify SANO el reintento devuelve la firma previa, no un pago nuevo', async () => {
+    // Desarmar el escenario tiene que cambiar el resultado: si el nodo SÍ contesta,
+    // la maquinaria de replay funciona y responde alreadySettled.
+    chain.dropConfirmation = true;
+    chain.failBlockhashProbeAfterSend = true;
+    await post(payload());
+    expect(chain.balanceOf(agentAta)).toBe(AMOUNT);
+
+    chain.dropConfirmation = false;
+    chain.failBlockhashProbeAfterSend = false;
+    chain.rotateBlockhash(Keypair.generate().publicKey.toBase58());
+
+    const second = await post(payload());
+    expect(second?.statusCode).toBe(200);
+    expect(JSON.parse(second?.body ?? '{}').alreadySettled).toBe(true);
+    expect(chain.balanceOf(agentAta)).toBe(AMOUNT);
+    expect(chain.appliedSignatures).toHaveLength(1);
+  });
+
+  it('★ una negativa DEMOSTRADA por la cadena sí permite re-firmar (una sola vez)', async () => {
+    // El complemento: si la cadena RESPONDE que ese pago no está y el blockhash
+    // está muerto, re-firmar es correcto — si no, el fix bloquearía retries válidos.
+    chain.crashAfterSign = true; // firma persistida, nada transmitido
+    await post(payload());
+    expect(chain.balanceOf(agentAta)).toBe(0n);
+    expect(h.ledger.rows.at(0)?.status).toBe('signed');
+
+    chain.crashAfterSign = false;
+    chain.rotateBlockhash(Keypair.generate().publicKey.toBase58());
+    const second = await post(payload());
+
+    expect(second?.statusCode).toBe(200);
+    expect(chain.balanceOf(agentAta)).toBe(AMOUNT);
+    expect(chain.appliedSignatures).toHaveLength(1);
+  });
+});
+
 describe('T-AC9 — same intentId, different terms → conflict, no signature, no movement', () => {
   it('★ different payTo → 409 PAYOUT_INTENT_CONFLICT', async () => {
     const first = await post(payload());

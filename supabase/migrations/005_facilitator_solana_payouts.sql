@@ -49,5 +49,7 @@ COMMENT ON COLUMN facilitator_solana_payouts.amount_atomic IS
   'Unidades atómicas como TEXT (NO NUMERIC): lección WKH-196 — supabase-js lee NUMERIC(78,0) como número JSON y JSON.parse redondea por encima de 2^53. TEXT en la columna, BigInt en el código.';
 COMMENT ON COLUMN facilitator_solana_payouts.status IS
   'claimed -> signed -> confirmed. Invariante I2: claimed (sin firma) ⇒ no hay broadcast vivo; el broadcast siempre ocurre DESPUÉS de persistir firma+blockhash.';
+COMMENT ON COLUMN facilitator_solana_payouts.attempts IS
+  'Diagnóstico solamente: HOY NO SE INCREMENTA. PostgREST toma VALORES y no expresiones, así que un attempts = attempts + 1 atómico necesitaría un read-modify-write (que invita una actualización perdida) o una función en la base, fuera del alcance de esta migración. Ninguna decisión de producción lo lee. Si algún día se necesita de verdad, va por una función en la base, no por leer-y-escribir desde la app.';
 COMMENT ON COLUMN facilitator_solana_payouts.claimed_at IS
   'Base del lease: un claim más viejo que SOLANA_PAYOUT_LEASE_MS puede ser robado por stealStaleClaim (UPDATE condicional).';

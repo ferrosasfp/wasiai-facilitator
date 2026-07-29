@@ -16,6 +16,7 @@ const mockClient = {
   incr: vi.fn(),
   incrby: vi.fn(),
   decrby: vi.fn(),
+  set: vi.fn(async () => 'OK'),
   expire: vi.fn(async () => 1),
 };
 
@@ -39,6 +40,8 @@ beforeEach(() => {
   mockClient.decrby.mockReset();
   mockClient.expire.mockReset();
   mockClient.expire.mockImplementation(async () => 1);
+  mockClient.set.mockReset();
+  mockClient.set.mockImplementation(async () => 'OK');
   logger.warn.mockReset();
   logger.debug.mockReset();
   h.clientOrNull.current = mockClient;
@@ -87,7 +90,7 @@ describe('checkAndIncrPayoutDailyAtomic — daily ceiling (fail-CLOSED)', () => 
     mockClient.incrby.mockResolvedValue(3_000_000);
     expect(
       await checkAndIncrPayoutDailyAtomic(3_000_000n, 1_000_000_000n, logger, 'caller1'),
-    ).toEqual({ ok: true });
+    ).toMatchObject({ ok: true });
     expect(mockClient.incrby).toHaveBeenCalledWith(expect.any(String), '3000000');
   });
 
@@ -100,9 +103,9 @@ describe('checkAndIncrPayoutDailyAtomic — daily ceiling (fail-CLOSED)', () => 
 
   it('exactly at the cap is allowed (comparison is >, not >=)', async () => {
     mockClient.incrby.mockResolvedValue(1_000_000_000);
-    expect(await checkAndIncrPayoutDailyAtomic(1_000n, 1_000_000_000n, logger, 'caller1')).toEqual({
-      ok: true,
-    });
+    expect(
+      await checkAndIncrPayoutDailyAtomic(1_000n, 1_000_000_000n, logger, 'caller1'),
+    ).toMatchObject({ ok: true });
   });
 
   it('★ Redis throws → FAIL-CLOSED', async () => {
@@ -143,11 +146,16 @@ describe('checkAndIncrPayoutDailyAtomic — daily ceiling (fail-CLOSED)', () => 
 });
 
 describe('releasePayoutDailyAtomic — compensating decrement', () => {
-  it('releases the same counter it reserved', async () => {
+  it('releases the exact counter the reservation returned', async () => {
     mockClient.decrby.mockResolvedValue(0);
-    await releasePayoutDailyAtomic(3_000_000n, 1_000_000_000n, logger, 'caller1');
+    await releasePayoutDailyAtomic(
+      3_000_000n,
+      1_000_000_000n,
+      logger,
+      'solana:payout:daily:caller1:2026-07-29',
+    );
     expect(mockClient.decrby).toHaveBeenCalledWith(
-      expect.stringContaining('solana:payout:daily:caller1'),
+      'solana:payout:daily:caller1:2026-07-29',
       '3000000',
     );
   });
@@ -155,20 +163,86 @@ describe('releasePayoutDailyAtomic — compensating decrement', () => {
   it('never throws on a Redis error (best-effort)', async () => {
     mockClient.decrby.mockRejectedValue(new Error('redis down'));
     await expect(
-      releasePayoutDailyAtomic(3_000_000n, 1_000_000_000n, logger, 'c1'),
+      releasePayoutDailyAtomic(3_000_000n, 1_000_000_000n, logger, 'k'),
     ).resolves.toBeUndefined();
   });
 
   it('never throws with a null client', async () => {
     h.clientOrNull.current = null;
     await expect(
-      releasePayoutDailyAtomic(3_000_000n, 1_000_000_000n, logger, 'c1'),
+      releasePayoutDailyAtomic(3_000_000n, 1_000_000_000n, logger, 'k'),
     ).resolves.toBeUndefined();
   });
 
-  it('no-op when the ceiling is disabled or the amount is non-positive', async () => {
-    await releasePayoutDailyAtomic(3_000_000n, 0n, logger, 'c1');
-    await releasePayoutDailyAtomic(0n, 1_000_000_000n, logger, 'c1');
+  it('no-op when the ceiling is disabled, the amount is non-positive, or no key', async () => {
+    await releasePayoutDailyAtomic(3_000_000n, 0n, logger, 'k');
+    await releasePayoutDailyAtomic(0n, 1_000_000_000n, logger, 'k');
+    await releasePayoutDailyAtomic(3_000_000n, 1_000_000_000n, logger, undefined);
     expect(mockClient.decrby).not.toHaveBeenCalled();
+  });
+
+  it('★ un contador que quedaría NEGATIVO se normaliza a 0', async () => {
+    // `decrby` sobre una clave inexistente la CREA en negativo, y un contador
+    // negativo es tope evadido durante todo ese día.
+    mockClient.decrby.mockResolvedValue(-40_000_000);
+    mockClient.set.mockResolvedValue('OK');
+    await releasePayoutDailyAtomic(40_000_000n, 1_000_000_000n, logger, 'k');
+    expect(mockClient.set).toHaveBeenCalledWith('k', '0');
+  });
+});
+
+describe('AR BLQ-4 — la clave del contador se congela en la RESERVA', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('★ reservar 23:59:50 y liberar 00:00:05 devuelve el crédito al MISMO día', async () => {
+    vi.useFakeTimers();
+    // Reserva justo antes de la medianoche UTC.
+    vi.setSystemTime(new Date('2026-07-29T23:59:50.000Z'));
+    mockClient.incrby.mockResolvedValue(40_000_000);
+    const reserved = await checkAndIncrPayoutDailyAtomic(
+      40_000_000n,
+      1_000_000_000n,
+      logger,
+      'caller1',
+    );
+    expect(reserved.ok).toBe(true);
+    const reservedKey = String(mockClient.incrby.mock.calls.at(0)?.at(0));
+    expect(reservedKey).toContain('2026-07-29');
+
+    // Entre reservar y liberar hay claim, blockhash, firma, broadcast con
+    // reintentos y confirmaciones: la ventana cruza la medianoche sin esfuerzo.
+    vi.setSystemTime(new Date('2026-07-30T00:00:05.000Z'));
+    mockClient.decrby.mockResolvedValue(0);
+    await releasePayoutDailyAtomic(
+      40_000_000n,
+      1_000_000_000n,
+      logger,
+      reserved.ok ? reserved.dailyKey : undefined,
+    );
+
+    // El crédito vuelve a la clave del 29, NO a la del 30.
+    const releasedKey = String(mockClient.decrby.mock.calls.at(0)?.at(0));
+    expect(releasedKey).toBe(reservedKey);
+    expect(releasedKey).toContain('2026-07-29');
+    expect(releasedKey).not.toContain('2026-07-30');
+  });
+
+  it('control: dentro del mismo día la clave coincide igual (el test de arriba no es vacuo)', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-29T10:00:00.000Z'));
+    mockClient.incrby.mockResolvedValue(1);
+    const reserved = await checkAndIncrPayoutDailyAtomic(1n, 1_000_000_000n, logger, 'caller1');
+    mockClient.decrby.mockResolvedValue(0);
+    await releasePayoutDailyAtomic(
+      1n,
+      1_000_000_000n,
+      logger,
+      reserved.ok ? reserved.dailyKey : undefined,
+    );
+    expect(String(mockClient.decrby.mock.calls.at(0)?.at(0))).toBe(
+      String(mockClient.incrby.mock.calls.at(0)?.at(0)),
+    );
   });
 });

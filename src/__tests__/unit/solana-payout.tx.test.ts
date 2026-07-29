@@ -62,7 +62,10 @@ import {
   PAYOUT_SENTINEL_ID,
   encodeSignatureBase58,
 } from '../../methods/solana-payout/payout-shape.js';
-import { cosignAndBroadcast } from '../../methods/solana-sponsor/broadcast.js';
+import {
+  cosignAndBroadcast,
+  FEE_PAYER_SENTINEL_ID,
+} from '../../methods/solana-sponsor/broadcast.js';
 import { resetChainMutexForTesting } from '../../chains/chain-mutex.js';
 import { deriveAta } from '../../chains/solana-escrow.js';
 
@@ -120,6 +123,21 @@ beforeEach(() => {
 });
 
 afterEach(() => vi.clearAllMocks());
+
+describe('PAYOUT_SENTINEL_ID — mutex propio (CR)', () => {
+  it('★ NO comparte el sentinel con el fee-payer de patrocinio', () => {
+    // Se asserta contra el OTRO sentinel, no contra el literal -2: lo que importa
+    // es la propiedad (dos llaves distintas, dos candados distintos), no el número.
+    // Colisionarlos serializaría payouts con sponsorships sin necesidad y —peor—
+    // pondría dos keypairs distintos bajo un mismo candado, que da una falsa
+    // sensación de exclusión mutua sin proveerla para ninguno.
+    expect(PAYOUT_SENTINEL_ID).not.toBe(FEE_PAYER_SENTINEL_ID);
+  });
+
+  it('es un sentinel negativo, fuera del rango de chainIds EVM reales', () => {
+    expect(PAYOUT_SENTINEL_ID).toBeLessThan(0);
+  });
+});
 
 describe('buildPayoutTx', () => {
   it('builds a single TransferChecked, unsigned, with the operator as feePayer', () => {
@@ -304,7 +322,7 @@ describe('verifyPayoutSignature — verify-before-trust (CD-8)', () => {
       mint: mint.toBase58(),
       amountAtomic: AMOUNT.toString(),
     });
-    expect(r.valid).toBe(true);
+    expect(r.status).toBe('confirmed');
   });
 
   it('★ a delta BELOW the expected amount is not valid', async () => {
@@ -315,19 +333,19 @@ describe('verifyPayoutSignature — verify-before-trust (CD-8)', () => {
       mint: mint.toBase58(),
       amountAtomic: (AMOUNT + 1n).toString(),
     });
-    expect(r.valid).toBe(false);
-    expect(r.reason).toBe('DELTA_BELOW_EXPECTED');
+    expect(r.status).toBe('absent');
+    if (r.status !== 'confirmed') expect(r.reason).toBe('DELTA_BELOW_EXPECTED');
   });
 
-  it('unknown signature → not valid (never throws)', async () => {
+  it('firma desconocida → la cadena respondió y no está: `absent` (nunca lanza)', async () => {
     const r = await verifyPayoutSignature(chain as unknown as Connection, {
       signature: 'NoSuchSignature',
       payTo: agent.toBase58(),
       mint: mint.toBase58(),
       amountAtomic: AMOUNT.toString(),
     });
-    expect(r.valid).toBe(false);
-    expect(r.reason).toBe('TX_NOT_FOUND');
+    expect(r.status).toBe('absent');
+    if (r.status !== 'confirmed') expect(r.reason).toBe('TX_NOT_FOUND');
   });
 
   it('another owner’s payment does not verify for this payTo', async () => {
@@ -338,21 +356,31 @@ describe('verifyPayoutSignature — verify-before-trust (CD-8)', () => {
       mint: mint.toBase58(),
       amountAtomic: AMOUNT.toString(),
     });
-    expect(r.valid).toBe(false);
-    expect(r.reason).toBe('NO_DESTINATION_BALANCE');
+    expect(r.status).toBe('absent');
+    if (r.status !== 'confirmed') expect(r.reason).toBe('NO_DESTINATION_BALANCE');
   });
 
-  it('★ an RPC failure is NOT a valid verification (never throws)', async () => {
+  it('★ AR BLQ-2: un RPC caído es `indeterminate`, NUNCA `absent`', async () => {
+    // Ésta es LA distinción del bloqueante: si esto devolviera `absent`, el
+    // call-site concluiría que el pago no ocurrió y volvería a pagar.
     const sig = await payOnce();
-    chain.failBalanceRead = true;
+    chain.failTxLookup = true;
     const r = await verifyPayoutSignature(chain as unknown as Connection, {
       signature: sig,
       payTo: agent.toBase58(),
       mint: mint.toBase58(),
       amountAtomic: AMOUNT.toString(),
     });
-    expect(r.valid).toBe(false);
-    expect(r.reason).toBe('RPC_ERROR');
+    expect(r.status).toBe('indeterminate');
+    expect(r.status).not.toBe('absent');
+    if (r.status !== 'confirmed') expect(r.reason).toBe('RPC_ERROR');
+  });
+
+  it('★ los tres estados son alcanzables y distintos entre sí', () => {
+    // Sin esto, el tipo podría colapsar a dos valores en la práctica y nadie lo
+    // notaría: es el colapso que el bloqueante describe, un nivel más arriba.
+    const seen = new Set<string>(['confirmed', 'absent', 'indeterminate']);
+    expect(seen.size).toBe(3);
   });
 });
 

@@ -41,6 +41,7 @@ import {
   claimPayout,
   markConfirmed,
   markSigned,
+  readPayout,
   revertSignedToClaimed,
   stealStaleClaim,
   type PayoutIntent,
@@ -74,7 +75,15 @@ type PayoutErrorCode =
   | 'PAYOUT_INTENT_CONFLICT'
   | 'PAYOUT_IN_PROGRESS'
   | 'PAYOUT_BROADCAST_EXPIRED'
-  | 'PAYOUT_BROADCAST_FAILED';
+  | 'PAYOUT_BROADCAST_FAILED'
+  /**
+   * AR BLQ-1 — la tx SE TRANSMITIÓ y no se pudo determinar su suerte. Distinto de
+   * `PAYOUT_BROADCAST_EXPIRED` (que ahora sólo se emite SIN envío previo, donde sí
+   * está probado que no se gastó) y más preciso que `PAYOUT_BROADCAST_FAILED`
+   * (reintentos agotados). El gateway lo trata como incógnita por su regla de
+   * default, sin necesidad de conocerlo.
+   */
+  | 'PAYOUT_BROADCAST_UNKNOWN';
 
 interface ErrorBody {
   readonly error: {
@@ -182,34 +191,58 @@ export async function resolveExistingRow(
     mint: intent.mint,
     amountAtomic: intent.amountAtomic,
   });
-  if (verified.valid) {
+  if (verified.status === 'confirmed') {
     await markConfirmed(intent, signature, logger);
     return { kind: 'replay', signature };
   }
 
-  if (row.status === 'confirmed') {
-    // Recorded confirmed yet unverifiable on-chain right now: we do NOT know the
-    // disposition, so we must not claim it was unpaid and must not pay again.
+  // ── AR BLQ-2 — "no pude preguntar" NUNCA autoriza re-firmar ────────────────
+  // Antes esto leía un booleano, así que un RPC caído (o un nodo atrasado, o una
+  // tx que ese nodo no tiene) se leía igual que "el pago no está" y habilitaba el
+  // revert + re-firma ⇒ DOBLE PAGO de un intent ya pagado.
+  //
+  // Y el punto fino: un blockhash vencido prueba que esa tx NO PUEDE ENTRAR DE
+  // ACÁ EN ADELANTE, no que no haya entrado antes. Lo segundo sólo lo prueba el
+  // verify. Si el verify no pudo hablar, no hay prueba de nada.
+  if (verified.status === 'indeterminate') {
+    logger.warn(
+      { intent_id: intent.intentId, reason: verified.reason },
+      'solana payout: could not determine on-chain state — refusing to re-sign',
+    );
     return inProgress();
   }
 
-  // status === 'signed' and not verifiable: can that transaction still land?
+  if (row.status === 'confirmed') {
+    // Registrada como confirmed y la cadena dice que ese pago no está: estado
+    // contradictorio. No afirmamos nada sobre el dinero ni volvemos a pagar.
+    return inProgress();
+  }
+
+  // status === 'signed' y la cadena RESPONDIÓ que ese pago no ocurrió. Recién acá
+  // tiene sentido preguntar si la tx todavía puede aterrizar.
   const blockhash = row.recentBlockhash;
-  let stillValid: boolean;
   if (blockhash === null) {
-    stillValid = false;
-  } else {
-    try {
-      const res = await connection.isBlockhashValid(blockhash);
-      stillValid = res.value === true;
-    } catch {
-      // Cannot tell → assume it may still land. Never re-sign on a guess.
-      stillValid = true;
-    }
+    // AR menor: una fila `signed` sin blockhash es tan imposible como una `signed`
+    // sin firma, y aquélla ya falla cerrado. Ésta autorizaba GASTAR, o sea que la
+    // que fallaba abierta era justo la cara. Fail-closed también.
+    logger.warn(
+      { intent_id: intent.intentId },
+      'solana payout: signed row without recent_blockhash — refusing to re-sign',
+    );
+    return inProgress();
+  }
+  let stillValid: boolean;
+  try {
+    const res = await connection.isBlockhashValid(blockhash);
+    stillValid = res.value === true;
+  } catch {
+    // Cannot tell → assume it may still land. Never re-sign on a guess.
+    stillValid = true;
   }
   if (stillValid) return inProgress();
 
-  // The blockhash is dead: that tx can never land, so re-signing is safe.
+  // The blockhash is dead AND the chain says the payment is not there: re-signing
+  // is safe. Ambas condiciones son necesarias; ninguna alcanza sola.
   const reverted = await revertSignedToClaimed(intent, signature, logger);
   if (!reverted.ok) return storeUnavailable();
   return reverted.reverted ? { kind: 'proceed' } : inProgress();
@@ -367,8 +400,24 @@ export const solanaPayoutRoute: FastifyPluginAsync = async (app) => {
           );
           return fail('PAYOUT_FUNDING_LOW', 503, 'Payout operator is underfunded');
         }
-      } catch {
-        return fail('PAYOUT_FUNDING_LOW', 503, 'Payout operator is underfunded');
+      } catch (err) {
+        // Cuarta aparición del mismo error, y la única PRE-envío: este catch
+        // colapsaba "la ATA no existe" (⇒ no hay fondos) con "el RPC no contestó"
+        // (⇒ no sé), y respondía funding-low para los dos. No cuesta plata acá
+        // porque todavía no se firmó nada, pero AC-8 pide distinguirlos: confundir
+        // un RPC caído con una wallet vacía entrena al operador a recargar una
+        // wallet que está bien.
+        const missingAccount = /could not find account|account does not exist/i.test(
+          err instanceof Error ? err.message : String(err),
+        );
+        if (missingAccount) {
+          app.log.warn(
+            { facilitator_key_id: keyId, source_ata: sourceAta.toBase58() },
+            'solana payout: operator source ATA does not exist — no funds',
+          );
+          return fail('PAYOUT_FUNDING_LOW', 503, 'Payout operator is underfunded');
+        }
+        return fail('PAYOUT_RPC_UNAVAILABLE', 503, 'Could not read the operator SPL balance');
       }
 
       // The DESTINATION may legitimately not exist yet — that is exactly what the
@@ -391,11 +440,16 @@ export const solanaPayoutRoute: FastifyPluginAsync = async (app) => {
       if (!daily.ok) {
         return fail('PAYOUT_DAILY_CAP', 429, 'Daily payout cap reached');
       }
+      // BLQ-4: se congela la clave del contador EN LA RESERVA. Todo lo que sigue
+      // (claim, blockhash, firma, broadcast con reintentos, confirmaciones) puede
+      // cruzar la medianoche UTC; recalcular la fecha al liberar devolvía el
+      // crédito al día equivocado.
+      const reservedDailyKey = daily.dailyKey;
       let reserved = true;
       const releaseReservation = async (): Promise<void> => {
         if (!reserved) return;
         reserved = false;
-        await releasePayoutDailyAtomic(amountAtomic, dailyMaxAtomic, app.log, keyId);
+        await releasePayoutDailyAtomic(amountAtomic, dailyMaxAtomic, app.log, reservedDailyKey);
       };
 
       // ── Step 9 — CLAIM. The LAST gate before signing (CD-17).
@@ -498,6 +552,51 @@ export const solanaPayoutRoute: FastifyPluginAsync = async (app) => {
         });
       }
 
+      // ── AR BLQ-1 — un fallo POSTERIOR a un envío exitoso no puede decir "no se
+      // gastó". `SPONSOR_BROADCAST_EXPIRED` se emite desde dos sondas que corren
+      // DESPUÉS del `sendRawTransaction`, y su catch significa "no pude preguntar",
+      // no "el blockhash venció". El agente pudo haber cobrado.
+      //
+      // Antes de contestar, usamos la evidencia que YA tenemos en la mano: la firma
+      // persistida (invariante I2). Si la cadena la confirma, esto no era un fallo.
+      if (!result.ok && result.sent === true) {
+        const persisted = await readPayout(intent, app.log);
+        const signature = persisted.ok ? persisted.row?.signature : undefined;
+        if (signature !== undefined && signature !== null) {
+          const verified = await verifyPayoutSignature(connection, {
+            signature,
+            payTo: intent.payTo,
+            mint: intent.mint,
+            amountAtomic: intent.amountAtomic,
+          });
+          if (verified.status === 'confirmed') {
+            // Se pagó de verdad; el fallo era de observación, no de dinero.
+            await markConfirmed(intent, signature, app.log);
+            reserved = false; // el gasto ocurrió: la reserva se CONSERVA
+            app.log.info(
+              { request_id: requestId, intent_id: body.intentId, facilitator_key_id: keyId },
+              'solana payout confirmed on-chain despite a post-send probe failure',
+            );
+            return reply.code(200).send({
+              signature,
+              network,
+              payTo: body.payTo,
+              amountAtomic: body.amountAtomic,
+              alreadySettled: false,
+            });
+          }
+        }
+        // No se pudo confirmar: la disposición del valor es DESCONOCIDA. Se conserva
+        // el débito (pudo haberse gastado) y se contesta con un código que el
+        // gateway NO tiene como prueba de no-gasto.
+        reserved = false;
+        return fail(
+          'PAYOUT_BROADCAST_UNKNOWN',
+          502,
+          'Transaction was broadcast; its on-chain outcome could not be determined',
+        );
+      }
+
       // §6.6.4 — every terminal failure releases the reservation EXCEPT a broadcast
       // that may have landed: there the debit is KEPT, conservatively.
       if (result.code === 'SPONSOR_BROADCAST_FAILED') {
@@ -508,13 +607,26 @@ export const solanaPayoutRoute: FastifyPluginAsync = async (app) => {
 
       switch (result.code) {
         case 'SPONSOR_BROADCAST_EXPIRED':
+          // Sólo alcanzable SIN envío previo (`sent` falso), gracias al bloque de
+          // arriba: acá sí es cierto que no se gastó.
           return fail('PAYOUT_BROADCAST_EXPIRED', 409, 'Transaction blockhash expired');
         case 'SPONSOR_BROADCAST_FAILED':
           return fail('PAYOUT_BROADCAST_FAILED', 502, 'Broadcast could not be confirmed');
         case 'SPONSOR_PERSIST_FAILED':
           return fail('PAYOUT_STORE_UNAVAILABLE', 500, 'Payout ledger unavailable');
-        default:
+        case 'SPONSOR_REJECTED':
+        case 'SPONSOR_UNSUPPORTED_TX':
+        case 'SPONSOR_DAILY_CAP':
           return fail('INVALID_PAYLOAD', 400, 'Transaction rejected by validation');
+        default:
+          // AR menor: el `default:` caía en un código de NO-GASTO. Del lado del
+          // gateway un código nuevo cae solo del lado seguro; acá la propiedad
+          // estaba invertida. Un código que no reconocemos es una incógnita.
+          return fail(
+            'PAYOUT_BROADCAST_UNKNOWN',
+            502,
+            'Unrecognized broadcast outcome; value disposition unknown',
+          );
       }
     },
   );

@@ -101,7 +101,24 @@ export interface CosignOpts {
 
 export type CosignResult =
   | { ok: true; signature: string }
-  | { ok: false; code: SponsorErrorCode; reason: string };
+  | {
+      ok: false;
+      code: SponsorErrorCode;
+      reason: string;
+      /**
+       * WKH-302 (AR BLQ-1) — ¿ya se transmitió la tx al cluster con éxito antes de
+       * este fallo? SÓLO informativo: los callers que no lo leen (sponsor, release)
+       * quedan byte-idénticos.
+       *
+       * ⚠️ POR QUÉ EXISTE. `SPONSOR_BROADCAST_EXPIRED` se emite desde dos sondas
+       * que corren DESPUÉS de un `sendRawTransaction` exitoso, y su `catch` no
+       * significa "el blockhash venció" sino **"no pude preguntar"**. Sin este
+       * campo, el caller no puede distinguir el expirado PRE-envío (que sí prueba
+       * que no se gastó) del POST-envío (donde el agente pudo haber cobrado), y
+       * termina afirmando "no se gastó" sobre un pago real.
+       */
+      sent?: boolean;
+    };
 
 /**
  * Parse a base64 legacy `Transaction`. Fail-closed:
@@ -264,6 +281,9 @@ async function broadcastWithRebroadcast(
   maxRebroadcasts: number,
 ): Promise<CosignResult> {
   const attempts = Math.max(1, maxRebroadcasts + 1);
+  // AR BLQ-1: a partir del primer send exitoso, NINGÚN veredicto posterior puede
+  // afirmar que no se gastó — la tx ya está en manos del cluster.
+  let sent = false;
   for (let i = 0; i < attempts; i++) {
     // Re-check freshness at the top of each (re)broadcast — the blockhash may
     // have expired between retries.
@@ -271,10 +291,16 @@ async function broadcastWithRebroadcast(
     try {
       fresh = await isBlockhashFresh(connection, blockhash);
     } catch {
-      return { ok: false, code: 'SPONSOR_BROADCAST_EXPIRED', reason: 'BLOCKHASH_CHECK_FAILED' };
+      // "No pude preguntar" ≠ "venció". Si ya hubo envío, esto es una incógnita.
+      return {
+        ok: false,
+        code: 'SPONSOR_BROADCAST_EXPIRED',
+        reason: 'BLOCKHASH_CHECK_FAILED',
+        sent,
+      };
     }
     if (!fresh) {
-      return { ok: false, code: 'SPONSOR_BROADCAST_EXPIRED', reason: 'BLOCKHASH_EXPIRED' };
+      return { ok: false, code: 'SPONSOR_BROADCAST_EXPIRED', reason: 'BLOCKHASH_EXPIRED', sent };
     }
 
     let signature: string;
@@ -283,6 +309,7 @@ async function broadcastWithRebroadcast(
         skipPreflight: false,
         preflightCommitment: 'confirmed',
       });
+      sent = true;
     } catch {
       continue; // transient send error → rebroadcast
     }
@@ -304,10 +331,20 @@ async function broadcastWithRebroadcast(
   try {
     stillFresh = await isBlockhashFresh(connection, blockhash);
   } catch {
-    return { ok: false, code: 'SPONSOR_BROADCAST_EXPIRED', reason: 'BLOCKHASH_CHECK_FAILED' };
+    return {
+      ok: false,
+      code: 'SPONSOR_BROADCAST_EXPIRED',
+      reason: 'BLOCKHASH_CHECK_FAILED',
+      sent,
+    };
   }
   if (!stillFresh) {
-    return { ok: false, code: 'SPONSOR_BROADCAST_EXPIRED', reason: 'BLOCKHASH_EXPIRED' };
+    return { ok: false, code: 'SPONSOR_BROADCAST_EXPIRED', reason: 'BLOCKHASH_EXPIRED', sent };
   }
-  return { ok: false, code: 'SPONSOR_BROADCAST_FAILED', reason: 'UNCONFIRMED_AFTER_REBROADCASTS' };
+  return {
+    ok: false,
+    code: 'SPONSOR_BROADCAST_FAILED',
+    reason: 'UNCONFIRMED_AFTER_REBROADCASTS',
+    sent,
+  };
 }

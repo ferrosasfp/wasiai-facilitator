@@ -97,6 +97,20 @@ export class FakeSolanaChain {
   crashAfterSign = false;
   /** Balance reads throw (RPC unavailable) — must NOT be read as funding-low. */
   failBalanceRead = false;
+  /**
+   * AR BLQ-1 — la sonda de frescura del blockhash falla SÓLO después de que un
+   * envío ya salió. Reproduce el caso real que el veredicto "expirado" describía
+   * mal: el cluster aceptó la tx y el nodo deja de contestar la sonda, así que el
+   * `catch` significa "no pude preguntar" y NO "no se gastó".
+   */
+  failBlockhashProbeAfterSend = false;
+  /**
+   * Sólo la CONSULTA de la tx (`getParsedTransaction`) falla. Separado de
+   * `failBalanceRead` a propósito: si el pre-check de fondeo también fallara, la
+   * request se cortaría antes de enviar nada y el escenario post-envío nunca se
+   * alcanzaría.
+   */
+  failTxLookup = false;
 
   // ── setup helpers ─────────────────────────────────────────────────────────
 
@@ -167,6 +181,10 @@ export class FakeSolanaChain {
   }
 
   isBlockhashValid(blockhash: string): Promise<{ value: boolean }> {
+    if (this.failBlockhashProbeAfterSend && this._txs.size > 0) {
+      // Ya hubo al menos un envío aplicado: a partir de acá el nodo no contesta.
+      return Promise.reject(new Error('BLOCKHASH_PROBE_UNAVAILABLE'));
+    }
     return Promise.resolve({ value: this._validBlockhashes.has(blockhash) });
   }
 
@@ -227,6 +245,15 @@ export class FakeSolanaChain {
       return Promise.reject(new Error('TX_NOT_SIGNED'));
     }
     const signature = encodeSignatureBase58(Uint8Array.from(sigEntry.signature));
+
+    // FIDELIDAD: re-transmitir la MISMA tx firmada es idempotente en Solana — la
+    // red dedupea por firma. Aplicarla de nuevo inventaría plata que en la realidad
+    // no se mueve, y hacía que un rebroadcast legítimo (confirmación caída) se
+    // leyera como triple pago. El doble pago REAL que estos tests cazan es el de
+    // dos txs DISTINTAS (re-firmadas), que sí producen dos firmas y dos efectos.
+    if (this._txs.has(signature)) {
+      return Promise.resolve(signature);
+    }
 
     const creates: DecodedAtaCreate[] = [];
     const transfers: DecodedTransfer[] = [];
@@ -303,7 +330,9 @@ export class FakeSolanaChain {
       postTokenBalances: TokenBalanceEntry[];
     };
   } | null> {
-    if (this.failBalanceRead) return Promise.reject(new Error('RPC_UNAVAILABLE'));
+    if (this.failBalanceRead || this.failTxLookup) {
+      return Promise.reject(new Error('RPC_UNAVAILABLE'));
+    }
     const rec = this._txs.get(signature);
     if (rec === undefined) return Promise.resolve(null);
     return Promise.resolve({
