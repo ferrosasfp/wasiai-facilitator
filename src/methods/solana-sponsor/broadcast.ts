@@ -46,7 +46,12 @@ export type SponsorErrorCode =
   | 'SPONSOR_UNSUPPORTED_TX'
   | 'SPONSOR_DAILY_CAP'
   | 'SPONSOR_BROADCAST_EXPIRED'
-  | 'SPONSOR_BROADCAST_FAILED';
+  | 'SPONSOR_BROADCAST_FAILED'
+  // WKH-302: only reachable when a caller passes `onSigned` (payout). The two
+  // existing `switch (result.code)` sites (routes/solana-sponsor.ts,
+  // routes/solana-escrow.ts) both have a `default:` and neither does `never`
+  // exhaustiveness, so adding this member does not change their behaviour.
+  | 'SPONSOR_PERSIST_FAILED';
 
 /**
  * Injected structural validator (CD-11). Generic contract reused by every
@@ -81,11 +86,39 @@ export interface CosignOpts {
    * blockhash, pre-sign reject). Best-effort; must never throw.
    */
   readonly onFeeReleased?: (lamports: bigint) => Promise<void>;
+  /** WKH-302: mutex key. Defaults to FEE_PAYER_SENTINEL_ID (sponsor/release). */
+  readonly mutexId?: number;
+  /**
+   * WKH-302 (invariant I2): invoked AFTER signing and BEFORE serializing and
+   * broadcasting. If it returns `{ ok:false }` the primitive does NOT broadcast and
+   * resolves `SPONSOR_PERSIST_FAILED`. Callers that do not pass it are unaffected.
+   *
+   * This is what lets a durable ledger record the signature+blockhash BEFORE the tx
+   * can possibly land, so a row without a signature PROVES nothing was broadcast.
+   */
+  readonly onSigned?: (tx: Transaction) => Promise<{ ok: boolean }>;
 }
 
 export type CosignResult =
   | { ok: true; signature: string }
-  | { ok: false; code: SponsorErrorCode; reason: string };
+  | {
+      ok: false;
+      code: SponsorErrorCode;
+      reason: string;
+      /**
+       * WKH-302 (AR BLQ-1) — ¿ya se transmitió la tx al cluster con éxito antes de
+       * este fallo? SÓLO informativo: los callers que no lo leen (sponsor, release)
+       * quedan byte-idénticos.
+       *
+       * ⚠️ POR QUÉ EXISTE. `SPONSOR_BROADCAST_EXPIRED` se emite desde dos sondas
+       * que corren DESPUÉS de un `sendRawTransaction` exitoso, y su `catch` no
+       * significa "el blockhash venció" sino **"no pude preguntar"**. Sin este
+       * campo, el caller no puede distinguir el expirado PRE-envío (que sí prueba
+       * que no se gastó) del POST-envío (donde el agente pudo haber cobrado), y
+       * termina afirmando "no se gastó" sobre un pago real.
+       */
+      sent?: boolean;
+    };
 
 /**
  * Parse a base64 legacy `Transaction`. Fail-closed:
@@ -177,30 +210,48 @@ export async function cosignAndBroadcast(
   }
 
   // Steps 5-6 — blockhash freshness + sign + broadcast, SERIALIZED per fee-payer.
-  const result = await runExclusive(FEE_PAYER_SENTINEL_ID, async (): Promise<CosignResult> => {
-    const connection = new Connection(opts.rpcUrl, 'confirmed');
-    const blockhash = tx.recentBlockhash;
-    if (blockhash === undefined || blockhash.length === 0) {
-      return { ok: false, code: 'SPONSOR_REJECTED', reason: 'MISSING_BLOCKHASH' };
-    }
+  const result = await runExclusive(
+    opts.mutexId ?? FEE_PAYER_SENTINEL_ID,
+    async (): Promise<CosignResult> => {
+      const connection = new Connection(opts.rpcUrl, 'confirmed');
+      const blockhash = tx.recentBlockhash;
+      if (blockhash === undefined || blockhash.length === 0) {
+        return { ok: false, code: 'SPONSOR_REJECTED', reason: 'MISSING_BLOCKHASH' };
+      }
 
-    // Step 5 — blockhash fresh BEFORE signing (never sign a stale tx).
-    let fresh: boolean;
-    try {
-      fresh = await isBlockhashFresh(connection, blockhash);
-    } catch {
-      // RPC error on the freshness probe → fail-closed, never sign.
-      return { ok: false, code: 'SPONSOR_BROADCAST_EXPIRED', reason: 'BLOCKHASH_CHECK_FAILED' };
-    }
-    if (!fresh) {
-      return { ok: false, code: 'SPONSOR_BROADCAST_EXPIRED', reason: 'STALE_BLOCKHASH' };
-    }
+      // Step 5 — blockhash fresh BEFORE signing (never sign a stale tx).
+      let fresh: boolean;
+      try {
+        fresh = await isBlockhashFresh(connection, blockhash);
+      } catch {
+        // RPC error on the freshness probe → fail-closed, never sign.
+        return { ok: false, code: 'SPONSOR_BROADCAST_EXPIRED', reason: 'BLOCKHASH_CHECK_FAILED' };
+      }
+      if (!fresh) {
+        return { ok: false, code: 'SPONSOR_BROADCAST_EXPIRED', reason: 'STALE_BLOCKHASH' };
+      }
 
-    // Step 6 — co-sign as fee-payer, then broadcast with bounded rebroadcast.
-    tx.partialSign(opts.feePayerKeypair);
-    const raw = tx.serialize();
-    return broadcastWithRebroadcast(connection, raw, blockhash, opts.maxRebroadcasts);
-  });
+      // Step 6 — co-sign as fee-payer, then broadcast with bounded rebroadcast.
+      tx.partialSign(opts.feePayerKeypair);
+      // WKH-302 (I2): persist signature+blockhash BETWEEN signing and broadcasting.
+      // A Solana signature exists before the tx is transmitted, so this ordering is
+      // free — and it is what makes "no signature recorded" a PROOF that nothing was
+      // sent. If persistence fails we must NOT broadcast: we would be unable to tell
+      // a retry whether it already paid.
+      if (opts.onSigned) {
+        const persisted = await opts.onSigned(tx);
+        if (!persisted.ok) {
+          return {
+            ok: false,
+            code: 'SPONSOR_PERSIST_FAILED',
+            reason: 'PERSIST_BEFORE_BROADCAST_FAILED',
+          };
+        }
+      }
+      const raw = tx.serialize();
+      return broadcastWithRebroadcast(connection, raw, blockhash, opts.maxRebroadcasts);
+    },
+  );
 
   // AR-MNR-1 (data-integrity / auto-DoS): the daily-cap INCR at step 4 RESERVED
   // the fee upper bound BEFORE any spend. Release it for every terminal outcome
@@ -230,6 +281,9 @@ async function broadcastWithRebroadcast(
   maxRebroadcasts: number,
 ): Promise<CosignResult> {
   const attempts = Math.max(1, maxRebroadcasts + 1);
+  // AR BLQ-1: a partir del primer send exitoso, NINGÚN veredicto posterior puede
+  // afirmar que no se gastó — la tx ya está en manos del cluster.
+  let sent = false;
   for (let i = 0; i < attempts; i++) {
     // Re-check freshness at the top of each (re)broadcast — the blockhash may
     // have expired between retries.
@@ -237,10 +291,16 @@ async function broadcastWithRebroadcast(
     try {
       fresh = await isBlockhashFresh(connection, blockhash);
     } catch {
-      return { ok: false, code: 'SPONSOR_BROADCAST_EXPIRED', reason: 'BLOCKHASH_CHECK_FAILED' };
+      // "No pude preguntar" ≠ "venció". Si ya hubo envío, esto es una incógnita.
+      return {
+        ok: false,
+        code: 'SPONSOR_BROADCAST_EXPIRED',
+        reason: 'BLOCKHASH_CHECK_FAILED',
+        sent,
+      };
     }
     if (!fresh) {
-      return { ok: false, code: 'SPONSOR_BROADCAST_EXPIRED', reason: 'BLOCKHASH_EXPIRED' };
+      return { ok: false, code: 'SPONSOR_BROADCAST_EXPIRED', reason: 'BLOCKHASH_EXPIRED', sent };
     }
 
     let signature: string;
@@ -249,7 +309,17 @@ async function broadcastWithRebroadcast(
         skipPreflight: false,
         preflightCommitment: 'confirmed',
       });
+      sent = true;
     } catch {
+      // R-1: un envío que TIRA también cuenta como "pudo haber salido". Un timeout
+      // o un socket caído ocurren perfectamente DESPUÉS de que el nodo aceptó la tx
+      // y la reenvió al cluster, así que el throw no prueba que no haya llegado.
+      //
+      // Y este mismo bucle ya lo asumía: el `continue` de abajo reintenta LA MISMA
+      // tx firmada, algo que sólo es seguro porque la red dedupea por firma. El
+      // bucle trataba el envío fallido como "puede haber llegado" y el flag como
+      // "no llegó" — dos criterios opuestos en el mismo archivo.
+      sent = true;
       continue; // transient send error → rebroadcast
     }
 
@@ -270,10 +340,20 @@ async function broadcastWithRebroadcast(
   try {
     stillFresh = await isBlockhashFresh(connection, blockhash);
   } catch {
-    return { ok: false, code: 'SPONSOR_BROADCAST_EXPIRED', reason: 'BLOCKHASH_CHECK_FAILED' };
+    return {
+      ok: false,
+      code: 'SPONSOR_BROADCAST_EXPIRED',
+      reason: 'BLOCKHASH_CHECK_FAILED',
+      sent,
+    };
   }
   if (!stillFresh) {
-    return { ok: false, code: 'SPONSOR_BROADCAST_EXPIRED', reason: 'BLOCKHASH_EXPIRED' };
+    return { ok: false, code: 'SPONSOR_BROADCAST_EXPIRED', reason: 'BLOCKHASH_EXPIRED', sent };
   }
-  return { ok: false, code: 'SPONSOR_BROADCAST_FAILED', reason: 'UNCONFIRMED_AFTER_REBROADCASTS' };
+  return {
+    ok: false,
+    code: 'SPONSOR_BROADCAST_FAILED',
+    reason: 'UNCONFIRMED_AFTER_REBROADCASTS',
+    sent,
+  };
 }

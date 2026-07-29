@@ -30,6 +30,12 @@ import { isSponsorEnabled } from './infra/solana-fee-payer.js';
 // the EVM boot is byte-identical and POST /solana/escrow/release 404s (CD-5, TF8).
 import { solanaEscrowReleaseRoute } from './routes/solana-escrow.js';
 import { isReleaseEnabled } from './infra/solana-release-authority.js';
+// WKH-302 — Solana SPL payout ORIGINATED by the facilitator (opt-in-off). Registered
+// ONLY when the flag is on, the payout key parses, AND that key is distinct from the
+// fee-payer's and the release-authority's (AC-11). Otherwise POST /solana/payout 404s
+// and the boot is byte-identical to the pre-302 one.
+import { solanaPayoutRoute } from './routes/solana-payout.js';
+import { isSolanaPayoutEnabled } from './infra/solana-payout-operator.js';
 import { initChainBreakers } from './chains/init-breakers.js';
 import { initDomainCheck } from './chains/init-domain-check.js';
 // Side-effect import: registers built-in chain adapters (kite, avalanche) in chainRegistry.
@@ -409,6 +415,12 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   // the release-authority flag is on AND the key is present+parseable (CD-5, TF8).
   if (isReleaseEnabled()) {
     await app.register(solanaEscrowReleaseRoute);
+  }
+  // WKH-302 — opt-in-off: the treasury route exists only under a full green gate.
+  // A key misconfiguration (including reusing the fee-payer/release key) turns the
+  // feature OFF rather than silently merging two powers (AC-11).
+  if (isSolanaPayoutEnabled()) {
+    await app.register(solanaPayoutRoute);
   }
   await app.register(supportedRoute);
   await app.register(openapiRoute);

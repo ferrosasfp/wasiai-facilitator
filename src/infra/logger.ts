@@ -41,6 +41,11 @@ const REDACT_FIELDS: readonly string[] = [
   'SOLANA_FEE_PAYER_PRIVATE_KEY',
   'feePayerPrivateKey',
   'SOLANA_SPONSOR_POP_SECRET',
+  // WKH-302 — Solana payout-operator signing key (the facilitator's treasury key).
+  // Same criterion as SOLANA_FEE_PAYER_PRIVATE_KEY: `redact` matches EXACT field
+  // keys, so the generic 'secret' entry below does NOT cover this name.
+  'SOLANA_PAYOUT_OPERATOR_SECRET_KEY',
+  'payoutOperatorSecretKey',
   'popProof',
   'partialSignedTx',
   'secret',

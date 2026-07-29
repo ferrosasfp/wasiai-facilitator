@@ -149,6 +149,44 @@ puede importar `@supabase/supabase-js`).
 
 Origen: **WKH-205 / HU-SOL-6**.
 
+### [6] Excepción documentada: rutas dedicadas no-x402 → `methods/*`, `chains/*`
+
+La matriz dice `src/routes/ ↛ src/chains/*, src/methods/*` porque las rutas x402
+(`settle`, `verify`) acceden a esas capas **vía `core.verify/settle`**. Las rutas
+**dedicadas no-x402** de Solana son una excepción explícita y acotada:
+
+| Ruta | Importa de `methods/*` / `chains/*` |
+|---|---|
+| `src/routes/solana-sponsor.ts` | `methods/solana-sponsor/{broadcast,cr1,pop}.ts` |
+| `src/routes/solana-escrow.ts`  | `methods/solana-escrow/{build-release,cr1-release}.ts`, `chains/solana-escrow.ts` |
+| `src/routes/solana-payout.ts`  | `methods/solana-payout/*`, `chains/solana-escrow.ts` (`deriveAta`) |
+
+**Alcance explícito**: SOLO esas tres rutas. Cualquier otra ruta sigue bajo la
+regla general.
+
+Justificación (por qué NO se enruta por `core/*`):
+
+- Estas rutas no son del camino x402. `core/verify.ts` y `core/settle.ts` son el
+  dispatcher del **contrato x402** (`SettleRequest` → adapter de chain); no hay
+  nada que dispatchear acá: no hay `PaymentPayload`, no hay adapter de chain que
+  elija el namespace.
+- Hacerlas pasar por `core/*` obligaría a meter conocimiento **no-EVM específico
+  de instrucción** (forma del `deposit`/`release`/`TransferChecked`, keypairs de
+  Solana, PDAs) dentro del core — exactamente lo que la excepción `[4]` declara
+  prohibido tras el refactor namespace-agnóstico de WKH-204 ("el core no se
+  re-modifica por red").
+- El estado de hecho ya era éste: `solana-sponsor.ts` y `solana-escrow.ts` lo
+  hacen desde WKH-217/WKH-216, y `methods/solana-escrow/build-release.ts` importa
+  runtime de `chains/solana-escrow.ts`. Esta nota **documenta** el patrón que ya
+  existía, que es el requisito de la "Regla para futuros módulos" de `[1]`.
+
+Condiciones que estas rutas SÍ mantienen: no importan `chains/registry.ts`, no
+tocan `core/settle.ts` / `core/verify.ts`, y su contrato de request/response es
+**route-local** (Zod propio, unión de errores propia) — nunca widenizan un tipo
+compartido del camino EVM (`X402ErrorCode`, `HTTP_BY_CODE`, `AuditMeta.errorCode`).
+
+Origen: **WKH-217 / WKH-216** (estado de hecho), documentado en **WKH-302**.
+
 ---
 
 ## Reglas de boundary
