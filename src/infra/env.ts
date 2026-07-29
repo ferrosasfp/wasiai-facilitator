@@ -232,6 +232,56 @@ export const EnvSchema = z
     // request (fail-closed) — the route surfaces 403 SPONSOR_POP_INVALID.
     SOLANA_SPONSOR_POP_SECRET: z.string().min(1).optional(),
 
+    // WKH-302 — Solana SPL payout ORIGINATED by the facilitator (opt-in-off). As
+    // with the WKH-217 block above, ALL of these are optional/defaulted and live
+    // OUTSIDE `.superRefine`, so a boot with none of them set is byte-identical to
+    // the pre-302 boot (AC-4). The payout route is registered only when
+    // `isSolanaPayoutEnabled()` holds — see src/infra/solana-payout-operator.ts.
+    //
+    // ⚠️ This capability is a different POWER from /settle: there the facilitator
+    // WITNESSES a payment someone else made; here it spends from its OWN treasury.
+    // Hence a dedicated key, a dedicated route and dedicated caps.
+    //
+    // SECURITY: SOLANA_PAYOUT_OPERATOR_SECRET_KEY (JSON byte-array of 64) is a
+    // SECRET. Its FORM is validated in src/infra/solana-payout-operator.ts (not
+    // here, same as SOLANA_FEE_PAYER_PRIVATE_KEY) and it is NEVER logged — the pino
+    // redaction list in src/infra/logger.ts masks it defensively.
+    //
+    // KEY FORMAT IS DELIBERATELY DIFFERENT from the gateway's base58
+    // SOLANA_OPERATOR_PRIVATE_KEY: an accidental copy-paste between the two
+    // services does NOT parse. That asymmetry is a feature — do not "unify" it.
+    SOLANA_PAYOUT_OPERATOR_SECRET_KEY: z.string().min(1).optional(),
+    // Flag OFF by default. Enum-transform, NOT z.coerce.boolean() (which reads the
+    // string 'false' as truthy) — same pattern as SOLANA_FEE_PAYER_SPONSOR_ENABLED.
+    SOLANA_PAYOUT_ENABLED: z
+      .enum(['true', 'false'])
+      .default('false')
+      .transform((v) => v === 'true'),
+    // Per-payout ceiling in ATOMIC units. STRING for precision (CD-10, WKH-196
+    // lesson) — parsed to BigInt at the use site, never through Number().
+    // Default 100000000 = 100 USDC @ 6 decimals.
+    SOLANA_PAYOUT_MAX_AMOUNT_ATOMIC: z
+      .string()
+      .regex(/^[1-9][0-9]*$/, { message: 'must be a positive atomic decimal (no leading zero)' })
+      .default('100000000'),
+    // Aggregate daily ceiling per caller, atomic units. Default 1000 USDC/day.
+    SOLANA_PAYOUT_DAILY_MAX_ATOMIC: z
+      .string()
+      .regex(/^[1-9][0-9]*$/, { message: 'must be a positive atomic decimal (no leading zero)' })
+      .default('1000000000'),
+    // Native SOL floor (lamports) for the read-only funding pre-check (AC-8).
+    // Default 10000000 = 0.01 SOL.
+    SOLANA_PAYOUT_MIN_SOL_LAMPORTS: z
+      .string()
+      .regex(/^[1-9][0-9]*$/, { message: 'must be a positive lamports decimal (no leading zero)' })
+      .default('10000000'),
+    // Per-caller route rate-limit (same shape as the sponsor's).
+    SOLANA_PAYOUT_RATE_LIMIT_MAX: z.coerce.number().int().min(1).default(20),
+    SOLANA_PAYOUT_RATE_LIMIT_WINDOW_SEC: z.coerce.number().int().min(1).default(60),
+    // Lease of a `claimed` ledger row (§6.5): a claim older than this may be stolen
+    // by a retry, because by invariant I2 a `claimed` row has no live broadcast.
+    SOLANA_PAYOUT_LEASE_MS: z.coerce.number().int().min(1000).default(120000),
+
     // ---- Anti-abuse caps (public-sharing hardening) ------------------------
     // Per-settle max authorized amount (atomic units; uint256 decimal string).
     // Default 100 PYUSD at 18 decimals = 100 * 1e18.
