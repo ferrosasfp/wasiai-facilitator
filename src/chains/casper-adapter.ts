@@ -76,8 +76,27 @@ const CASPER_DEPLOY_HASH_RE = /^[0-9a-fA-F]{64}$/u;
 /** Canonical non-negative integer string (no sign, no leading zeros, no 1e3). */
 const UINT_STRING_RE = /^(0|[1-9]\d*)$/u;
 
-/** Decimal amount string, e.g. "1", "1.5", "0.000000001". */
-const DECIMAL_STRING_RE = /^(0|[1-9]\d*)(\.\d+)?$/u;
+/** Digits-only run — building block for the decimal amount validation below. */
+const DIGITS_RE = /^[0-9]+$/u;
+
+/**
+ * Canonical decimal amount string, e.g. "1", "1.5", "0.000000001".
+ *
+ * Validated by splitting on the single allowed '.' instead of with one combined
+ * regex: a `(\d+)(\.\d+)?` style pattern trips `security/detect-unsafe-regex`
+ * (ambiguous backtracking), and this form is both linear-time and clearer.
+ */
+function isCanonicalDecimal(value: string): boolean {
+  const parts = value.split('.');
+  if (parts.length > 2) return false;
+  const whole = parts[0] ?? '';
+  const frac = parts[1];
+  if (!DIGITS_RE.test(whole)) return false;
+  // No leading zeros ("01" is not canonical); "0" itself is fine.
+  if (whole.length > 1 && whole.startsWith('0')) return false;
+  if (frac === undefined) return true;
+  return DIGITS_RE.test(frac);
+}
 
 /** Casper networks this adapter supports (CAIP-2 style chain names). */
 export type CasperNetwork = 'casper' | 'casper-test';
@@ -120,7 +139,7 @@ export class CasperAmountPrecisionError extends Error {
  * on a malformed amount.
  */
 export function csprToMotes(amount: string): bigint {
-  if (!DECIMAL_STRING_RE.test(amount)) {
+  if (!isCanonicalDecimal(amount)) {
     throw new RangeError(`Invalid CSPR amount: "${amount}"`);
   }
   const dot = amount.indexOf('.');
@@ -243,8 +262,7 @@ export class CasperAdapter implements SettlementAdapter {
       // The facilitator is this rail's only remote dependency — there is no
       // node RPC of our own, so it doubles as the adapter's "rpcUrl".
       rpcUrl: this._facilitatorUrl,
-      blockExplorer:
-        opts.network === 'casper' ? 'https://cspr.live' : 'https://testnet.cspr.live',
+      blockExplorer: opts.network === 'casper' ? 'https://cspr.live' : 'https://testnet.cspr.live',
       nativeCurrency: { name: 'Casper', symbol: 'CSPR', decimals: CSPR_DECIMALS },
       tokens: [
         {
@@ -320,7 +338,11 @@ export class CasperAdapter implements SettlementAdapter {
       if (!UINT_STRING_RE.test(accepted.amount)) {
         return {
           ok: false,
-          error: { code: 'INVALID_AMOUNT', message: 'amount must be motes (uint string)', http: 400 },
+          error: {
+            code: 'INVALID_AMOUNT',
+            message: 'amount must be motes (uint string)',
+            http: 400,
+          },
         };
       }
       const amount = BigInt(accepted.amount);

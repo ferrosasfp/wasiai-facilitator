@@ -213,9 +213,7 @@ const CasperAcceptedSchema = z
 const CasperPayloadSchema = z
   .object({
     signature: z.string().min(1),
-    authorization: z
-      .object({ from: CasperPublicKeySchema })
-      .passthrough(),
+    authorization: z.object({ from: CasperPublicKeySchema }).passthrough(),
   })
   .passthrough();
 

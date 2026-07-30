@@ -35,7 +35,10 @@ const PAYTO_ACCOUNT_HASH = `account-hash-${hex64('44')}`;
 const DEPLOY_HASH = hex64('5e');
 const FACILITATOR = 'https://x402-facilitator.cspr.cloud';
 
-function makeAdapter(fetchImpl: ReturnType<typeof vi.fn>, network: 'casper' | 'casper-test' = 'casper-test'): CasperAdapter {
+function makeAdapter(
+  fetchImpl: ReturnType<typeof vi.fn>,
+  network: 'casper' | 'casper-test' = 'casper-test',
+): CasperAdapter {
   return new CasperAdapter({
     network,
     wcsprContractHash: WCSPR,
@@ -161,9 +164,9 @@ describe('CasperAdapter address validation', () => {
   });
 
   it('T-CSPR-10: constructor rejects a malformed wCSPR contract hash', () => {
-    expect(
-      () => new CasperAdapter({ network: 'casper', wcsprContractHash: 'hash-nope' }),
-    ).toThrow(RangeError);
+    expect(() => new CasperAdapter({ network: 'casper', wcsprContractHash: 'hash-nope' })).toThrow(
+      RangeError,
+    );
   });
 });
 
