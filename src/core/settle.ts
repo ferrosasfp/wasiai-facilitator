@@ -59,6 +59,25 @@ export async function settleCore(
     }
     return lookup.adapter.settle(parsed as unknown as SettleParams);
   }
+  if (namespace === 'casper') {
+    if (!/^casper:(casper|casper-test)$/u.test(network)) {
+      return {
+        ok: false,
+        error: buildX402Error('NETWORK_MISMATCH', 'network must be casper:<casper|casper-test>'),
+      };
+    }
+    const lookup = chainRegistry.getAdapterByNetworkId(network);
+    if (!lookup.ok) {
+      return {
+        ok: false,
+        error: buildX402Error(
+          'CHAIN_UNAVAILABLE',
+          'Network namespace recognized but no adapter registered',
+        ),
+      };
+    }
+    return lookup.adapter.settle(parsed as unknown as SettleParams);
+  }
 
   // Step 0 — per-request amount cap (anti-abuse, public sharing hardening).
   // Rejects settles above the configured maximum BEFORE hitting the chain.
