@@ -20,7 +20,14 @@ import { canonicalSha256 } from './canonical-hash.js';
 // Pinneada y verificada en F2 sobre los 3 IDL reales (todos canonicalizan igual, address DR5G).
 // HU-SOL-20/R2a: re-pinneada tras R1 (EscrowIndex + register_escrow/deregister_escrow). `EscrowState`
 // NO cambió: mismo discriminator y mismo layout, por eso el decode de la cuenta es idéntico.
-const ESCROW_IDL_SHA256 = '4bcc34a997396d360ab996ea5bb1015ffdd8a1d357d3f4b4cffcbfe8ea98d12b';
+// RE-PIN 2026-08-01 — ventana de custodia. Diff instrucción por instrucción contra el IDL nuevo:
+// `close` suma la cuenta `sender_ata` (barrido del vault) y entran los errores 6006 DeadlineTooSoon,
+// 6007 DeadlineTooFar y 6008 ReleaseWindowClosed. Ningún código existente se renumeró ni se borró.
+// `deposit`, `refund`, `release`, `register_escrow` y `deregister_escrow` conservan discriminador,
+// cuentas y args; EscrowStatus sigue con 3 variantes, así que el decode de la cuenta es idéntico.
+// Este repo firma `release` y lee `EscrowState`: ninguno de los dos cambió de forma.
+// Anterior: 4bcc34a997396d360ab996ea5bb1015ffdd8a1d357d3f4b4cffcbfe8ea98d12b.
+const ESCROW_IDL_SHA256 = 'fb64c937dbdab7a58045e663a85724808c4539707fedbdf244e11a28dbe5c071';
 
 describe('WKH-227 AC-2/AC-3 · escrow IDL canonical hash lock', () => {
   it('AC-2: el IDL vendoreado canonicaliza al hash pinneado', () => {
