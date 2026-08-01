@@ -26,7 +26,22 @@ export const escrowIdl = {
     {
       name: 'close',
       docs: [
-        '`constraint status != Deposited` (AC-8) va en el Context. Aquí solo cerramos el vault.',
+        'La lista blanca de estados terminales (AC-8) va en el Context. Acá barremos el vault y lo',
+        'cerramos.',
+        '',
+        'EL BARRIDO, y decir exactamente qué barre: `CloseAccount` de SPL exige saldo CERO. Como el',
+        'vault es una ATA con dirección derivable, cualquiera puede mandarle 1 unidad atómica después',
+        'del release y trabar el cierre para siempre, dejando muerto el rent de dos cuentas. Esta',
+        'instrucción manda al `sender_ata` **todo `vault.amount`, sin cota superior**, y recién ahí',
+        'cierra. No es "el polvo": si un tercero deposita mil tokens en el vault de un escrow ya',
+        'terminal, los mil se los lleva el sender. Es inofensivo (el principal ya se pagó y quien',
+        'dona un token a una cuenta ajena lo está regalando), pero quien lea "polvo" dimensiona mal',
+        'la instrucción, así que queda escrito el caso concreto que lo refutaría.',
+        '',
+        'Por qué el remanente va al SENDER y no al beneficiary: llegado este punto el escrow ya está',
+        'en un estado terminal, o sea que el monto custodiado ya se pagó completo a quien',
+        'correspondía. Lo que quede acá no es parte del principal, y el sender es quien pagó el rent',
+        'de las dos cuentas que se están cerrando.',
       ],
       discriminator: [98, 165, 201, 177, 108, 65, 206, 96],
       accounts: [
@@ -91,6 +106,43 @@ export const escrowIdl = {
           },
         },
         {
+          name: 'sender_ata',
+          docs: [
+            'Destino del barrido. Cuenta NUEVA en esta instrucción: los consumidores que hoy arman el',
+            '`close` con la lista vieja tienen que agregarla. No existe orden de despliegue seguro entre',
+            'programa y cliente para este cambio (ver README, "Deploying"): las dos combinaciones cruzadas',
+            'fallan. Hoy ningún consumidor construye `close`, así que es una restricción hacia adelante y',
+            'no un corte en vivo.',
+          ],
+          writable: true,
+          pda: {
+            seeds: [
+              {
+                kind: 'account',
+                path: 'sender',
+              },
+              {
+                kind: 'const',
+                value: [
+                  6, 221, 246, 225, 215, 101, 161, 147, 217, 203, 225, 70, 206, 235, 121, 172, 28,
+                  180, 133, 237, 95, 91, 55, 145, 58, 140, 245, 133, 126, 255, 0, 169,
+                ],
+              },
+              {
+                kind: 'account',
+                path: 'mint',
+              },
+            ],
+            program: {
+              kind: 'const',
+              value: [
+                140, 151, 37, 143, 78, 36, 137, 241, 187, 61, 16, 41, 20, 142, 13, 131, 11, 90, 19,
+                153, 218, 255, 16, 132, 4, 142, 123, 216, 219, 233, 248, 89,
+              ],
+            },
+          },
+        },
+        {
           name: 'token_program',
           address: 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
         },
@@ -115,6 +167,25 @@ export const escrowIdl = {
         },
         {
           name: 'mint',
+          docs: [
+            'Acepta CUALQUIER mint, y es una decisión, no un olvido. El programa es infraestructura de',
+            'escrow genérica; "qué token vale un dólar" es política de producto y vive en el componente',
+            'que está en el camino crítico de todos los depósitos (el co-firmante off-chain, que se',
+            'niega a firmar un depósito con un mint inesperado). Clavarlo acá obligaría a dos builds,',
+            'dos IDL, dos hashes pinneados y un redespliegue para rotarlo.',
+            '',
+            'LA CONDICIÓN QUE DA VUELTA ESTA DECISIÓN, escrita para que se pueda comprobar: el día que',
+            'exista un barrido que descubra depósitos on-chain y los tome por buenos SIN esa co-firma,',
+            'el mint tiene que clavarse acá, porque ahí un depósito auto-fondeado con el mint de un',
+            'atacante entraría a un camino de producto. Los enumeradores de hoy (EscrowIndex y el',
+            'resolver de ids) sólo alimentan el refund, que es inofensivo.',
+            '',
+            'LO QUE ESTA DECISIÓN SE LLEVA PUESTO, y es el único atrapamiento permanente que conocemos:',
+            'el vault es una token account SPL común de este mint. Si el mint tiene FREEZE AUTHORITY (el',
+            'USDC real la tiene), esa authority puede congelar el vault, y una token account congelada',
+            'rechaza toda transferencia: ni `release` ni `refund` pueden mover un token, sin importar el',
+            'deadline, la firma ni el estado. Elegir el mint es elegir a qué freeze authority te exponés.',
+          ],
         },
         {
           name: 'escrow_state',
@@ -138,6 +209,13 @@ export const escrowIdl = {
         },
         {
           name: 'vault',
+          docs: [
+            '`init` y no `init_if_needed`, y eso tiene un costo conocido: la dirección de esta ATA es',
+            'derivable antes del depósito, así que cualquiera que vea o adivine los 16 bytes del',
+            '`remittance_id` puede crearla primero por ~0.002 SOL y dejar ese par (sender, remittance_id)',
+            'sin poder depositar nunca. No hay fondos en riesgo y la salida es usar otro id. Es',
+            'PRE-EXISTENTE, no lo introduce la ventana de custodia, y está escrito en el README.',
+          ],
           writable: true,
           pda: {
             seeds: [
@@ -431,6 +509,14 @@ export const escrowIdl = {
       docs: [
         'Autorización (AC-6) y destino fijo (AC-1) son DECLARATIVOS vía `has_one` en el Context,',
         'no `require!` imperativos. `has_one = authority` -> ConstraintHasOne (2001) si firma otro.',
+        '',
+        'LA INVARIANTE, que es lo único que hay que atacar para tumbar este programa: para toda',
+        'cuenta y todo instante, a lo sumo UNA de `release` y `refund` puede entrar.',
+        '',
+        'Que `release` y `refund` exijan exactamente el mismo estado (`Deposited`) no los vuelve',
+        'intercambiables: lo que los separa es el RELOJ, no el estado. `release` sólo entra con',
+        '`now < deadline` y `refund` sólo con `now >= deadline`, así que para todo instante a lo sumo',
+        'uno de los dos es legal.',
       ],
       discriminator: [253, 249, 15, 206, 28, 127, 193, 241],
       accounts: [
@@ -591,6 +677,21 @@ export const escrowIdl = {
       code: 6005,
       name: 'EscrowIndexFull',
       msg: 'Escrow index is full for this sender',
+    },
+    {
+      code: 6006,
+      name: 'DeadlineTooSoon',
+      msg: 'Deadline is below the minimum custody window',
+    },
+    {
+      code: 6007,
+      name: 'DeadlineTooFar',
+      msg: 'Deadline is above the maximum custody window',
+    },
+    {
+      code: 6008,
+      name: 'ReleaseWindowClosed',
+      msg: 'The release window is closed: the deadline has been reached',
     },
   ],
   types: [
