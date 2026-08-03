@@ -37,16 +37,20 @@ const REDACT_FIELDS: readonly string[] = [
   'serviceKey',
   'service_key',
   'SUPABASE_SERVICE_KEY',
-  // WKH-217 / HU-SOL-14 — Solana fee-payer signing key + PoP HMAC secret (AC-10).
+  // WKH-217 / HU-SOL-14 — Solana fee-payer signing key (AC-10).
+  //
+  // SDD 037: acá había dos entradas más, el secreto compartido del patrocinio y
+  // la prueba HMAC que viajaba en el body. Las dos se fueron con el mecanismo,
+  // que está BORRADO del repo. Su reemplazo, `popSignature`, NO se agrega a esta
+  // lista: es una firma ed25519 sobre un mensaje público, y redactarla sugeriría
+  // que es un secreto — justo la confusión que esta HU vino a sacar del medio.
   'SOLANA_FEE_PAYER_PRIVATE_KEY',
   'feePayerPrivateKey',
-  'SOLANA_SPONSOR_POP_SECRET',
   // WKH-302 — Solana payout-operator signing key (the facilitator's treasury key).
   // Same criterion as SOLANA_FEE_PAYER_PRIVATE_KEY: `redact` matches EXACT field
   // keys, so the generic 'secret' entry below does NOT cover this name.
   'SOLANA_PAYOUT_OPERATOR_SECRET_KEY',
   'payoutOperatorSecretKey',
-  'popProof',
   'partialSignedTx',
   'secret',
   'token',

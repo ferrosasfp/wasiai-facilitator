@@ -81,10 +81,15 @@ export interface VerifySponsorPopArgs {
  * (CD-4): base58 inválido, pubkey que no mide 32 bytes, firma que no mide
  * exactamente 64, o verificación negativa ⇒ `false`. Nunca tira.
  *
- * El largo se chequea a mano y no se delega en `crypto.verify` porque una firma
- * de 63 o 65 bytes hace que la librería devuelva `false` igual, pero por un
- * camino que no está garantizado por contrato: dejarlo implícito sería confiar
- * en un detalle de implementación para una decisión de seguridad (T-B7).
+ * ⚠️ EL CHEQUEO DE LARGO ES REDUNDANTE HOY, y está escrito así para que nadie lo
+ * borre creyendo que descubrió algo. Se midió en Node 22: `crypto.verify` con una
+ * firma de 63 o de 65 bytes devuelve `false` por su cuenta, sin tirar — o sea que
+ * sacar esta línea no cambia ninguna respuesta (se comprobó con la suite entera).
+ * Se mantiene porque deja el requisito de 64 bytes escrito en el código en vez de
+ * heredado de un detalle de la librería. El test
+ * "crypto.verify rechaza por su cuenta los largos != 64" pinnea esa conducta: si
+ * una versión futura pasara a TIRAR, ese test se pone rojo y esta línea deja de
+ * ser redundante para volverse la que evita un 500.
  */
 export function verifySponsorPopSignature(args: VerifySponsorPopArgs): boolean {
   const pubkeyBytes = decodeBase58(args.senderBase58);

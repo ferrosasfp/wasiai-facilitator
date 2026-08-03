@@ -14,7 +14,13 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { createHash, createPrivateKey, sign as cryptoSign } from 'node:crypto';
+import {
+  createHash,
+  createPrivateKey,
+  createPublicKey,
+  sign as cryptoSign,
+  verify as cryptoVerify,
+} from 'node:crypto';
 import {
   ComputeBudgetProgram,
   Keypair,
@@ -133,6 +139,33 @@ describe('verifySponsorPopSignature — fail-closed', () => {
         }),
       ).toBe(false);
     }
+  });
+
+  /**
+   * Pinnea la conducta de la que depende que el chequeo de largo sea redundante.
+   *
+   * Se midió (Node 22): `crypto.verify` con una firma de largo != 64 devuelve
+   * `false` y NO tira. Mientras eso siga así, borrar la línea
+   * `signature.length !== ED25519_SIGNATURE_LEN` de `sponsor-pop.ts` no cambia
+   * ninguna respuesta — ese mutante SOBREVIVE, y sobrevive con razón.
+   *
+   * Si una versión futura pasara a TIRAR, este test se pone rojo primero y avisa
+   * que aquella línea dejó de ser adorno: sin ella, un `popSignature` de 65 bytes
+   * saldría por el `catch` en vez de por el guard.
+   */
+  it('crypto.verify rechaza por su cuenta los largos != 64 (sin tirar)', () => {
+    const kp = Keypair.fromSeed(seed);
+    const spki = Buffer.concat([
+      Buffer.from('302a300506032b6570032100', 'hex'),
+      Buffer.from(kp.publicKey.toBytes()),
+    ]);
+    const pub = createPublicKey({ key: spki, format: 'der', type: 'spki' });
+    const real = signWithSeed(seed, message);
+    const msgBytes = Buffer.from(message, 'utf8');
+    expect(cryptoVerify(null, msgBytes, pub, real.subarray(0, 63))).toBe(false);
+    expect(cryptoVerify(null, msgBytes, pub, Buffer.concat([real, Buffer.from([0])]))).toBe(false);
+    // Control: la firma correcta SÍ verifica por este mismo camino.
+    expect(cryptoVerify(null, msgBytes, pub, real)).toBe(true);
   });
 
   it('base58 inválido (firma y pubkey) ⇒ false, sin tirar', () => {
