@@ -228,9 +228,15 @@ export const EnvSchema = z
       .default('500000000'),
     // Broadcast retries before SPONSOR_BROADCAST_EXPIRED (AC-5).
     SOLANA_SPONSOR_MAX_REBROADCASTS: z.coerce.number().int().min(0).default(3),
-    // HMAC secret for the PoP/KYC attestation (AC-7). Unset ⇒ PoP rejects EVERY
-    // request (fail-closed) — the route surfaces 403 SPONSOR_POP_INVALID.
-    SOLANA_SPONSOR_POP_SECRET: z.string().min(1).optional(),
+    // SDD 037 — CAIP-2 del cluster que el patrocinio autoriza. Entra en la línea
+    // `network:` del mensaje canónico que la billetera firma, y por eso NO puede
+    // salir del body: si saliera, un atacante firmaría `solana:mainnet` y el
+    // facilitator de devnet lo aceptaría (ese es el input que rompe la propiedad).
+    //
+    // SIN DEFAULT a propósito. Ausente ⇒ la ruta responde 403 a todo (CD-4). Un
+    // default `solana:devnet` haría que un facilitator de mainnet mal configurado
+    // verificara firmas de devnet en silencio.
+    SOLANA_SPONSOR_NETWORK_ID: z.enum(['solana:devnet', 'solana:mainnet']).optional(),
 
     // WKH-302 — Solana SPL payout ORIGINATED by the facilitator (opt-in-off). As
     // with the WKH-217 block above, ALL of these are optional/defaulted and live
