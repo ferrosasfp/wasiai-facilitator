@@ -351,4 +351,54 @@ describe('extractSponsorClaims', () => {
     if (!res.ok) return;
     expect(res.claims.amountMinor).toBe('123456789');
   });
+
+  // ── El `catch` — la rama que NINGÚN input conocido alcanza ───────────────────
+  //
+  // ⚠️ POR QUÉ SE FUERZA EL THROW EN VEZ DE MANDAR UNA TX RARA. El AR-2 probó seis
+  // formas de tx malformada (firma nula, sin blockhash, sin feePayer, sin signer,
+  // tx vacía, programId indefinido) y NINGUNA llega acá con A2 en pie: todas salen
+  // por un `reject` explícito de más arriba. Ver la nota de alcanzabilidad en
+  // `sponsor-claims.ts`. O sea que este par de tests NO afirma que el caso ocurra;
+  // afirma lo único que sí se puede afirmar: que SI ocurre, el módulo cumple su
+  // contrato ("NUNCA tira") en vez de propagar un 500. La costura es `verifySignatures`,
+  // que es la llamada que el propio comentario del `catch` nombra como la que puede
+  // tirar. Sin esto la rama queda sin ejercitar y cualquiera la lee como cubierta.
+
+  it('★ si un lector interno tira, se convierte en ok:false con el nombre del error ligado (no propaga)', () => {
+    const { tx } = buildDepositTx();
+    const parsed = roundTrip(tx);
+    const boom = new RangeError('x'.repeat(300));
+    parsed.verifySignatures = () => {
+      throw boom;
+    };
+
+    // 1) No propaga: el contrato del módulo es que NUNCA tira.
+    const res = extractSponsorClaims(parsed);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+
+    // 2) El `name` va ligado al marcador: sin esto, "tx rara" y "nuestro lector tiró"
+    //    se veían idénticos en el log, que es justo lo que el campo vino a resolver.
+    expect(res.reason).toBe('CLAIMS_EXTRACTION_FAILED:RangeError');
+
+    // 3) El `message` va truncado a 160. Un mensaje de 300 chars no entra entero.
+    expect(res.detail).toHaveLength(160);
+    expect(res.detail).toBe('x'.repeat(160));
+  });
+
+  it('★ un throw que no es Error deja el marcador en `unknown` y SIN detail', () => {
+    const { tx } = buildDepositTx();
+    const parsed = roundTrip(tx);
+    parsed.verifySignatures = () => {
+      throw 'no soy un Error';
+    };
+
+    const res = extractSponsorClaims(parsed);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.reason).toBe('CLAIMS_EXTRACTION_FAILED:unknown');
+    // `detail` se OMITE (no es `undefined` explícito): la forma del objeto no cambia
+    // en el camino normal, que es lo que permite que el resto del código no lo mire.
+    expect('detail' in res).toBe(false);
+  });
 });

@@ -20,8 +20,14 @@
 import { createPublicKey, verify as cryptoVerify } from 'node:crypto';
 import { utils } from '@coral-xyz/anchor';
 
-/** Separador de dominio. Distinto del `Chaski Proof-of-Possession` del leg de payout a propósito
- *  (T-B5): una firma legítima de aquel challenge NO debe servir acá. */
+/** Separador de dominio. Distinto del `Chaski Proof-of-Possession` del leg de payout a propósito:
+ *  una firma legítima de aquel challenge NO debe servir acá.
+ *
+ *  El test que cubre ESTE valor es **T-B5b**, no T-B5. T-B5 manda un challenge de payout real, que
+ *  difiere del mensaje canónico en seis cosas más allá de la primera línea y por eso seguiría dando
+ *  403 aunque esta constante se borrara entera (se midió: queda verde). T-B5b aísla el separador
+ *  pisando sólo la primera línea de la salida del builder, así que cambiar esta constante al dominio
+ *  del leg de payout lo pone rojo. */
 const SPONSOR_POP_DOMAIN = 'WasiAI Sponsor Request v1';
 
 /** Prefijo DER de una SubjectPublicKeyInfo ed25519; le siguen los 32 bytes crudos del pubkey. */

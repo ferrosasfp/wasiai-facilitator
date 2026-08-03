@@ -155,9 +155,15 @@ export const solanaSponsorRoute: FastifyPluginAsync = async (app) => {
         guard?: string,
         /**
          * Detalle NO estructurado del guard, cuando el marcador solo no alcanza
-         * para diagnosticar (hoy: el `catch` de `extractSponsorClaims`, que puede
-         * ser "tx rara" o "nuestro lector tiró"). Mismo trato que `guard`: log
-         * interno, jamás en la respuesta. NUNCA lleva la tx ni bytes del body.
+         * para diagnosticar. Su único emisor es el `catch` de `extractSponsorClaims`,
+         * que puede ser "tx rara" o "nuestro lector tiró". Mismo trato que `guard`:
+         * log interno, jamás en la respuesta. NUNCA lleva la tx ni bytes del body.
+         *
+         * ⚠️ Ese `catch` **no lo alcanza ningún input conocido** con A2 en pie (AR-2
+         * probó seis formas de tx malformada; el detalle y el porqué están en el
+         * comentario del `catch`, en `sponsor-claims.ts`). O sea: este campo casi
+         * nunca se emite, y verlo en un log es señal de que algo cambió — no de que
+         * llegó tráfico raro.
          */
         guardDetail?: string,
       ) => {

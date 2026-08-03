@@ -140,6 +140,24 @@ export function extractSponsorClaims(tx: Transaction): SponsorClaimsResult {
     // `serializeMessage()` (adentro de verifySignatures) puede tirar sobre una tx
     // malformada que igual deserializó. Un error de lectura es un `no`, no un 500.
     //
+    // ⚠️ ALCANZABILIDAD: hoy NINGÚN input conocido llega hasta acá con A2 en pie, y
+    // conviene que quede escrito para que nadie lo lea como una rama cubierta por el
+    // tráfico normal. El AR-2 probó seis formas de tx malformada (firma nula, sin
+    // blockhash, sin feePayer, sin signer, tx vacía, programId indefinido) y todas
+    // salieron por un `reject` de más arriba. Los tres candidatos que uno esperaría:
+    //   - `readBigUInt64LE(AMOUNT_OFFSET)` no puede salirse de rango, porque
+    //     `SHORT_DEPOSIT_DATA` ya cortó y AMOUNT_OFFSET + 8 <= DEPOSIT_DATA_LEN;
+    //   - `bs58.encode(Buffer.from(senderSig))` sólo tira con `senderSig === null`,
+    //     que A2 corta una línea antes;
+    //   - `verifySignatures(false)` usa el `_message` que @solana/web3.js cachea al
+    //     hacer `Transaction.from(...)`, así que no re-compila y no tira.
+    // O sea: esto es defensa en profundidad, no un camino caliente. **Si este marcador
+    // aparece en un log, la hipótesis #1 no es "nos mandaron una tx rara": es que algo
+    // de lo de arriba cambió** (un guard que se movió, un offset, una versión de
+    // web3.js). La rama está ejercitada forzando el throw en `solana-sponsor.pop.test.ts`
+    // (los dos tests del final), que es lo único honesto que se puede hacer sin un
+    // input real que la produzca.
+    //
     // El `try` envuelve la función ENTERA (forma, índices, readBigUInt64LE, bs58,
     // A2, A3), así que este rechazo es el más ambiguo de todos: sin ligar el error
     // no se puede separar "tx rara" de "nuestro lector tiró". Se liga el `name` al
