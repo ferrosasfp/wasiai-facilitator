@@ -12,9 +12,21 @@
  *
  * Por qué A2 no es redundante con A3: `verifySignatures(false)` sólo mira las
  * firmas PRESENTES. Una transacción con la firma del sender en `null` la pasa sin
- * problema. Sin A2, ese request llegaba hasta `tx.partialSign(feePayer)` y
- * reventaba en `serialize()` con un 500, dejando además la reserva del cap diario
- * tomada. Ese es el input concreto que separa a los dos guards.
+ * problema, así que A3 no la ve. Ése es el input que separa a los dos.
+ *
+ * ⚠️ QUÉ SOSTIENE HOY EL RECHAZO DE ESE INPUT, medido y no supuesto. Se borró la
+ * línea de A2 y se corrió la suite: el request SIGUE dando 403, sin co-firmar y
+ * sin reservar cap. No es A2 quien lo sostiene, es el `catch` del final:
+ * `bs58.encode(Buffer.from(null))` tira un `TypeError` y se convierte en un
+ * `ok:false`. Lo único que cambia al borrar A2 es el marcador que ve el operador
+ * (`SENDER_SIGNATURE_NULL` ⇒ `CLAIMS_EXTRACTION_FAILED:TypeError`), y por eso el
+ * test T-A2 lo assertea: sin ese assert esta línea se puede borrar sin que nada
+ * se ponga rojo.
+ *
+ * Entonces A2 se queda por lo que el `catch` NO puede dar: un marcador que dice
+ * "vino una tx sin la firma del sender" en vez de "algo de nuestro lector tiró".
+ * Son diagnósticos distintos y el §7.1 los hace requisito. Lo que NO hay que
+ * creer: que borrar A2 abra un 500 o un gasto. No lo abre.
  *
  * Puro: sin red, sin env, sin keypairs. NUNCA tira — todo error es un `ok:false`.
  *
@@ -48,10 +60,27 @@ export interface SponsorClaims {
 
 export type SponsorClaimsResult =
   | { readonly ok: true; readonly claims: SponsorClaims }
-  | { readonly ok: false; readonly reason: string };
+  | {
+      readonly ok: false;
+      readonly reason: string;
+      /**
+       * Sólo para el rechazo del `catch`: el `message` del error que se atrapó,
+       * truncado. Existe porque `CLAIMS_EXTRACTION_FAILED` puede significar dos
+       * cosas muy distintas ("nos mandaron una tx rara" / "nuestro lector tiró"),
+       * y desde el log se veían idénticas.
+       *
+       * NUNCA lleva la transacción, ni bytes, ni nada del body: sólo el texto que
+       * arma Node para un error de tipo o de rango (p. ej. `The value of "offset"
+       * is out of range...`). El emisor es siempre uno de nuestros lectores, no
+       * un dato del caller. Y no se ecoa al cliente (CD-12 no-oracle).
+       */
+      readonly detail?: string;
+    };
 
-function reject(reason: string): SponsorClaimsResult {
-  return { ok: false, reason };
+const DETAIL_MAX_LEN = 160;
+
+function reject(reason: string, detail?: string): SponsorClaimsResult {
+  return detail === undefined ? { ok: false, reason } : { ok: false, reason, detail };
 }
 
 /**
@@ -107,9 +136,19 @@ export function extractSponsorClaims(tx: Transaction): SponsorClaimsResult {
         senderTxSignatureB58: utils.bytes.bs58.encode(Buffer.from(senderSig)),
       },
     };
-  } catch {
+  } catch (e) {
     // `serializeMessage()` (adentro de verifySignatures) puede tirar sobre una tx
     // malformada que igual deserializó. Un error de lectura es un `no`, no un 500.
-    return reject('CLAIMS_EXTRACTION_FAILED');
+    //
+    // El `try` envuelve la función ENTERA (forma, índices, readBigUInt64LE, bs58,
+    // A2, A3), así que este rechazo es el más ambiguo de todos: sin ligar el error
+    // no se puede separar "tx rara" de "nuestro lector tiró". Se liga el `name` al
+    // marcador y el `message` truncado va aparte, para que el operador vea la
+    // diferencia en el log sin que el cliente vea nada.
+    const err = e instanceof Error ? e : undefined;
+    return reject(
+      `CLAIMS_EXTRACTION_FAILED:${err?.name ?? 'unknown'}`,
+      err?.message.slice(0, DETAIL_MAX_LEN),
+    );
   }
 }

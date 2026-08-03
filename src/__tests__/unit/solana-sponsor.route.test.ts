@@ -116,6 +116,10 @@ const MINT = new PublicKey(
 );
 const REMITTANCE_ID = 'rem_037_route';
 const AMOUNT_MINOR = 10000000n;
+/** Separador de dominio del OTRO mecanismo (leg de payout, `buildSolanaPopMessage`
+ *  de chaski). Literal a propósito: si se importara de algún lado seguiría al
+ *  mutante que se quiere cazar. */
+const PAYOUT_POP_DOMAIN = 'Chaski Proof-of-Possession';
 
 // ── Helpers de firma ─────────────────────────────────────────────────────────
 
@@ -332,6 +336,31 @@ describe('POST /solana/sponsor', () => {
   });
 
   /**
+   * AR MNR-1 — `reference` salió del schema porque no tenía consumidor. Este test
+   * clava las DOS mitades de esa decisión, que es lo que la vuelve verificable:
+   * sin el campo el request pasa (el facilitator no lo necesita), y con el campo
+   * también pasa (`z.object` descarta lo que no conoce, así que chaski puede
+   * seguir mandándolo — de hecho lo manda, y el resto de este archivo lo prueba).
+   * Si alguien lo vuelve a poner como requerido, la primera mitad se pone roja.
+   */
+  it('★ el facilitator NO necesita `reference`: sin el campo → 200, con el campo → 200', async () => {
+    const sinReference = validBody();
+    delete sinReference.reference;
+    const res = await post(sinReference);
+    expect(res.statusCode).toBe(200);
+    expect(h.cosignSpy).toHaveBeenCalledTimes(1);
+    if (app) {
+      await app.close();
+      app = undefined;
+    }
+
+    h.cosignSpy.mockReset();
+    const conReference = await post(validBody());
+    expect(conReference.statusCode).toBe(200);
+    expect(h.cosignSpy).toHaveBeenCalledTimes(1);
+  });
+
+  /**
    * ⚠️ ÚNICO lugar del repo donde sobrevive el nombre del campo viejo, y es a
    * propósito. El AC-11 pide que no queden referencias VIVAS al HMAC borrado;
    * ésta no lo es: es la prueba de que ese campo ya no autoriza nada. El literal
@@ -423,11 +452,19 @@ describe('POST /solana/sponsor', () => {
     expect(entry?.signature).not.toBeNull();
     if (entry) entry.signature = null;
 
-    // ⚠️ El `tx:` va VACÍO a propósito, y esto es lo que le da filo al test.
-    // Quien manda este request controla la billetera, así que firma el mensaje que
-    // un servidor SIN A2 construiría: sin firma en la tx, la línea `tx` queda en
-    // blanco. Si el mensaje llevara la firma original, el 403 podría venir de
-    // Guard B y borrar A2 no rompería nada. Así, el único que puede cortar es A2.
+    // ⚠️ El `tx:` va VACÍO a propósito. Quien manda este request controla la
+    // billetera, así que firma el mensaje que un servidor SIN A2 construiría: sin
+    // firma en la tx, la línea `tx` queda en blanco. Con la firma original adentro,
+    // el 403 podría venir de Guard B y este test no diría nada sobre A2.
+    //
+    // Aun así, el 403 solo NO alcanza para probar que A2 hace algo, y se midió:
+    // borrando la línea `if (senderSig === null)` de `sponsor-claims.ts` este
+    // request SIGUE dando 403, porque `bs58.encode(Buffer.from(null))` tira y lo
+    // absorbe el `catch` de `sponsor-claims.ts:110-116` con el mismo status y el
+    // mismo `cosign`/`daily` sin invocar. Lo ÚNICO que cambia es el marcador:
+    // `SENDER_SIGNATURE_NULL` pasa a `CLAIMS_EXTRACTION_FAILED:TypeError`. Por eso se
+    // assertea el marcador — mismo recurso que T-A1, y §7.1 lo hace requisito
+    // contractual de observabilidad, no un detalle interno.
     const message = buildSponsorPopMessage({
       sender: built.senderKeypair.publicKey.toBase58(),
       networkId: NETWORK_ID,
@@ -438,22 +475,32 @@ describe('POST /solana/sponsor', () => {
     });
     const popSignature = signMessage(built.senderKeypair, message);
 
-    const res = await post({
-      partialSignedTx: stripped
-        .serialize({ requireAllSignatures: false, verifySignatures: false })
-        .toString('base64'),
-      reference: Keypair.generate().publicKey.toBase58(),
-      sender: built.senderKeypair.publicKey.toBase58(),
-      remittanceId: REMITTANCE_ID,
-      popSignature,
-    });
+    const cap = new CaptureStream();
+    const res = await withLogs(() =>
+      post(
+        {
+          partialSignedTx: stripped
+            .serialize({ requireAllSignatures: false, verifySignatures: false })
+            .toString('base64'),
+          reference: Keypair.generate().publicKey.toBase58(),
+          sender: built.senderKeypair.publicKey.toBase58(),
+          remittanceId: REMITTANCE_ID,
+          popSignature,
+        },
+        cap,
+      ),
+    );
 
-    // Las TRES aserciones del AC-2, en este orden. Antes del SDD 037 esta misma
-    // tx llegaba hasta `tx.partialSign(feePayer)`, reventaba en `serialize()` con
-    // un 500 y encima dejaba TOMADA la reserva del cap diario.
+    // Las TRES aserciones del AC-2, en este orden: el request se corta ANTES de
+    // co-firmar y ANTES de reservar el cap diario, y con un 403 y no con un 500.
     expect(res.statusCode).toBe(403);
     expect(h.cosignSpy).not.toHaveBeenCalled();
     expect(h.dailySpy).not.toHaveBeenCalled();
+
+    // La cuarta: quién cortó. Sin esto A2 se puede borrar y el test sigue verde.
+    expect(cap.text().length).toBeGreaterThan(0);
+    expect(cap.text()).toContain('SENDER_SIGNATURE_NULL');
+    expect(res.body).not.toContain('SENDER_SIGNATURE_NULL');
   });
 
   // ── T-B2 — la firma está atada a UNA transacción ────────────────────────────
@@ -534,19 +581,59 @@ describe('POST /solana/sponsor', () => {
     expect(h.cosignSpy).not.toHaveBeenCalled();
   });
 
-  // ── T-B5 — separador de dominio ─────────────────────────────────────────────
+  // ── T-B5 — reuso cross-protocol (el ataque #6 del §6 del SDD) ───────────────
+  //
+  // ⚠️ QUÉ PRUEBA Y QUÉ NO. Prueba que una firma AUTÉNTICA de la misma billetera,
+  // producida minutos antes en el leg de payout, no sirve para pedir patrocinio.
+  // NO prueba el separador de dominio: el challenge de payout difiere del mensaje
+  // canónico en cinco cosas más allá de la primera línea (`address:` en vez de
+  // `sender:`, `nonce:`, `expires:`, y la ausencia de `remittance`/`amount`/`mint`/
+  // `tx`), así que seguiría dando 403 aunque el dominio se borrara entero. Se midió:
+  // con `SPONSOR_POP_DOMAIN = 'Chaski Proof-of-Possession'` este test queda VERDE.
+  // El que aísla el separador es T-B5b, acá abajo.
   it('★ T-B5: firma legítima del challenge del leg de payout enviada como popSignature → 403', async () => {
     const built = buildValidSponsorTx();
     // Mensaje REAL del otro mecanismo (`buildSolanaPopMessage` de chaski), firmado
     // por la MISMA billetera. Es una firma auténtica; lo que la invalida acá es que
-    // habla de otro dominio.
-    const payoutChallenge = `Chaski Proof-of-Possession\naddress: ${built.senderKeypair.publicKey.toBase58()}\nnetwork: ${NETWORK_ID}\nnonce: ${'a'.repeat(32)}\nexpires: 2000000000`;
+    // habla de otro protocolo.
+    const payoutChallenge = `${PAYOUT_POP_DOMAIN}\naddress: ${built.senderKeypair.publicKey.toBase58()}\nnetwork: ${NETWORK_ID}\nnonce: ${'a'.repeat(32)}\nexpires: 2000000000`;
     const res = await post({
       partialSignedTx: built.base64,
       reference: Keypair.generate().publicKey.toBase58(),
       sender: built.senderKeypair.publicKey.toBase58(),
       remittanceId: REMITTANCE_ID,
       popSignature: signMessage(built.senderKeypair, payoutChallenge),
+    });
+    expect(res.statusCode).toBe(403);
+    expect(h.cosignSpy).not.toHaveBeenCalled();
+  });
+
+  // ── T-B5b — el separador de dominio, aislado ────────────────────────────────
+  it('★ T-B5b: mensaje idéntico al canónico salvo la línea del dominio → 403', async () => {
+    const built = buildValidSponsorTx();
+    const canonical = buildSponsorPopMessage({
+      sender: built.senderKeypair.publicKey.toBase58(),
+      networkId: NETWORK_ID,
+      remittanceId: REMITTANCE_ID,
+      amountMinor: AMOUNT_MINOR.toString(),
+      mint: MINT.toBase58(),
+      txSignatureB58: built.senderSigB58,
+    });
+    // Se reemplaza SÓLO la primera línea. Las otras seis son, byte a byte, las que
+    // el servidor va a armar desde la tx y su config: si el 403 llega, la única
+    // causa posible es el separador. Y se arma pisando la salida del builder en vez
+    // de re-tipear el formato, así que M7 (cambiar `SPONSOR_POP_DOMAIN` al dominio
+    // del leg de payout) hace que las dos cadenas se vuelvan la MISMA y el servidor
+    // acepte: el `not.toBe` de abajo cae primero y dice exactamente eso.
+    const otherDomain = canonical.replace(/^[^\n]*/, PAYOUT_POP_DOMAIN);
+    expect(otherDomain, 'el separador de dominio dejó de separar').not.toBe(canonical);
+
+    const res = await post({
+      partialSignedTx: built.base64,
+      reference: Keypair.generate().publicKey.toBase58(),
+      sender: built.senderKeypair.publicKey.toBase58(),
+      remittanceId: REMITTANCE_ID,
+      popSignature: signMessage(built.senderKeypair, otherDomain),
     });
     expect(res.statusCode).toBe(403);
     expect(h.cosignSpy).not.toHaveBeenCalled();

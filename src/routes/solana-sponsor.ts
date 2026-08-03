@@ -26,9 +26,17 @@
  *
  * El input que rompe la propiedad si Guard B se cae: una tx firmada por la
  * víctima `V`, capturada y reenviada por `A`. Sin Guard B, `A` consigue que el
- * facilitator pague el gas de una transacción que `A` nunca autorizó, y por
- * cualquier monto. Guard A por sí solo NO lo detiene: la tx de `V` es válida y
- * sus firmas verifican — lo que falta ahí es el consentimiento, no la posesión.
+ * facilitator pague el gas de una transacción que `A` nunca autorizó. Guard A por
+ * sí solo NO lo detiene: la tx de `V` es válida y sus firmas verifican — lo que
+ * falta ahí es el consentimiento, no la posesión.
+ *
+ * ⚠️ LO QUE ESO **NO** ES: no es "patrocinio por cualquier monto". El monto vive
+ * adentro de la tx (`deposit.data[88..96]`), o sea adentro de lo que `V` firmó:
+ * tocarlo invalida la firma de `V` y lo corta **A3** (`sponsor-claims.ts`), que es
+ * Guard A y sigue en pie con Guard B caído. Se midió: víctima firma `10000000`,
+ * atacante sube a `1000000000` ⇒ `verifySignatures(false)` da `false` ⇒ 403 sin
+ * que Guard B participe. Con una firma capturada `A` consigue exactamente el
+ * monto que `V` firmó, ni un lamport más.
  *
  * Registered ONLY when `isSponsorEnabled()` (opt-in-off, CD-13) — see app.ts.
  *
@@ -83,10 +91,25 @@ const ZOD_MESSAGE_MAX_LEN = 200;
  * `amount` y `mint` NO están acá a propósito: el facilitator los re-deriva de la
  * ix `deposit`. Un campo declarado que después hay que comparar contra la tx es
  * superficie de más para el mismo resultado.
+ *
+ * ⚠️ `reference` TAMPOCO está, y salió de acá en el fix-pack del AR (MNR-1). Era
+ * requerido y no tenía un solo consumidor: no se comparaba contra la tx, no
+ * entraba al mensaje canónico, no se logueaba. Medido: dos requests idénticos
+ * salvo `reference`, con la MISMA `popSignature`, daban 200 los dos — o sea que
+ * era el último campo del request que no se comparaba contra nada, exactamente el
+ * diagnóstico que el §0 del SDD 037 hizo sobre `body.sender`.
+ *
+ * Por qué se saca en vez de atarse: la `reference` real ya viaja adentro de la tx
+ * como remaining account y CR-1 le valida los flags (`cr1.ts`), así que atar el
+ * campo del body no agregaría ninguna defensa; y CR-1 acepta a propósito una ix
+ * SIN remaining accounts, con lo cual exigir la coincidencia rechazaría formas que
+ * hoy son válidas. Sacarlo no rompe a nadie en ningún orden de despliegue: `z.object`
+ * descarta las claves que no conoce, así que un cliente que lo siga mandando (chaski
+ * lo manda) pasa igual. Esto NO aplica a un rename de `popSignature`, que sí sería
+ * un cambio de contrato con ventana (§2.2).
  */
 const SponsorRequestSchema = z.object({
   partialSignedTx: z.string().min(1),
-  reference: z.string().min(1),
   sender: z.string().min(1),
   remittanceId: z.string().min(1),
   popSignature: z.string().min(1),
@@ -130,6 +153,13 @@ export const solanaSponsorRoute: FastifyPluginAsync = async (app) => {
          * "alguien está atacando", que desde el body se ven idénticos.
          */
         guard?: string,
+        /**
+         * Detalle NO estructurado del guard, cuando el marcador solo no alcanza
+         * para diagnosticar (hoy: el `catch` de `extractSponsorClaims`, que puede
+         * ser "tx rara" o "nuestro lector tiró"). Mismo trato que `guard`: log
+         * interno, jamás en la respuesta. NUNCA lleva la tx ni bytes del body.
+         */
+        guardDetail?: string,
       ) => {
         // AC-10: log ONLY the error code / non-secret keyId — never the body/tx.
         // NOTE: request.auditMeta.errorCode is intentionally NOT set here — its
@@ -144,6 +174,7 @@ export const solanaSponsorRoute: FastifyPluginAsync = async (app) => {
             facilitator_key_id: keyId,
             duration_ms: Date.now() - startMs,
             ...(guard === undefined ? {} : { guard }),
+            ...(guardDetail === undefined ? {} : { guard_detail: guardDetail }),
           },
           'solana sponsor failed',
         );
@@ -151,12 +182,13 @@ export const solanaSponsorRoute: FastifyPluginAsync = async (app) => {
       };
 
       /** Todo rechazo de autorización sale con el MISMO código y el MISMO mensaje. */
-      const failSenderProof = (guard: string) =>
+      const failSenderProof = (guard: string, guardDetail?: string) =>
         fail(
           'SPONSOR_SENDER_PROOF_INVALID',
           403,
           'sender signature does not authorize this transaction',
           guard,
+          guardDetail,
         );
 
       // Step 1 — Zod validation.
@@ -184,7 +216,7 @@ export const solanaSponsorRoute: FastifyPluginAsync = async (app) => {
       // Step 3 — Guard A, parte 1: qué dice la tx de sí misma (shape + A2 + A3).
       const claimsResult = extractSponsorClaims(parsedTx.tx);
       if (!claimsResult.ok) {
-        return failSenderProof(claimsResult.reason);
+        return failSenderProof(claimsResult.reason, claimsResult.detail);
       }
       const claims = claimsResult.claims;
 
