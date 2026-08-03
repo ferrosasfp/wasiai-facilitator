@@ -66,6 +66,34 @@ export const DEPOSIT_ACCOUNT_INDEX = {
 } as const;
 
 /**
+ * SDD 037 / W0 — byte layout of the `deposit` instruction DATA.
+ *
+ * Pinned from the arg order declared in `src/chains/escrow-idl.ts:264-287` and
+ * CONFIRMED against bytes produced by `BorshInstructionCoder(escrowIdl).encode`
+ * in `src/__tests__/unit/solana-sponsor.amount-offset.test.ts` (T-OFF1). The
+ * evidence note is `doc/sdd/037-sponsor-pop-ed25519/w0-amount-offset.md`.
+ *
+ *   offset  len  field
+ *        0    8  Anchor discriminator     === DEPOSIT_DISCRIMINATOR
+ *        8   16  remittance_id  [u8; 16]  === sha256(utf8(remittanceId))[0..16]
+ *       24   32  beneficiary    pubkey
+ *       56   32  authority      pubkey
+ *       88    8  amount         u64 LE    <- AMOUNT_OFFSET
+ *       96    8  deadline       i64 LE
+ *      ---------
+ *      104       DEPOSIT_DATA_LEN
+ *
+ * ⚠️ Un offset equivocado acá NO se ve como un bug puntual: la línea `amount`
+ * del mensaje canónico se reconstruye distinta y el guard rechaza TODO request.
+ * El input concreto que lo delata: una ix con `amount = 10000000n` y
+ * `deadline = 1900000000n` — si el offset estuviera corrido 8 bytes, el u64 en
+ * 88 daría 1900000000n en vez de 10000000n. T-OFF1 usa exactamente ese par.
+ */
+export const AMOUNT_OFFSET = 88;
+export const AMOUNT_LEN = 8;
+export const DEPOSIT_DATA_LEN = 104;
+
+/**
  * HU-SOL-20 / R3 — pinned shape of the ONLY 2nd business instruction CR-1 accepts:
  * `register_escrow` of the SAME escrow program. Pinned from the IDL produced by
  * `anchor build` in solana-programs (HU-SOL-20/R1) and re-vendored here by R2a
