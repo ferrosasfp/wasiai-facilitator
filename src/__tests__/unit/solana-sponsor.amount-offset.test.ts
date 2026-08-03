@@ -76,7 +76,9 @@ describe('T-OFF1 — offset del amount en deposit.data (SDD 037 §9)', () => {
   });
 
   it('beneficiary y authority caen en 24 y 56 (cierra el layout completo)', () => {
-    expect(Buffer.from(data.subarray(24, 56)).equals(Buffer.from(beneficiary.toBytes()))).toBe(true);
+    expect(Buffer.from(data.subarray(24, 56)).equals(Buffer.from(beneficiary.toBytes()))).toBe(
+      true,
+    );
     expect(Buffer.from(data.subarray(56, 88)).equals(Buffer.from(authority.toBytes()))).toBe(true);
   });
 });
