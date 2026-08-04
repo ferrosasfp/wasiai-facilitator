@@ -286,7 +286,10 @@ describe('markReleaseSigned — la cerca de un solo disparo', () => {
   it('★ dos firmantes que sobrevivieron al lease → exactamente uno puede transmitir', async () => {
     await claimEscrowRelease(ENTRY, logger);
     table.latencyMs = 2;
-    const [a, b] = await Promise.all([markReleaseSigned(ENTRY, logger), markReleaseSigned(ENTRY, logger)]);
+    const [a, b] = await Promise.all([
+      markReleaseSigned(ENTRY, logger),
+      markReleaseSigned(ENTRY, logger),
+    ]);
     expect([a.ok, b.ok].filter(Boolean)).toHaveLength(1);
   });
 
