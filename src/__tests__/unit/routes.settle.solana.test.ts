@@ -105,10 +105,14 @@ vi.mock('ioredis', () => {
 const SOLANA_MINT = '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU';
 // eslint-disable-next-line no-secrets/no-secrets -- valid base58 pubkey test fixture (payTo), not a secret.
 const SOLANA_PAYTO = 'C3JMHiAmkKzbPFvY4TREAMtraNrvW3gDGhDS95a7S2tY';
+// eslint-disable-next-line no-secrets/no-secrets -- valid base58 pubkey test fixture (reference), not a secret.
+const SOLANA_REFERENCE = '3jHFFgYmtqmoDQwJwCfuGsdbvCVVJtm55QVR1GMcXjne';
 const SOLANA_SIGNATURE =
   // eslint-disable-next-line no-secrets/no-secrets -- valid base58 signature test fixture, not a secret.
   '44VvSvnGgBBE21SMd9eHryB28LzYW7J3FDkZ9XzFMiaXGY5r4dL7BPzQSaR4cjDDUcGRemWVPgWMLkq9v8BjdHEg';
 
+// The body chaski actually POSTs (chaski-v3 facilitator-client.ts:94-109):
+// `payload.reference` always present.
 const SOLANA_BODY = {
   x402Version: 2,
   resource: {
@@ -126,7 +130,14 @@ const SOLANA_BODY = {
   },
   payload: {
     signature: SOLANA_SIGNATURE,
+    reference: SOLANA_REFERENCE,
   },
+} as const;
+
+// Same body with `payload.reference` omitted.
+const SOLANA_BODY_NO_REF = {
+  ...SOLANA_BODY,
+  payload: { signature: SOLANA_SIGNATURE },
 } as const;
 
 /** A minimal EVM fake adapter — registered ONLY so buildApp has a chain; the
@@ -217,5 +228,52 @@ describe('POST /settle — Solana wire (TF4, AC-3)', () => {
     const body = JSON.parse(res.body) as { error: { code: string; http: number } };
     expect(body.error.code).toBe('CHAIN_UNAVAILABLE');
     expect(body.error.http).toBe(503);
+  });
+
+  // ── missing `payload.reference` — rejected AT THE EDGE ───────────────────
+  //
+  // Measured before the fix, on this same route with the Solana adapter
+  // REGISTERED and a stubbed Connection:
+  //   · tx found & finalized → 400 NETWORK_MISMATCH
+  //                            "payment reference not found in tx"
+  //   · tx not yet finalized → 500 TRANSACTION_FAILED
+  //                            "tx not found or not finalized"
+  // Both arrived only AFTER the RPC roundtrip, and neither names the missing
+  // field; the second even reports a caller-side shape error as a 5xx.
+  it('★ sin payload.reference → 400 INVALID_PAYLOAD que NOMBRA el campo', async () => {
+    app = await buildAppSolana();
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/settle',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify(SOLANA_BODY_NO_REF),
+    });
+
+    expect(res.statusCode).toBe(400);
+    const body = JSON.parse(res.body) as { error: { code: string; message: string; http: number } };
+    expect(body.error.code).toBe('INVALID_PAYLOAD');
+    expect(body.error.http).toBe(400);
+    expect(body.error.message).toBe('payload.reference: Required');
+  });
+
+  it('★ el rechazo llega en el BORDE: nunca alcanza el dispatch de red', async () => {
+    // Discriminating evidence, not a restatement of the test above. This app
+    // registers NO Solana adapter, so ANY body that clears the Zod gate reaches
+    // the namespace dispatch and comes back 503 CHAIN_UNAVAILABLE — that is
+    // exactly what the TF4 test above asserts for the well-formed body. Getting
+    // 400 instead of 503 here therefore proves the request died at the schema,
+    // before any adapter/RPC/DB work.
+    app = await buildAppSolana();
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/settle',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify(SOLANA_BODY_NO_REF),
+    });
+
+    expect(res.statusCode).not.toBe(503);
+    expect(res.statusCode).toBe(400);
   });
 });

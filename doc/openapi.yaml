@@ -195,10 +195,14 @@ paths:
         already broadcast, which this facilitator verifies at `finalized`
         commitment). On the `solana:*` rail that transfer must carry a Solana
         Pay `reference` pubkey among the transaction account keys, and the
-        request must repeat it in `payload.reference`: a transfer with the
-        right mint, amount and `payTo` but no `reference` is rejected with
-        `400 NETWORK_MISMATCH` ("payment reference not found in tx"). Branch on
-        `chains[].methods`, not on the top-level `methods` union.
+        request must repeat it in `payload.reference` — the field is REQUIRED.
+        Omitting it is rejected by the request schema with
+        `400 INVALID_PAYLOAD` ("payload.reference: Required"), before any RPC
+        lookup. A `reference` that is present in the request but absent from
+        the transaction's account keys is rejected later with
+        `400 NETWORK_MISMATCH` ("payment reference not found in tx"), even when
+        mint, amount and `payTo` are correct. Branch on `chains[].methods`, not
+        on the top-level `methods` union.
       operationId: listSupported
       responses:
         "200":
@@ -453,9 +457,13 @@ components:
             resulting transaction at `finalized` commitment. On that path the
             facilitator does not originate the transfer. The transfer must
             carry a Solana Pay `reference` pubkey among the transaction account
-            keys and the request must repeat it in `payload.reference`; without
-            it `/verify` answers `400 NETWORK_MISMATCH` ("payment reference not
-            found in tx") even when mint, amount and `payTo` are correct.
+            keys and the request must repeat it in `payload.reference`, which is
+            REQUIRED: omitting it answers `400 INVALID_PAYLOAD`
+            ("payload.reference: Required") at the schema, before any RPC
+            lookup. A `reference` that is present but absent from the
+            transaction's account keys answers `400 NETWORK_MISMATCH`
+            ("payment reference not found in tx") even when mint, amount and
+            `payTo` are correct.
         breakerState:
           type: string
           enum: [CLOSED, OPEN, HALF_OPEN]

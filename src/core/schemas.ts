@@ -164,7 +164,20 @@ const SolanaAcceptedSchema = z
 const SolanaPayloadSchema = z
   .object({
     signature: Base58SignatureSchema, // tx sig finalizada (NO 0x-hex, NO objeto authorization)
-    reference: Base58PubkeySchema.optional(),
+    // REQUERIDO, no `.optional()`. El adaptador Solana lo exige SIEMPRE: el paso 7
+    // de `_verifyCore` (solana-adapter.ts:298-312) corta con
+    // `reference !== null && staticKeys.some(...)`, o sea que un body sin
+    // `reference` NO puede terminar en 200 por ningún camino — ni `/verify` ni
+    // `/settle` (los dos entran por el mismo `_verifyCore`).
+    //
+    // Cuando esto era `.optional()` el body pasaba el gate de Zod y moría adentro,
+    // después del roundtrip al RPC: con la tx ya finalizada salía
+    // `400 NETWORK_MISMATCH "payment reference not found in tx"` (código que habla
+    // de la red, no del campo que falta) y, con la tx todavía no finalizada, salía
+    // `500 TRANSACTION_FAILED` — un 5xx para lo que es un error de forma del caller.
+    // Declarado acá, el rechazo es `400 INVALID_PAYLOAD` en el borde y el adaptador
+    // ni se invoca.
+    reference: Base58PubkeySchema,
   })
   .strict();
 
@@ -218,3 +231,69 @@ export const VerifyRequestSchema = z.union([
  */
 export const SettleRequestSchema = VerifyRequestSchema;
 export type SettleRequest = VerifyRequest;
+
+// ─── describeFirstIssue ─────────────────────────────────────────────────────
+
+/** Levels of `invalid_union` unwrapped before giving up (guards pathological nesting). */
+const MAX_UNION_UNWRAP_DEPTH = 4;
+
+/**
+ * First issue of the "closest" branch of a failed `z.union` — the branch with
+ * the FEWEST issues.
+ *
+ * Why fewest-issues: the branches of `VerifyRequestSchema` are mutually
+ * exclusive in practice (EVM 0x-hex vs Solana base58, `extra` present vs
+ * `.strict()`-forbidden), so the branch the caller actually AIMED at is the one
+ * that stumbles on the least. A Solana body missing `payload.reference` yields 1
+ * issue on the Solana branch and 5-6 on each EVM branch. This is a heuristic for
+ * the error MESSAGE only; it has zero influence on accept/reject.
+ *
+ * Returns `undefined` when no branch reported an issue (should not happen — a
+ * failed union always has at least one failing branch — but the caller must not
+ * depend on that).
+ */
+function closestBranchIssue(unionErrors: readonly z.ZodError[]): z.ZodIssue | undefined {
+  let best: z.ZodError | undefined;
+  for (const candidate of unionErrors) {
+    if (candidate.issues.length === 0) continue;
+    if (best === undefined || candidate.issues.length < best.issues.length) best = candidate;
+  }
+  return best?.issues[0];
+}
+
+/**
+ * Reduce a `ZodError` to the `{path, message}` pair the routes echo back on
+ * `400 INVALID_PAYLOAD`.
+ *
+ * Exists because `VerifyRequestSchema` is a `z.union`: on failure Zod reports a
+ * SINGLE top-level `invalid_union` issue with `path: []` and the message
+ * `"Invalid input"`, and buries the per-branch issues in `unionErrors`. Reading
+ * `error.issues[0]` verbatim therefore produced `"body: Invalid input"` for every
+ * malformed body — which never names the offending field. This walks into the
+ * closest branch so the reply can say e.g. `payload.reference: Required`.
+ *
+ * Scope of what it discloses: the SHAPE of the request the caller itself sent
+ * (field path + Zod's own message). It reads nothing about server state, chain
+ * state or other callers, and it runs BEFORE any adapter/RPC/DB work — so it
+ * cannot become an oracle. (The `no-oracle` directive of this repo, CD-12, is
+ * scoped to `/solana/sponsor` and `/solana/escrow`, whose rejection REASONS
+ * depend on server-side facts; `/verify` and `/settle` have echoed the Zod
+ * path+message since WFAC-20.)
+ *
+ * Callers cap the length of the returned message (`ZOD_MESSAGE_MAX_LEN`).
+ */
+export function describeFirstIssue(error: z.ZodError): { path: string; message: string } {
+  let issue: z.ZodIssue | undefined = error.issues[0];
+  for (let depth = 0; depth < MAX_UNION_UNWRAP_DEPTH; depth += 1) {
+    if (issue === undefined || issue.code !== z.ZodIssueCode.invalid_union) break;
+    // Zod runs every union branch with the SAME ctx.path, so a branch issue's
+    // `path` is already absolute from the root — no prefix to re-attach here.
+    const inner = closestBranchIssue(issue.unionErrors);
+    if (inner === undefined) break;
+    issue = inner;
+  }
+  return {
+    path: issue !== undefined && issue.path.length > 0 ? issue.path.join('.') : 'body',
+    message: issue?.message ?? 'invalid',
+  };
+}
