@@ -323,9 +323,8 @@ function validBody() {
 
 async function buildReleaseApp(): Promise<FastifyInstance> {
   const { resetRedisClientForTests } = await import('../../infra/redis.js');
-  const { resetReleaseAuthorityForTesting } = await import(
-    '../../infra/solana-release-authority.js'
-  );
+  const { resetReleaseAuthorityForTesting } =
+    await import('../../infra/solana-release-authority.js');
   resetRedisClientForTests();
   resetReleaseAuthorityForTesting();
   const { buildApp } = await import('../../app.js');
