@@ -690,6 +690,21 @@ describe('kite.ts adapters', () => {
   });
 });
 
+/**
+ * Narrows the opt-in `avalancheFujiAdapter` export, which is typed
+ * `AvalancheFujiAdapter | null` (opt-in via IIFE, PR #28).
+ *
+ * It THROWS instead of returning null on purpose: an `if (adapter)` guard would
+ * turn every assertion below into a no-op the day the export goes null, and the
+ * test would still report green.
+ */
+function requireFujiAdapter<T>(adapter: T | null): T {
+  if (adapter === null) {
+    throw new Error('avalancheFujiAdapter is null — AVALANCHE_FUJI_RPC_URL is not set');
+  }
+  return adapter;
+}
+
 describe('avalanche.ts adapter', () => {
   let snapshot: Record<string, string | undefined>;
 
@@ -706,9 +721,10 @@ describe('avalanche.ts adapter', () => {
 
   it('has chainId 43113 and testnet network', async () => {
     const mod = await import('../../chains/avalanche.js');
-    expect(mod.avalancheFujiAdapter.metadata.chainId).toBe(43113);
-    expect(mod.avalancheFujiAdapter.metadata.network).toBe('testnet');
-    expect(mod.avalancheFujiAdapter.metadata.networkId).toBe('eip155:43113');
+    const adapter = requireFujiAdapter(mod.avalancheFujiAdapter);
+    expect(adapter.metadata.chainId).toBe(43113);
+    expect(adapter.metadata.network).toBe('testnet');
+    expect(adapter.metadata.networkId).toBe('eip155:43113');
   });
 
   it('avalancheFujiAdapter is null when AVALANCHE_FUJI_RPC_URL missing (opt-in via IIFE, PR #28)', async () => {
@@ -720,7 +736,7 @@ describe('avalanche.ts adapter', () => {
 
   it('exposes USDC Fuji in tokens list with decimals 6', async () => {
     const mod = await import('../../chains/avalanche.js');
-    const tokens = mod.avalancheFujiAdapter.metadata.tokens;
+    const tokens = requireFujiAdapter(mod.avalancheFujiAdapter).metadata.tokens;
     expect(tokens).toHaveLength(1);
     const usdc = tokens[0];
     expect(usdc).toBeDefined();
@@ -732,7 +748,7 @@ describe('avalanche.ts adapter', () => {
 
   it('verify rejects mismatched network (WFAC-52: real implementation)', async () => {
     const mod = await import('../../chains/avalanche.js');
-    const result = await mod.avalancheFujiAdapter.verify({
+    const result = await requireFujiAdapter(mod.avalancheFujiAdapter).verify({
       accepted: {
         network: 'eip155:1',
         asset: '0x5425890298aed601595a70AB815c96711a31Bc65',
@@ -757,7 +773,7 @@ describe('avalanche.ts adapter', () => {
 
   it('settle rejects expired authorization (WFAC-52: real implementation)', async () => {
     const mod = await import('../../chains/avalanche.js');
-    const result = await mod.avalancheFujiAdapter.settle({
+    const result = await requireFujiAdapter(mod.avalancheFujiAdapter).settle({
       accepted: {
         network: 'eip155:43113',
         asset: '0x5425890298aed601595a70AB815c96711a31Bc65',
@@ -1016,7 +1032,7 @@ describe('WFAC-41 — circuit breaker integration on ChainAdapters', () => {
     await new Promise((r) => setImmediate(r));
 
     expect(kiteMod.kiteTestnetAdapter.getBreakerState!()).toBe('OPEN');
-    expect(avaxMod.avalancheFujiAdapter.getBreakerState!()).toBe('CLOSED');
+    expect(requireFujiAdapter(avaxMod.avalancheFujiAdapter).getBreakerState!()).toBe('CLOSED');
   });
 
   it('T-ADAPT-CB-4 (AC-13): _verifyRaw returning SIMULATION_FAILED unwraps cleanly via BusinessFailureError (AR-BLQ-ALTO-1)', async () => {
@@ -1670,17 +1686,20 @@ describe('WFAC-50 — extended error-path coverage', () => {
     // throws — both cases covered by existing T-V-SIG-MISMATCH / this test.
     // Cheap validation: call recover with a broken domain and confirm viem
     // throws — establishes the library behavior our catch relies on.
-    await expect(
-      recoverTypedDataAddress({
-        domain: { name: 'X', version: '1', chainId: 0, verifyingContract: TEST_USDC },
-        types: {
-          Broken: [{ name: 'x', type: 'uint256' }],
-        } as never,
-        primaryType: 'Broken' as never,
-        message: { x: 'not-a-uint' } as never,
-        signature: '0x00' as `0x${string}`,
-      }),
-    ).rejects.toBeDefined();
+    // The single cast below is load-bearing: the point of this test is to hand
+    // viem a `message` that does NOT match its declared `types` (a string where
+    // uint256 is declared) and prove viem rejects. A well-typed argument cannot
+    // express that, so the whole parameters object is cast once. Casting the
+    // fields individually (the previous shape) collapsed viem's generic
+    // inference to `never` and made the call unverifiable in either direction.
+    const brokenParams = {
+      domain: { name: 'X', version: '1', chainId: 0, verifyingContract: TEST_USDC },
+      types: { Broken: [{ name: 'x', type: 'uint256' }] },
+      primaryType: 'Broken',
+      message: { x: 'not-a-uint' },
+      signature: '0x00' as `0x${string}`,
+    } as unknown as Parameters<typeof recoverTypedDataAddress>[0];
+    await expect(recoverTypedDataAddress(brokenParams)).rejects.toBeDefined();
     // Functional assertion: confirms kite.ts uses catch-and-return for any
     // such throw (already covered by T-V-SIG-MISMATCH reaching line 334).
     expect(typeof mod.kiteTestnetAdapter.verify).toBe('function');

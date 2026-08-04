@@ -33,6 +33,13 @@ jobs:
       - name: TypeScript typecheck
         run: npm run typecheck
 
+      # `npm run typecheck` uses tsconfig.json, which EXCLUDES **/*.test.ts.
+      # Without this step a test file can hold a type error forever: nothing
+      # else compiles it (vitest strips types, eslint is not type-aware), so a
+      # double that no longer matches the interface it stands for still runs.
+      - name: TypeScript typecheck (tests)
+        run: npm run typecheck:tests
+
       - name: ESLint
         run: npm run lint
 

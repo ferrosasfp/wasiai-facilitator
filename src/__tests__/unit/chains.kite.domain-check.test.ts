@@ -74,6 +74,7 @@ function makeFakeKiteAdapter(opts: {
         readContract: vi.fn().mockImplementation(opts.readContractImpl),
       }) as unknown as ReturnType<ChainAdapter['getPublicClient']>,
     getWalletClient: vi.fn() as unknown as ChainAdapter['getWalletClient'],
+    probeRpc: vi.fn(async (): Promise<void> => undefined),
   };
 }
 

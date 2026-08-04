@@ -38,12 +38,15 @@ describe('createLogger', () => {
     const pinoFactory = vi.mocked(pinoModule.default);
     const { createLogger } = await import('../../infra/logger.js');
 
+    // Deliberately partial (repo idiom, cf. logger.redact.test.ts): createLogger
+    // reads only NODE_ENV + LOG_LEVEL. The cast is what lets a 4-field object
+    // stand in for EnvConfig.
     const env: EnvConfig = {
       NODE_ENV: 'development',
       LOG_LEVEL: 'info',
       PORT: 3002,
       SHUTDOWN_GRACE_MS: 10000,
-    };
+    } as EnvConfig;
 
     createLogger(env);
 
@@ -57,12 +60,15 @@ describe('createLogger', () => {
     const pinoFactory = vi.mocked(pinoModule.default);
     const { createLogger } = await import('../../infra/logger.js');
 
+    // Deliberately partial (repo idiom, cf. logger.redact.test.ts): createLogger
+    // reads only NODE_ENV + LOG_LEVEL. The cast is what lets a 4-field object
+    // stand in for EnvConfig.
     const env: EnvConfig = {
       NODE_ENV: 'production',
       LOG_LEVEL: 'info',
       PORT: 3002,
       SHUTDOWN_GRACE_MS: 10000,
-    };
+    } as EnvConfig;
 
     createLogger(env);
 
@@ -76,12 +82,15 @@ describe('createLogger', () => {
     const pinoFactory = vi.mocked(pinoModule.default);
     const { createLogger } = await import('../../infra/logger.js');
 
+    // Deliberately partial (repo idiom, cf. logger.redact.test.ts): createLogger
+    // reads only NODE_ENV + LOG_LEVEL. The cast is what lets a 4-field object
+    // stand in for EnvConfig.
     const env: EnvConfig = {
       NODE_ENV: 'production',
       LOG_LEVEL: 'warn',
       PORT: 3002,
       SHUTDOWN_GRACE_MS: 10000,
-    };
+    } as EnvConfig;
 
     createLogger(env);
 

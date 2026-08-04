@@ -25,12 +25,14 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type { Mock } from 'vitest';
+import type { Logger } from 'pino';
 import type { EnvConfig } from '../../infra/env.js';
 
 // ─── ioredis mock (mirrors E10 pattern) ────────────────────────────────────
 vi.mock('ioredis', () => {
   const constructorSpy = vi.fn();
-  const quitSpy = vi.fn<[], Promise<'OK'>>(() => Promise.resolve('OK'));
+  const quitSpy = vi.fn<() => Promise<'OK'>>(() => Promise.resolve('OK'));
   const store = new Map<string, string>();
   const setSpy = vi.fn(async (key: string, value: string, _mode: string, _ttl: number) => {
     store.set(key, value);
@@ -80,12 +82,19 @@ vi.mock('ioredis', () => {
   };
 });
 
+// Mocks typed against pino's real `LogFn` signatures so the double is
+// assignable to `RedisLogger` (= Pick<Logger, 'info' | 'error' | 'warn'>). A bare
+// `vi.fn()` is `Mock<Procedure>` and does NOT satisfy pino's overloads.
 function makeFakeLogger(): {
-  info: ReturnType<typeof vi.fn>;
-  error: ReturnType<typeof vi.fn>;
-  warn: ReturnType<typeof vi.fn>;
+  info: Mock<Logger['info']>;
+  error: Mock<Logger['error']>;
+  warn: Mock<Logger['warn']>;
 } {
-  return { info: vi.fn(), error: vi.fn(), warn: vi.fn() };
+  return {
+    info: vi.fn<Logger['info']>(),
+    error: vi.fn<Logger['error']>(),
+    warn: vi.fn<Logger['warn']>(),
+  };
 }
 
 function makeEnv(overrides: Partial<EnvConfig> = {}): EnvConfig {
@@ -97,7 +106,11 @@ function makeEnv(overrides: Partial<EnvConfig> = {}): EnvConfig {
     REDIS_URL: 'redis://localhost:6379/0',
     REDIS_DB: 0,
     ...overrides,
-  };
+    // Deliberately partial (repo idiom, cf. routes.settle.failopen.test.ts): this
+    // fixture sets only the fields the unit under test reads. The cast is what lets
+    // it stand in for EnvConfig — every field NOT listed above reaches the code as
+    // `undefined` even though EnvConfig declares it required.
+  } as EnvConfig;
 }
 
 const VALID_PARSED = {

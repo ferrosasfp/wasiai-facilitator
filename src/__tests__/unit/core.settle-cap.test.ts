@@ -174,7 +174,7 @@ describe('incrementAndCheckDailyCap (Redis INCR)', () => {
     mockClient.incr.mockResolvedValue(1);
     await incrementAndCheckDailyCap(1000, 'open', nullLogger, 'abc123def456');
     expect(mockClient.incr).toHaveBeenCalledTimes(1);
-    const usedKey = mockClient.incr.mock.calls[0][0] as string;
+    const usedKey = mockClient.incr.mock.calls[0]?.[0] as string;
     expect(usedKey).toMatch(DATE_RE);
     expect(usedKey.endsWith(':abc123def456')).toBe(true);
   });
@@ -182,7 +182,7 @@ describe('incrementAndCheckDailyCap (Redis INCR)', () => {
   it('T-M3-FALLBACK: omitted keyId falls back to the shared settle:daily:<date> key (legacy)', async () => {
     mockClient.incr.mockResolvedValue(1);
     await incrementAndCheckDailyCap(1000, 'open', nullLogger);
-    const usedKey = mockClient.incr.mock.calls[0][0] as string;
+    const usedKey = mockClient.incr.mock.calls[0]?.[0] as string;
     expect(usedKey).toMatch(DATE_RE);
     // No trailing ':<keyId>' segment → exactly `settle:daily:<date>`.
     expect(usedKey.split(':')).toHaveLength(3);
@@ -191,7 +191,7 @@ describe('incrementAndCheckDailyCap (Redis INCR)', () => {
   it('T-M3-FALLBACK-EMPTY: empty-string keyId also falls back to the shared key', async () => {
     mockClient.incr.mockResolvedValue(1);
     await incrementAndCheckDailyCap(1000, 'open', nullLogger, '');
-    const usedKey = mockClient.incr.mock.calls[0][0] as string;
+    const usedKey = mockClient.incr.mock.calls[0]?.[0] as string;
     expect(usedKey.split(':')).toHaveLength(3);
   });
 
