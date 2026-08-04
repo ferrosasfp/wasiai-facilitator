@@ -9,6 +9,8 @@
  *   - ChainAdapter: the 5-member interface every adapter must implement.
  *   - RegisterResult: shape returned by ChainRegistry.register().
  *   - ChainAdapterInitError: thrown at adapter construction if env vars missing.
+ *   - SPL_TOKEN_TRANSFER_FINALIZED: the `methods` literal GET /supported publishes
+ *     for the Solana rail (WKH-323). A runtime const, not a type.
  *
  * Boundaries (DT-12 of SDD 003):
  *   - type-only import from src/core/types.ts is allowed.
