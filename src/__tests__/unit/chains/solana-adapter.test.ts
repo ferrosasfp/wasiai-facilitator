@@ -12,8 +12,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Keypair, PublicKey, type Connection } from '@solana/web3.js';
 import * as solanaDedupModule from '../../../infra/solana-dedup.js';
 import { SolanaAdapter } from '../../../chains/solana-adapter.js';
-import { ChainRegistry } from '../../../chains/registry.js';
+import { ChainRegistry, chainRegistry } from '../../../chains/registry.js';
+import { getSupportedResponse } from '../../../core/supported.js';
 import type { ChainAdapter, ChainMetadata, VerifyParams } from '../../../chains/types.js';
+import { SPL_TOKEN_TRANSFER_FINALIZED } from '../../../chains/types.js';
 import { asChainId } from '../../../core/types.js';
 
 // ─── infra/solana-dedup.js mock ────────────────────────────────────────────
@@ -408,5 +410,60 @@ describe('ChainRegistry generalization (T-REG)', () => {
     const solana = makeAdapter(vi.fn());
     expect(solana.metadata.networkId).toBe('solana:devnet');
     expect(solana.metadata.network).toBe('testnet');
+  });
+
+  // WKH-323 — the adapter must declare the mechanism it actually implements.
+  // Before the fix it declared nothing, so `GET /supported` fell back to
+  // CHAIN_METHODS_DEFAULT and published `eip3009` for this rail.
+  it('T-SOL-M1: metadata.supportedMethods declares the SPL mechanism, never eip3009', () => {
+    const solana = makeAdapter(vi.fn());
+    expect(solana.metadata.supportedMethods).toEqual([SPL_TOKEN_TRANSFER_FINALIZED]);
+    expect(solana.metadata.supportedMethods).not.toContain('eip3009');
+  });
+
+  // Public-contract pin. This is the ONLY place in WKH-323 where the literal is
+  // written by hand: every other assertion references the constant, so without
+  // this test a rename would keep the whole suite green while the published
+  // contract silently changed.
+  it('T-SOL-M2: the published literal is exactly `spl-token-transfer-finalized`', () => {
+    expect(SPL_TOKEN_TRANSFER_FINALIZED).toBe('spl-token-transfer-finalized');
+  });
+
+  it('T-SOL-M3: a mainnet-cluster adapter declares the same literal (no devnet-only wiring)', () => {
+    const mainnet = new SolanaAdapter({
+      rpcUrl: 'https://api.mainnet-beta.solana.com',
+      mint: MINT_58,
+      programId: SPL_TOKEN,
+      cluster: 'mainnet',
+      connection: makeConnection(vi.fn()),
+    });
+    expect(mainnet.metadata.networkId).toBe('solana:mainnet');
+    expect(mainnet.metadata.supportedMethods).toEqual([SPL_TOKEN_TRANSFER_FINALIZED]);
+  });
+
+  // AR MNR-1 — the missing link of the composition chain. T-SOL-M1/M3 prove the
+  // REAL adapter declares the literal; T-R11..T-R14 prove the serializer emits
+  // whatever an adapter declares, but through a fake that declares it to
+  // itself — reverting `solana-adapter.ts:supportedMethods` left all four of
+  // them green. This test walks the real adapter through the real singleton
+  // registry and the real `getSupportedResponse()`, so that mutation now has a
+  // third killer. It lives here and not in `routes.supported.test.ts` because
+  // that file may not import the adapter (§9.3: its module-level factory IIFE
+  // reads process.env).
+  it('T-SOL-M4: the real adapter, registered live, makes getSupportedResponse() publish the literal', () => {
+    chainRegistry._resetForTesting();
+    try {
+      expect(chainRegistry.register(makeAdapter(vi.fn())).ok).toBe(true);
+
+      const response = getSupportedResponse();
+      const entry = response.chains.find((c) => c.network === 'solana:devnet');
+      expect(entry).toBeDefined();
+      expect(entry?.methods).toEqual([SPL_TOKEN_TRANSFER_FINALIZED]);
+      // With Solana as the only registered adapter the top-level union cannot
+      // contain `eip3009` unless CHAIN_METHODS_DEFAULT was reached.
+      expect(response.methods).toEqual([SPL_TOKEN_TRANSFER_FINALIZED]);
+    } finally {
+      chainRegistry._resetForTesting();
+    }
   });
 });

@@ -188,7 +188,17 @@ paths:
       description: |
         Read-only discovery endpoint. Consumers call this before `/verify` or
         `/settle` to learn which chains are registered and which methods each
-        chain supports (currently `eip3009` for every chain in V1).
+        chain supports. `methods` is reported per chain and is not uniform
+        across rails: EVM chains report `eip3009` (an off-chain signed
+        authorization that this facilitator broadcasts), while `solana:*`
+        reports `spl-token-transfer-finalized` (an SPL Token transfer the payer
+        already broadcast, which this facilitator verifies at `finalized`
+        commitment). On the `solana:*` rail that transfer must carry a Solana
+        Pay `reference` pubkey among the transaction account keys, and the
+        request must repeat it in `payload.reference`: a transfer with the
+        right mint, amount and `payTo` but no `reference` is rejected with
+        `400 NETWORK_MISMATCH` ("payment reference not found in tx"). Branch on
+        `chains[].methods`, not on the top-level `methods` union.
       operationId: listSupported
       responses:
         "200":
@@ -435,7 +445,17 @@ components:
           type: array
           items:
             type: string
-          description: Asset-transfer methods supported by this chain (today always `["eip3009"]`).
+          description: |
+            Asset-transfer methods supported by THIS chain — read per entry, it
+            is not a global constant. EVM chains report `eip3009`. A
+            `solana:*` chain reports `spl-token-transfer-finalized`: the payer
+            broadcasts the SPL Token transfer and this facilitator verifies the
+            resulting transaction at `finalized` commitment. On that path the
+            facilitator does not originate the transfer. The transfer must
+            carry a Solana Pay `reference` pubkey among the transaction account
+            keys and the request must repeat it in `payload.reference`; without
+            it `/verify` answers `400 NETWORK_MISMATCH` ("payment reference not
+            found in tx") even when mint, amount and `payTo` are correct.
         breakerState:
           type: string
           enum: [CLOSED, OPEN, HALF_OPEN]
@@ -463,7 +483,14 @@ components:
           type: array
           items:
             type: string
-          description: Deduped union of every chain's `methods` array.
+          description: |
+            Deduped union of every chain's `methods` array. A method listed here
+            is supported by at least one registered chain, not by all of them:
+            use `chains[].methods` to decide. These values name the mechanism a
+            chain implements; they are not request fields. The request body is
+            selected by `accepted.network`: the EVM branches carry
+            `accepted.extra.assetTransferMethod` (see `AcceptedExtra`), and the
+            `solana:*` branch has no `extra` at all.
 
     HealthResponse:
       type: object

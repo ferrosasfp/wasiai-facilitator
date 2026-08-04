@@ -29,7 +29,12 @@ import type { FastifyInstance } from 'fastify';
 import type { EnvConfig } from '../../infra/env.js';
 import { chainRegistry } from '../../chains/registry.js';
 import { asChainId } from '../../core/types.js';
-import type { ChainAdapter } from '../../chains/types.js';
+import type { ChainAdapter, SettlementAdapter } from '../../chains/types.js';
+// WKH-323 — value import of the published literal. `chains/types.js` is
+// side-effect free; importing `chains/solana-adapter.js` here is forbidden (see
+// the CD-15/CD-16 note above, and it would run that module's env-reading
+// factory IIFE).
+import { SPL_TOKEN_TRANSFER_FINALIZED } from '../../chains/types.js';
 
 // ─── core/audit.js mock (WFAC-33 W4) ───────────────────────────────────────
 vi.mock('../../core/audit.js', () => {
@@ -138,6 +143,31 @@ function makeFakeAdapter(chainIdNum: number, name: string): ChainAdapter {
   };
 }
 
+/**
+ * WKH-323 — fake of the non-EVM Solana rail. Shape is `SettlementAdapter`
+ * (no viem clients), metadata copied from the real adapter's own
+ * `this.metadata` (src/chains/solana-adapter.ts). Deliberately WITHOUT
+ * getPublicClient/getWalletClient and WITHOUT getBreakerState, which is what
+ * the real adapter looks like.
+ */
+function makeFakeSolanaAdapter(): SettlementAdapter {
+  return {
+    metadata: {
+      chainId: asChainId(103),
+      name: 'Solana Devnet',
+      network: 'testnet',
+      networkId: 'solana:devnet',
+      rpcUrl: 'http://localhost',
+      nativeCurrency: { name: 'Solana', symbol: 'SOL', decimals: 9 },
+      tokens: [],
+      supportedMethods: [SPL_TOKEN_TRANSFER_FINALIZED],
+    },
+    verify: vi.fn() as unknown as SettlementAdapter['verify'],
+    settle: vi.fn() as unknown as SettlementAdapter['settle'],
+    probeRpc: vi.fn() as unknown as SettlementAdapter['probeRpc'],
+  };
+}
+
 function makeEnv(overrides: Partial<EnvConfig> = {}): EnvConfig {
   return {
     NODE_ENV: 'production',
@@ -155,7 +185,10 @@ function makeEnv(overrides: Partial<EnvConfig> = {}): EnvConfig {
  * Passing `[]` leaves the registry empty (zero-adapter case for AC-9).
  */
 async function buildAppWithAdapters(
-  adapters: readonly ChainAdapter[],
+  // WKH-323 — widened from `ChainAdapter[]`: the registry has accepted the
+  // wider `SettlementAdapter` since WKH-205 (registry.ts register/_isValidAdapter),
+  // so a non-EVM fake can be registered here.
+  adapters: readonly SettlementAdapter[],
   opts: {
     capture?: CaptureStream;
     env?: EnvConfig;
@@ -502,5 +535,93 @@ describe('GET /supported', () => {
     // `hasOwnProperty('breakerState')` is false.
     expect(Object.keys(body.chains[0]!)).not.toContain('breakerState');
     expect(Object.prototype.hasOwnProperty.call(body.chains[0], 'breakerState')).toBe(false);
+  });
+
+  // ─── WKH-323 — per-chain methods (T-R11..T-R14) ─────────────────────────
+
+  it('T-R11 / AC-1: the solana:devnet entry reports the SPL mechanism, not eip3009', async () => {
+    app = await buildAppWithAdapters([makeFakeSolanaAdapter()]);
+
+    const res = await app.inject({ method: 'GET', url: '/supported' });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body) as {
+      chains: Array<{ network: string; methods: string[] }>;
+    };
+    const solana = body.chains.find((c) => c.network === 'solana:devnet');
+    expect(solana?.methods).toEqual([SPL_TOKEN_TRANSFER_FINALIZED]);
+    expect(solana?.methods).not.toContain('eip3009');
+  });
+
+  it('T-R12 / AC-2: top-level methods is the deduped union across rails', async () => {
+    // Two EVM fakes contribute the SAME value, so a length of 2 proves the
+    // dedup ran; the Solana fake contributes the second, distinct one.
+    app = await buildAppWithAdapters([
+      makeFakeAdapter(2368, 'Kite Testnet'),
+      makeFakeAdapter(43113, 'Avalanche Fuji'),
+      makeFakeSolanaAdapter(),
+    ]);
+
+    const res = await app.inject({ method: 'GET', url: '/supported' });
+    const body = JSON.parse(res.body) as { methods: string[] };
+    expect([...body.methods].sort()).toEqual(['eip3009', SPL_TOKEN_TRANSFER_FINALIZED]);
+    expect(body.methods.length).toBe(2);
+  });
+
+  it('T-R13 / AC-3: the Solana override does not leak into its EVM neighbours', async () => {
+    app = await buildAppWithAdapters([
+      makeFakeAdapter(2368, 'Kite Testnet'),
+      makeFakeAdapter(43113, 'Avalanche Fuji'),
+      makeFakeSolanaAdapter(),
+    ]);
+
+    const res = await app.inject({ method: 'GET', url: '/supported' });
+    const body = JSON.parse(res.body) as {
+      chains: Array<{ network: string; methods: string[] }>;
+    };
+    const evmEntries = body.chains.filter((c) => c.network.startsWith('eip155:'));
+    expect(evmEntries).toHaveLength(2);
+    for (const entry of evmEntries) {
+      expect(entry.methods).toEqual(['eip3009']);
+    }
+  });
+
+  it('T-R14 / AC-4 (CD-12): Solana omits breakerState while a sibling EVM chain still emits it', async () => {
+    // The EVM fake MUST expose getPublicClient + getWalletClient: supported.ts
+    // resolves the adapter through chainRegistry.getAdapter(), whose
+    // `_isChainAdapter` narrowing (registry.ts) requires both. Without them the
+    // lookup fails and breakerState would be omitted for the EVM chain too —
+    // the test would then pass for the wrong reason and prove nothing about
+    // cross-entry isolation.
+    const evmWithBreaker: ChainAdapter & { getBreakerState: () => 'CLOSED' } = {
+      metadata: {
+        chainId: asChainId(2368),
+        name: 'Kite Testnet',
+        network: 'testnet',
+        networkId: 'eip155:2368',
+        rpcUrl: 'http://localhost',
+        nativeCurrency: { name: 'Kite', symbol: 'KITE', decimals: 18 },
+        tokens: [],
+      },
+      verify: vi.fn() as unknown as ChainAdapter['verify'],
+      settle: vi.fn() as unknown as ChainAdapter['settle'],
+      getPublicClient: vi.fn() as unknown as ChainAdapter['getPublicClient'],
+      getWalletClient: vi.fn() as unknown as ChainAdapter['getWalletClient'],
+      getBreakerState: () => 'CLOSED',
+    };
+    app = await buildAppWithAdapters([evmWithBreaker, makeFakeSolanaAdapter()]);
+
+    const res = await app.inject({ method: 'GET', url: '/supported' });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body) as {
+      chains: Array<Record<string, unknown> & { network: string }>;
+    };
+
+    const solanaEntry = body.chains.find((c) => c.network === 'solana:devnet');
+    expect(solanaEntry).toBeDefined();
+    // Field ABSENT (not null, not undefined).
+    expect(Object.keys(solanaEntry!).sort()).toEqual(['methods', 'name', 'network']);
+
+    const evmEntry = body.chains.find((c) => c.network === 'eip155:2368');
+    expect(evmEntry?.breakerState).toBe('CLOSED');
   });
 });

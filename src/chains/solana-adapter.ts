@@ -36,6 +36,7 @@ import type {
   VerifyParams,
   VerifyResult,
 } from './types.js';
+import { SPL_TOKEN_TRANSFER_FINALIZED } from './types.js';
 import type { Address } from '../core/types.js';
 import { asChainId } from '../core/types.js';
 import { isSolanaSignatureSettled, recordSolanaSignature } from '../infra/solana-dedup.js';
@@ -130,6 +131,11 @@ export class SolanaAdapter implements SettlementAdapter {
       rpcUrl: opts.rpcUrl,
       nativeCurrency: { name: 'Solana', symbol: 'SOL', decimals: 9 },
       tokens: [],
+      // WKH-323 — without this, `GET /supported` fell back to
+      // CHAIN_METHODS_DEFAULT and published `eip3009` for this rail, which this
+      // adapter never implements. Same single value for both clusters: the
+      // cluster already travels in the `network` field.
+      supportedMethods: [SPL_TOKEN_TRANSFER_FINALIZED],
     };
   }
 
