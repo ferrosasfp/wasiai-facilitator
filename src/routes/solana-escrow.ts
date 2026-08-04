@@ -9,6 +9,19 @@
  *   from ON-CHAIN state (beneficiary NEVER from body, CD-4) → cosignAndBroadcast
  *   (HU-SOL-14 primitive, release-authority = feePayer, CD-11) → { signature }.
  *
+ * El claim del Step 5 tiene un LEASE (`SOLANA_ESCROW_RELEASE_LEASE_MS`). Se escribe
+ * ANTES de pedir blockhash y de firmar, así que TODO lo que pasa después puede fallar
+ * con el claim ya escrito; sin expiración eso dejaba el escrow irreleaseable para
+ * siempre (el reintento chocaba con el UNIQUE y comía un 409 permanente), con la
+ * ventana de custodia en 2 horas y el release disparado a mano. Un claim más viejo que
+ * el lease ahora puede tomarse. Lo que sostiene el AT-MOST-ONCE del broadcast:
+ *   - el `UNIQUE(escrow_pda)` intacto (ninguna fila se borra jamás),
+ *   - el robo como UN solo UPDATE condicional (un ganador entre N),
+ *   - la cerca de un solo disparo en `onSigned` (Step 7), que además re-ancla el lease
+ *     en el instante de la firma, y
+ *   - el Step 4 de ESTA misma invocación, que corta con 409 si el escrow ya figura
+ *     `Released` on-chain — la tentativa anterior que SÍ aterrizó se detecta ahí.
+ *
  * ⚠️ SECURITY: the release-authority signs ONLY after `validateReleaseForSponsor`
  * (CR-1 of the release) authorizes the exact `release` tx (fail-closed, CD-3). The
  * `beneficiary` is ALWAYS `escrow_state.beneficiary` read on-chain (CD-4), never
@@ -41,7 +54,12 @@ import {
   getReleaseAuthorityPubkey,
 } from '../infra/solana-release-authority.js';
 import { readEscrowState, verifyVault } from '../chains/solana-escrow.js';
-import { claimEscrowRelease } from '../infra/solana-escrow-release-dedup.js';
+import {
+  claimEscrowRelease,
+  markReleaseSigned,
+  stealStaleReleaseClaim,
+  type ReleaseClaimEntry,
+} from '../infra/solana-escrow-release-dedup.js';
 import { buildReleaseTx } from '../methods/solana-escrow/build-release.js';
 import { validateReleaseForSponsor } from '../methods/solana-escrow/cr1-release.js';
 import { cosignAndBroadcast } from '../methods/solana-sponsor/broadcast.js';
@@ -122,6 +140,7 @@ function verifyReleaseAttestation(
 
 export const solanaEscrowReleaseRoute: FastifyPluginAsync = async (app) => {
   const env = app.env;
+  const leaseMs = env.SOLANA_ESCROW_RELEASE_LEASE_MS;
   const cr1cfg: Cr1Config = {
     escrowProgramId: env.SOLANA_ESCROW_PROGRAM_ID,
     maxComputeUnits: env.SOLANA_SPONSOR_MAX_COMPUTE_UNITS,
@@ -260,15 +279,13 @@ export const solanaEscrowReleaseRoute: FastifyPluginAsync = async (app) => {
       }
 
       // Step 5 — dedup claim (AC-5 / CD-9, fail-closed, mutate-first).
-      const claim = await claimEscrowRelease(
-        {
-          escrowPda: state.escrowStatePda,
-          sender: state.sender,
-          remittanceId: body.remittanceId,
-          network,
-        },
-        app.log,
-      );
+      const claimEntry: ReleaseClaimEntry = {
+        escrowPda: state.escrowStatePda,
+        sender: state.sender,
+        remittanceId: body.remittanceId,
+        network,
+      };
+      const claim = await claimEscrowRelease(claimEntry, app.log);
       if (!claim.ok) {
         return fail(
           'RELEASE_STORE_UNAVAILABLE',
@@ -278,7 +295,32 @@ export const solanaEscrowReleaseRoute: FastifyPluginAsync = async (app) => {
         );
       }
       if (!claim.claimed) {
-        return fail('RELEASE_REPLAY', 409, 'Release already claimed', 'DEDUP_ALREADY_CLAIMED');
+        // El claim ya existía. Antes esto era el final del camino PARA SIEMPRE: como
+        // el claim se escribe ANTES de pedir blockhash y de firmar, cualquier fallo
+        // posterior al INSERT (un hipo del RPC alcanzaba) dejaba el escrow
+        // irreleaseable y el beneficiario sin cobrar, con el refund del sender como
+        // único escape. Ahora un claim más viejo que el lease puede TOMARSE.
+        //
+        // El robo es UN solo UPDATE condicional: de N reintentos concurrentes
+        // exactamente uno sigue. Y no re-firma a ciegas — el escrow ya figuraba
+        // distinto de `Released` en la lectura on-chain del Step 4, en ESTA misma
+        // invocación, así que una tentativa anterior que sí aterrizó ya cortó arriba
+        // con 409.
+        const steal = await stealStaleReleaseClaim(claimEntry, leaseMs, app.log);
+        if (!steal.ok) {
+          return fail(
+            'RELEASE_STORE_UNAVAILABLE',
+            500,
+            'Release dedup store unavailable',
+            'DEDUP_STORE_UNAVAILABLE',
+          );
+        }
+        if (!steal.stolen) {
+          // Lease vigente: hay una tentativa que puede estar viva. Mismo código que
+          // antes (contrato público sin cambios); el marcador del log distingue este
+          // caso del claim viejo, que ahora sí reintenta.
+          return fail('RELEASE_REPLAY', 409, 'Release already claimed', 'DEDUP_LEASE_HELD');
+        }
       }
 
       // Step 6 — build the release tx from ON-CHAIN state (beneficiary from state, CD-4).
@@ -308,6 +350,15 @@ export const solanaEscrowReleaseRoute: FastifyPluginAsync = async (app) => {
         rpcUrl,
         maxFeeLamports: cr1cfg.maxFeeLamports,
         maxRebroadcasts: env.SOLANA_SPONSOR_MAX_REBROADCASTS,
+        // La CERCA de un solo disparo, entre `partialSign` y `serialize`. Cubre el
+        // interleaving que el lease solo no cubre: A cuelga, B le toma el claim, y
+        // después A revive y firma. Acá exactamente uno gana el paso a `signed`; el
+        // otro recibe `{ ok:false }` y el primitivo NO transmite (SPONSOR_PERSIST_FAILED).
+        //
+        // También re-ancla el lease en el instante de la firma, que es el único
+        // momento a partir del cual pudo existir una tx: sin eso el lease tendría que
+        // cubrir un hueco sin cota (un `getLatestBlockhash` colgado se lo come solo).
+        onSigned: () => markReleaseSigned(claimEntry, app.log),
       });
 
       if (result.ok) {
@@ -341,6 +392,17 @@ export const solanaEscrowReleaseRoute: FastifyPluginAsync = async (app) => {
           );
         case 'SPONSOR_BROADCAST_FAILED':
           return fail('RELEASE_BROADCAST_FAILED', 502, 'Broadcast failed', result.reason);
+        case 'SPONSOR_PERSIST_FAILED':
+          // La cerca no se pudo tomar (otro request ya pasó a `signed`, o el store
+          // no respondió). El primitivo NO transmitió, así que este request no
+          // gastó nada. Iba a caer en el `default:` de abajo, que dice "rechazada
+          // por validación" — un diagnóstico falso para un problema de almacenamiento.
+          return fail(
+            'RELEASE_STORE_UNAVAILABLE',
+            500,
+            'Release dedup store unavailable',
+            result.reason,
+          );
         case 'SPONSOR_DAILY_CAP':
         case 'SPONSOR_REJECTED':
         default:
