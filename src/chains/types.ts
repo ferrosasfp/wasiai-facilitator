@@ -46,7 +46,7 @@ export interface ChainMetadata {
   readonly chainId: ChainId;
   readonly name: string;
   readonly network: 'mainnet' | 'testnet';
-  readonly networkId: string; // "eip155:<chainId>"
+  readonly networkId: string; // "eip155:<chainId>" (EVM) | "solana:<cluster>" (WKH-205)
   readonly rpcUrl: string;
   readonly blockExplorer?: string;
   readonly nativeCurrency: {
@@ -62,6 +62,36 @@ export interface ChainMetadata {
 // --- x402 spec shapes (DT-2 of SDD: direct, no wrappers) ---
 
 export type AssetTransferMethod = 'eip3009' | 'permit2' | 'erc7710';
+
+/**
+ * WKH-323 — the `methods` value `GET /supported` publishes for the Solana rail.
+ * `SolanaAdapter` sets it as its `ChainMetadata.supportedMethods`
+ * (`src/chains/solana-adapter.ts`), so the `solana:<cluster>` entry reports this
+ * string instead of falling back to `CHAIN_METHODS_DEFAULT`.
+ *
+ * Why it is NOT `eip3009`: EIP-3009 is an off-chain signed authorization that
+ * *this* facilitator broadcasts on-chain. The Solana rail runs the other way
+ * around — the payer already broadcast the SPL Token transfer and sends the
+ * base58 signature; `SolanaAdapter.verify/settle` inspect that existing
+ * transaction afterwards (net balance delta, exact mint pin, token program-id
+ * pin, durable dedup). See `src/chains/solana-adapter.ts`.
+ *
+ * Why the `-finalized` suffix: the adapter reads the transaction with
+ * `getTransaction(sig, { commitment: 'finalized' })` and does not retry at
+ * `confirmed`/`processed` (`src/chains/solana-adapter.ts`, "Step 1 (CD-5)"),
+ * so a request only succeeds when the transfer already exists on-chain at
+ * finalized commitment.
+ *
+ * This facilitator DOES originate SPL transfers, but on the dedicated non-x402
+ * route `POST /solana/payout` (`src/routes/solana-payout.ts`, facilitator as
+ * TREASURER), never on the `/verify` + `/settle` path this literal describes
+ * (facilitator as WITNESS).
+ *
+ * This string is a PUBLIC CONTRACT served by `GET /supported`: renaming it
+ * breaks integrators that branch on `chains[].methods`. Pinned verbatim by
+ * T-SOL-M2 in `src/__tests__/unit/chains/solana-adapter.test.ts`.
+ */
+export const SPL_TOKEN_TRANSFER_FINALIZED = 'spl-token-transfer-finalized' as const;
 
 export interface VerifyParams {
   readonly x402Version: 2;
