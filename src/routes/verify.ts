@@ -22,7 +22,7 @@
  */
 
 import type { FastifyPluginAsync, FastifyReply } from 'fastify';
-import { VerifyRequestSchema, type VerifyRequest } from '../core/schemas.js';
+import { VerifyRequestSchema, describeFirstIssue, type VerifyRequest } from '../core/schemas.js';
 import { verifyCore } from '../core/verify.js';
 import {
   buildIdempotencyKey,
@@ -90,9 +90,10 @@ export const verifyRoute: FastifyPluginAsync = async (app) => {
       // Step 1 — Zod validation.
       const parseResult = VerifyRequestSchema.safeParse(request.body);
       if (!parseResult.success) {
-        const issue = parseResult.error.issues[0];
-        const path = issue?.path.length ? issue.path.join('.') : 'body';
-        const rawMsg = issue?.message ?? 'invalid';
+        // describeFirstIssue walks into the failing branch of the top-level
+        // z.union — reading `issues[0]` verbatim only ever yielded the union's own
+        // "body: Invalid input", which names no field.
+        const { path, message: rawMsg } = describeFirstIssue(parseResult.error);
         const message = `${path}: ${rawMsg}`.slice(0, ZOD_MESSAGE_MAX_LEN);
         const body: ErrorBody = {
           error: { code: 'INVALID_PAYLOAD', message, http: 400 },
