@@ -14,6 +14,7 @@ import * as solanaDedupModule from '../../../infra/solana-dedup.js';
 import { SolanaAdapter } from '../../../chains/solana-adapter.js';
 import { ChainRegistry } from '../../../chains/registry.js';
 import type { ChainAdapter, ChainMetadata, VerifyParams } from '../../../chains/types.js';
+import { SPL_TOKEN_TRANSFER_FINALIZED } from '../../../chains/types.js';
 import { asChainId } from '../../../core/types.js';
 
 // ─── infra/solana-dedup.js mock ────────────────────────────────────────────
@@ -408,5 +409,34 @@ describe('ChainRegistry generalization (T-REG)', () => {
     const solana = makeAdapter(vi.fn());
     expect(solana.metadata.networkId).toBe('solana:devnet');
     expect(solana.metadata.network).toBe('testnet');
+  });
+
+  // WKH-323 — the adapter must declare the mechanism it actually implements.
+  // Before the fix it declared nothing, so `GET /supported` fell back to
+  // CHAIN_METHODS_DEFAULT and published `eip3009` for this rail.
+  it('T-SOL-M1: metadata.supportedMethods declares the SPL mechanism, never eip3009', () => {
+    const solana = makeAdapter(vi.fn());
+    expect(solana.metadata.supportedMethods).toEqual([SPL_TOKEN_TRANSFER_FINALIZED]);
+    expect(solana.metadata.supportedMethods).not.toContain('eip3009');
+  });
+
+  // Public-contract pin. This is the ONLY place in WKH-323 where the literal is
+  // written by hand: every other assertion references the constant, so without
+  // this test a rename would keep the whole suite green while the published
+  // contract silently changed.
+  it('T-SOL-M2: the published literal is exactly `spl-token-transfer-finalized`', () => {
+    expect(SPL_TOKEN_TRANSFER_FINALIZED).toBe('spl-token-transfer-finalized');
+  });
+
+  it('T-SOL-M3: a mainnet-cluster adapter declares the same literal (no devnet-only wiring)', () => {
+    const mainnet = new SolanaAdapter({
+      rpcUrl: 'https://api.mainnet-beta.solana.com',
+      mint: MINT_58,
+      programId: SPL_TOKEN,
+      cluster: 'mainnet',
+      connection: makeConnection(vi.fn()),
+    });
+    expect(mainnet.metadata.networkId).toBe('solana:mainnet');
+    expect(mainnet.metadata.supportedMethods).toEqual([SPL_TOKEN_TRANSFER_FINALIZED]);
   });
 });

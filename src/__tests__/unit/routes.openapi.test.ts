@@ -39,6 +39,7 @@ import type { FastifyInstance } from 'fastify';
 import type { EnvConfig } from '../../infra/env.js';
 import { HTTP_BY_CODE } from '../../core/errors.js';
 import type { X402ErrorCode } from '../../core/types.js';
+import { SPL_TOKEN_TRANSFER_FINALIZED } from '../../chains/types.js';
 
 // ─── core/audit.js mock (WFAC-33 W4) ───────────────────────────────────────
 vi.mock('../../core/audit.js', () => {
@@ -347,6 +348,31 @@ describe('GET /openapi.json', () => {
     expect(res.statusCode).toBe(200);
     expect(audit.__persistAuditSpy).not.toHaveBeenCalled();
     expect(audit.__buildAuditSpy).not.toHaveBeenCalled();
+  });
+
+  // ─── WKH-323 — doc↔code drift guard ──────────────────────────────────────
+
+  it('T-O-DRIFT: both published `methods` descriptions name the Solana literal and claim no uniformity', () => {
+    // WKH-323 exists because the prose drifted from the code and nothing
+    // caught it: openapi.yaml claimed `eip3009` for every chain while the
+    // Solana adapter implements an entirely different mechanism. Restating the
+    // rule would not enforce it, so this is the mechanical tie between the
+    // published document and the constant production code exports.
+    const endpointDescription = (spec.paths['/supported']!.get as { description?: string })
+      .description;
+    const fieldDescription = (
+      spec.components.schemas.ChainSupportedItem!.properties as Record<
+        string,
+        Record<string, unknown>
+      >
+    ).methods!.description as string | undefined;
+
+    for (const description of [endpointDescription, fieldDescription]) {
+      expect(typeof description).toBe('string');
+      expect(description).toContain(SPL_TOKEN_TRANSFER_FINALIZED);
+      // No blanket claim about the whole registry: `methods` is per chain.
+      expect(description).not.toMatch(/every chain|always/i);
+    }
   });
 });
 
