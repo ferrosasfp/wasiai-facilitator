@@ -151,6 +151,16 @@ export const solanaSponsorRoute: FastifyPluginAsync = async (app) => {
          * (CD-12 no-oracle: al cliente no se le dice por qué falló). Existe para
          * que un operador pueda separar "el servicio está mal configurado" de
          * "alguien está atacando", que desde el body se ven idénticos.
+         *
+         * ⚠️ El camino 422 lo dejaba SIN pasar, y ahí es donde más se necesita:
+         * `SPONSOR_REJECTED` es el destino común de ~34 motivos distintos de
+         * `cr1.ts` + `broadcast.ts` (`FEE_PAYER_MISMATCH`, `PRIORITY_FEE_ABOVE_MAX`,
+         * `COMPUTE_UNITS_ABOVE_MAX`, `PROGRAM_NOT_WHITELISTED`, …), así que un tope
+         * mal configurado en el deploy y una tx corrupta salían con el MISMO
+         * `error_code: SPONSOR_REJECTED, http_status: 422` y nada más. Hoy cada
+         * `fail()` con causa distinguible pasa su marcador; los tests
+         * `★ observabilidad del 422` de `solana-sponsor.route.test.ts` lo clavan
+         * junto con el candado de que el marcador NO viaja al cliente.
          */
         guard?: string,
         /**
@@ -214,9 +224,14 @@ export const solanaSponsorRoute: FastifyPluginAsync = async (app) => {
       const parsedTx = parseSponsorTx(body.partialSignedTx);
       if (!parsedTx.ok) {
         if (parsedTx.code === 'SPONSOR_UNSUPPORTED_TX') {
-          return fail('SPONSOR_UNSUPPORTED_TX', 422, 'Unsupported transaction (versioned)');
+          return fail(
+            'SPONSOR_UNSUPPORTED_TX',
+            422,
+            'Unsupported transaction (versioned)',
+            parsedTx.reason,
+          );
         }
-        return fail('SPONSOR_REJECTED', 422, 'Transaction rejected by validation');
+        return fail('SPONSOR_REJECTED', 422, 'Transaction rejected by validation', parsedTx.reason);
       }
 
       // Step 3 — Guard A, parte 1: qué dice la tx de sí misma (shape + A2 + A3).
@@ -298,7 +313,10 @@ export const solanaSponsorRoute: FastifyPluginAsync = async (app) => {
         keyId,
       );
       if (!rate.ok) {
-        return fail('SPONSOR_RATE_LIMITED', 429, 'Rate limit exceeded');
+        // `store_error_failclosed` (Redis caído) y `rate_exceeded` (alguien nos
+        // martilla) salen los dos como 429: sin el marcador, una caída de Redis
+        // durante una demo se lee como "me están limitando".
+        return fail('SPONSOR_RATE_LIMITED', 429, 'Rate limit exceeded', rate.reason);
       }
 
       // Step 9 — resolve the fee-payer key (opt-in-off guard; never leaks value).
@@ -306,11 +324,18 @@ export const solanaSponsorRoute: FastifyPluginAsync = async (app) => {
       try {
         feePayerKeypair = getFeePayerKeypair();
       } catch {
-        return fail('SPONSOR_NOT_ENABLED', 501, 'Sponsorship is not enabled');
+        // El 501 no distingue "apagada a propósito" de "prendida y mal
+        // configurada". El marcador dice CUÁL de las dos variables falta.
+        return fail(
+          'SPONSOR_NOT_ENABLED',
+          501,
+          'Sponsorship is not enabled',
+          'FEE_PAYER_KEY_UNAVAILABLE',
+        );
       }
       const rpcUrl = env.SOLANA_RPC_URL;
       if (rpcUrl === undefined || rpcUrl.length === 0) {
-        return fail('SPONSOR_NOT_ENABLED', 501, 'Sponsorship is not enabled');
+        return fail('SPONSOR_NOT_ENABLED', 501, 'Sponsorship is not enabled', 'RPC_URL_UNSET');
       }
 
       // Step 10 — CR-1 + co-sign + broadcast. Daily-cap INCR runs fail-closed
@@ -354,18 +379,31 @@ export const solanaSponsorRoute: FastifyPluginAsync = async (app) => {
       }
 
       // Step 11 — map the primitive error code → HTTP (no echo of the tx).
+      //
+      // `result.reason` es el ÚNICO dato que separa los ~34 motivos que el
+      // primitivo colapsa en estos cinco códigos, y va al log — nunca al body.
       switch (result.code) {
         case 'SPONSOR_UNSUPPORTED_TX':
-          return fail('SPONSOR_UNSUPPORTED_TX', 422, 'Unsupported transaction (versioned)');
+          return fail(
+            'SPONSOR_UNSUPPORTED_TX',
+            422,
+            'Unsupported transaction (versioned)',
+            result.reason,
+          );
         case 'SPONSOR_DAILY_CAP':
-          return fail('SPONSOR_DAILY_CAP', 429, 'Daily sponsorship cap reached');
+          return fail('SPONSOR_DAILY_CAP', 429, 'Daily sponsorship cap reached', result.reason);
         case 'SPONSOR_BROADCAST_EXPIRED':
-          return fail('SPONSOR_BROADCAST_EXPIRED', 409, 'Transaction blockhash expired');
+          return fail(
+            'SPONSOR_BROADCAST_EXPIRED',
+            409,
+            'Transaction blockhash expired',
+            result.reason,
+          );
         case 'SPONSOR_BROADCAST_FAILED':
-          return fail('SPONSOR_BROADCAST_FAILED', 502, 'Broadcast failed');
+          return fail('SPONSOR_BROADCAST_FAILED', 502, 'Broadcast failed', result.reason);
         case 'SPONSOR_REJECTED':
         default:
-          return fail('SPONSOR_REJECTED', 422, 'Transaction rejected by validation');
+          return fail('SPONSOR_REJECTED', 422, 'Transaction rejected by validation', result.reason);
       }
     },
   );

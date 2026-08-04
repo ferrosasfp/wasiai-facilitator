@@ -145,8 +145,23 @@ export const solanaEscrowReleaseRoute: FastifyPluginAsync = async (app) => {
       const requestId = request.id;
       const keyId = request.facilitatorKeyId;
 
-      const fail = (code: ReleaseErrorCode, http: number, message: string) => {
-        // Log ONLY the error code / non-secret keyId — never the body/tx/state.
+      const fail = (
+        code: ReleaseErrorCode,
+        http: number,
+        message: string,
+        /**
+         * Marcador interno de qué cortó. NO se ecoa en la respuesta (mismo
+         * no-oracle que `solana-sponsor.ts`: al cliente no se le dice por qué
+         * falló). Sin él, `RELEASE_REJECTED / 422` era el destino común de la
+         * attestation inválida, del vault que no verifica y de las DOS causas de
+         * `readEscrowState` — y esas dos son opuestas para el operador:
+         * `ESCROW_STATE_NOT_FOUND` es "ese escrow no existe" y
+         * `ESCROW_READ_FAILED` es "el RPC se cayó y no pude preguntar".
+         * NUNCA lleva la tx, el state ni bytes del body.
+         */
+        guard?: string,
+      ) => {
+        // Log ONLY the error code / non-secret keyId + guard — never the body/tx/state.
         app.log.warn(
           {
             request_id: requestId,
@@ -154,6 +169,7 @@ export const solanaEscrowReleaseRoute: FastifyPluginAsync = async (app) => {
             http_status: http,
             facilitator_key_id: keyId,
             duration_ms: Date.now() - startMs,
+            ...(guard === undefined ? {} : { guard }),
           },
           'solana escrow release failed',
         );
@@ -180,7 +196,12 @@ export const solanaEscrowReleaseRoute: FastifyPluginAsync = async (app) => {
           attestationSecret,
         )
       ) {
-        return fail('RELEASE_REJECTED', 422, 'KYC/TransFi attestation invalid');
+        return fail(
+          'RELEASE_REJECTED',
+          422,
+          'KYC/TransFi attestation invalid',
+          'ATTESTATION_INVALID',
+        );
       }
 
       // Step 3 — resolve the release-authority key + RPC/mint (opt-in-off guards).
@@ -188,7 +209,12 @@ export const solanaEscrowReleaseRoute: FastifyPluginAsync = async (app) => {
       try {
         authorityKeypair = getReleaseAuthorityKeypair();
       } catch {
-        return fail('RELEASE_NOT_ENABLED', 501, 'Escrow release is not enabled');
+        return fail(
+          'RELEASE_NOT_ENABLED',
+          501,
+          'Escrow release is not enabled',
+          'RELEASE_AUTHORITY_UNAVAILABLE',
+        );
       }
       const rpcUrl = env.SOLANA_RPC_URL;
       const usdcMint = env.SOLANA_USDC_MINT;
@@ -198,7 +224,12 @@ export const solanaEscrowReleaseRoute: FastifyPluginAsync = async (app) => {
         usdcMint === undefined ||
         usdcMint.length === 0
       ) {
-        return fail('RELEASE_NOT_ENABLED', 501, 'Escrow release is not enabled');
+        return fail(
+          'RELEASE_NOT_ENABLED',
+          501,
+          'Escrow release is not enabled',
+          rpcUrl === undefined || rpcUrl.length === 0 ? 'RPC_URL_UNSET' : 'USDC_MINT_UNSET',
+        );
       }
       const network = rpcUrl.includes('mainnet') ? 'solana:mainnet' : 'solana:devnet';
 
@@ -211,18 +242,21 @@ export const solanaEscrowReleaseRoute: FastifyPluginAsync = async (app) => {
         programId: env.SOLANA_ESCROW_PROGRAM_ID,
       });
       if (!read.ok) {
-        return fail('RELEASE_REJECTED', 422, 'Escrow state unreadable');
+        // ⚠️ `read.reason` es lo único que separa "el escrow no existe"
+        // (`ESCROW_STATE_NOT_FOUND`) de "el RPC se cayó" (`ESCROW_READ_FAILED`).
+        // Sin él las dos salen como el mismo 422 'Escrow state unreadable'.
+        return fail('RELEASE_REJECTED', 422, 'Escrow state unreadable', read.reason);
       }
       const { state, vaultAmount } = read;
 
       // AC-5: an already-Released escrow is a replay → 409 (never re-sign).
       if (state.status === 'Released') {
-        return fail('RELEASE_REPLAY', 409, 'Escrow already released');
+        return fail('RELEASE_REPLAY', 409, 'Escrow already released', 'STATE_ALREADY_RELEASED');
       }
 
       const verified = verifyVault(state, vaultAmount, usdcMint);
       if (!verified.ok) {
-        return fail('RELEASE_REJECTED', 422, 'Vault verification failed');
+        return fail('RELEASE_REJECTED', 422, 'Vault verification failed', verified.reason);
       }
 
       // Step 5 — dedup claim (AC-5 / CD-9, fail-closed, mutate-first).
@@ -236,10 +270,15 @@ export const solanaEscrowReleaseRoute: FastifyPluginAsync = async (app) => {
         app.log,
       );
       if (!claim.ok) {
-        return fail('RELEASE_STORE_UNAVAILABLE', 500, 'Release dedup store unavailable');
+        return fail(
+          'RELEASE_STORE_UNAVAILABLE',
+          500,
+          'Release dedup store unavailable',
+          'DEDUP_STORE_UNAVAILABLE',
+        );
       }
       if (!claim.claimed) {
-        return fail('RELEASE_REPLAY', 409, 'Release already claimed');
+        return fail('RELEASE_REPLAY', 409, 'Release already claimed', 'DEDUP_ALREADY_CLAIMED');
       }
 
       // Step 6 — build the release tx from ON-CHAIN state (beneficiary from state, CD-4).
@@ -254,7 +293,12 @@ export const solanaEscrowReleaseRoute: FastifyPluginAsync = async (app) => {
           escrowProgramId: env.SOLANA_ESCROW_PROGRAM_ID,
         });
       } catch {
-        return fail('RELEASE_BROADCAST_EXPIRED', 409, 'Could not fetch a fresh blockhash');
+        return fail(
+          'RELEASE_BROADCAST_EXPIRED',
+          409,
+          'Could not fetch a fresh blockhash',
+          'BLOCKHASH_FETCH_FAILED',
+        );
       }
 
       // Step 7 — CR-1 (release) + co-sign + broadcast (HU-SOL-14 primitive, CD-11).
@@ -282,15 +326,25 @@ export const solanaEscrowReleaseRoute: FastifyPluginAsync = async (app) => {
       // Step 8 — map the primitive error code → HTTP (no echo of the tx/state).
       switch (result.code) {
         case 'SPONSOR_UNSUPPORTED_TX':
-          return fail('RELEASE_REJECTED', 422, 'Unsupported transaction (versioned)');
+          return fail(
+            'RELEASE_REJECTED',
+            422,
+            'Unsupported transaction (versioned)',
+            result.reason,
+          );
         case 'SPONSOR_BROADCAST_EXPIRED':
-          return fail('RELEASE_BROADCAST_EXPIRED', 409, 'Transaction blockhash expired');
+          return fail(
+            'RELEASE_BROADCAST_EXPIRED',
+            409,
+            'Transaction blockhash expired',
+            result.reason,
+          );
         case 'SPONSOR_BROADCAST_FAILED':
-          return fail('RELEASE_BROADCAST_FAILED', 502, 'Broadcast failed');
+          return fail('RELEASE_BROADCAST_FAILED', 502, 'Broadcast failed', result.reason);
         case 'SPONSOR_DAILY_CAP':
         case 'SPONSOR_REJECTED':
         default:
-          return fail('RELEASE_REJECTED', 422, 'Transaction rejected by validation');
+          return fail('RELEASE_REJECTED', 422, 'Transaction rejected by validation', result.reason);
       }
     },
   );

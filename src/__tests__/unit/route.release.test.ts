@@ -9,6 +9,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Writable } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 import * as web3 from '@solana/web3.js';
 import { Keypair } from '@solana/web3.js';
@@ -139,14 +140,50 @@ function validBody(overrides: Record<string, unknown> = {}) {
   };
 }
 
-async function buildReleaseApp(): Promise<FastifyInstance> {
+class CaptureStream extends Writable {
+  readonly chunks: string[] = [];
+  override _write(chunk: Buffer | string, _enc: BufferEncoding, cb: () => void): void {
+    this.chunks.push(chunk.toString());
+    cb();
+  }
+  text(): string {
+    return this.chunks.join('');
+  }
+}
+
+/**
+ * ⚠️ `vitest.config.ts:9` fija `LOG_LEVEL: 'silent'` para toda la suite, así que
+ * un `CaptureStream` no recibe NADA salvo que se suba el nivel a propósito. Sin
+ * esto, un `expect(cap.text()).toContain(...)` mide el vacío y falla por la razón
+ * equivocada — y su gemelo `not.toContain` pasaría sin probar nada.
+ */
+function withLogs<T>(fn: () => Promise<T>): Promise<T> {
+  const saved = process.env.LOG_LEVEL;
+  process.env.LOG_LEVEL = 'warn';
+  const restore = () => {
+    if (saved === undefined) delete process.env.LOG_LEVEL;
+    else process.env.LOG_LEVEL = saved;
+  };
+  return fn().then(
+    (v) => {
+      restore();
+      return v;
+    },
+    (e: unknown) => {
+      restore();
+      throw e;
+    },
+  );
+}
+
+async function buildReleaseApp(capture?: CaptureStream): Promise<FastifyInstance> {
   const { resetRedisClientForTests } = await import('../../infra/redis.js');
   const { resetReleaseAuthorityForTesting } =
     await import('../../infra/solana-release-authority.js');
   resetRedisClientForTests();
   resetReleaseAuthorityForTesting();
   const { buildApp } = await import('../../app.js');
-  return buildApp({ skipDomainCheck: true });
+  return buildApp({ loggerDestination: capture, skipDomainCheck: true });
 }
 
 async function inject(app: FastifyInstance, body: unknown) {
@@ -287,6 +324,50 @@ describe('POST /solana/escrow/release', () => {
     expect(second.statusCode).toBe(409);
     // cosign NOT re-invoked (still 1 total).
     expect(h.cosignSpy).toHaveBeenCalledTimes(1);
+  });
+
+  // ── ★ observabilidad del 422 ────────────────────────────────────────────────
+  //
+  // ⚠️ TF6d de arriba prueba que un escrow ilegible NO se firma, y eso está bien,
+  // pero deja el 422 mudo: `ESCROW_STATE_NOT_FOUND` ("ese escrow no existe") y
+  // `ESCROW_READ_FAILED` ("el RPC se cayó y no pude preguntar") salían con el
+  // MISMO `error_code: RELEASE_REJECTED` y el MISMO 'Escrow state unreadable'.
+  // Para un operador son diagnósticos opuestos: uno es un bug del cliente, el
+  // otro es infraestructura caída. Estos dos tests fijan que el motivo va al log
+  // y NO a la respuesta.
+
+  it('★ el 422 de escrow ilegible escribe el motivo del RPC en el log', async () => {
+    h.readResult.current = { ok: false, reason: 'ESCROW_READ_FAILED' };
+    const cap = new CaptureStream();
+    const res = await withLogs(async () => {
+      app = await buildReleaseApp(cap);
+      return inject(app, validBody());
+    });
+
+    expect(res.statusCode).toBe(422);
+    expect(h.cosignSpy).not.toHaveBeenCalled();
+    expect(cap.text().length).toBeGreaterThan(0);
+    expect(cap.text()).toContain('ESCROW_READ_FAILED');
+    // no-oracle: el cliente ve el mensaje genérico y nada más.
+    const body = JSON.parse(res.body) as { error: { message: string } };
+    expect(body.error.message).toBe('Escrow state unreadable');
+    expect(res.body).not.toContain('ESCROW_READ_FAILED');
+  });
+
+  it('★ el escrow inexistente se distingue del RPC caído EN EL LOG (mismo 422 para el cliente)', async () => {
+    h.readResult.current = { ok: false, reason: 'ESCROW_STATE_NOT_FOUND' };
+    const cap = new CaptureStream();
+    const res = await withLogs(async () => {
+      app = await buildReleaseApp(cap);
+      return inject(app, validBody());
+    });
+
+    expect(res.statusCode).toBe(422);
+    expect(cap.text()).toContain('ESCROW_STATE_NOT_FOUND');
+    // El marcador que NO corresponde no aparece: si `fail()` hardcodeara una
+    // etiqueta fija en vez de propagar `read.reason`, este assert lo caza.
+    expect(cap.text()).not.toContain('ESCROW_READ_FAILED');
+    expect(res.body).not.toContain('ESCROW_STATE_NOT_FOUND');
   });
 });
 
