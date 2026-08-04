@@ -57,6 +57,9 @@ const h = vi.hoisted(() => ({
       | { ok: true; claimed: false }
       | { ok: false },
   },
+  stealResult: {
+    current: { ok: true, stolen: false } as { ok: boolean; stolen: boolean },
+  },
 }));
 
 vi.mock('../../methods/solana-sponsor/broadcast.js', async (importActual) => {
@@ -82,6 +85,18 @@ vi.mock('../../infra/solana-escrow-release-dedup.js', () => ({
   claimEscrowRelease: (...args: unknown[]) => {
     void args;
     return Promise.resolve(h.claimResult.current);
+  },
+  // Lease del claim: por defecto NO se puede tomar (lease vigente), que es lo que
+  // deja los TF7 de acá abajo midiendo lo mismo que antes — un claim existente y
+  // VIVO sigue siendo un 409 sin firma. La recuperación del claim trabado se prueba
+  // en route.release.lease.test.ts, contra el store real en memoria.
+  stealStaleReleaseClaim: (...args: unknown[]) => {
+    void args;
+    return Promise.resolve(h.stealResult.current);
+  },
+  markReleaseSigned: (...args: unknown[]) => {
+    void args;
+    return Promise.resolve({ ok: true });
   },
 }));
 
@@ -204,6 +219,7 @@ describe('POST /solana/escrow/release', () => {
     h.cosignSpy.mockReset();
     h.readResult.current = { ok: true, state: depositedState(), vaultAmount: '3000000' };
     h.claimResult.current = { ok: true, claimed: true };
+    h.stealResult.current = { ok: true, stolen: false };
     // No network: the happy path's getLatestBlockhash is stubbed.
     vi.spyOn(web3.Connection.prototype, 'getLatestBlockhash').mockResolvedValue({
       blockhash: Keypair.generate().publicKey.toBase58(),

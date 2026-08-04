@@ -206,6 +206,20 @@ export const EnvSchema = z
     // Whitelist programId for the `deposit` ix (CD-4). Public on-chain address.
     // Default derived from `escrowIdl.address` — the SINGLE source (CD-15).
     SOLANA_ESCROW_PROGRAM_ID: z.string().min(1).default(ESCROW_PROGRAM_ID_DEFAULT),
+    // Lease de un claim de `facilitator_solana_release_claims`. Un claim más viejo
+    // que esto puede ser TOMADO por un reintento; antes no había expiración de
+    // ninguna clase y un fallo posterior al INSERT (un hipo del RPC alcanzaba)
+    // dejaba el escrow irreleaseable para siempre.
+    //
+    // ⚠️ EL PISO ES DE SEGURIDAD, NO ESTÉTICO — no lo bajes. El robo del claim es
+    // seguro porque el lease se re-ancla en el instante de la FIRMA y supera la
+    // vida de un blockhash (~150 slots ≈ 60-90 s): recién entonces está probado
+    // que la tx de la tentativa anterior YA NO PUEDE aterrizar. Un lease por
+    // debajo de esa vida autorizaría un segundo broadcast mientras el primero
+    // todavía puede entrar — el bug contrario, y peor: pagaría dos veces.
+    // Por eso el mínimo es 120 s aunque el de payout (SOLANA_PAYOUT_LEASE_MS,
+    // que además tiene la firma persistida como prueba) sea 1 s.
+    SOLANA_ESCROW_RELEASE_LEASE_MS: z.coerce.number().int().min(120000).default(180000),
     // ComputeBudget caps (AC-4 / CD-5). A tx WITHOUT a SetComputeUnitLimit is NOT
     // rejected outright: CR-1 assumes the runtime default (`200_000 * business ix`)
     // and rejects only if THAT exceeds this cap — so 1 ix (200 000) passes and 2 ix
