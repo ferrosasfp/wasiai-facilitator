@@ -75,7 +75,7 @@ vi.mock('../../core/audit.js', () => {
 // ─── ioredis mock (copied verbatim from routes.verify.test.ts) ─────────────
 vi.mock('ioredis', () => {
   const constructorSpy = vi.fn();
-  const quitSpy = vi.fn<[], Promise<'OK'>>(() => Promise.resolve('OK'));
+  const quitSpy = vi.fn<() => Promise<'OK'>>(() => Promise.resolve('OK'));
   const store = new Map<string, string>();
   const setSpy = vi.fn(async (key: string, value: string, _mode: string, _ttl: number) => {
     store.set(key, value);
@@ -202,6 +202,7 @@ function makeFakeAdapter(
     settle: settleImpl as ChainAdapter['settle'],
     getPublicClient: vi.fn() as unknown as ChainAdapter['getPublicClient'],
     getWalletClient: vi.fn() as unknown as ChainAdapter['getWalletClient'],
+    probeRpc: vi.fn(async (): Promise<void> => undefined),
   };
 }
 
@@ -214,7 +215,11 @@ function makeEnv(overrides: Partial<EnvConfig> = {}): EnvConfig {
     REDIS_URL: 'redis://localhost:6379/0',
     REDIS_DB: 0,
     ...overrides,
-  };
+    // Deliberately partial (repo idiom, cf. routes.settle.failopen.test.ts): this
+    // fixture sets only the fields the unit under test reads. The cast is what lets
+    // it stand in for EnvConfig — every field NOT listed above reaches the code as
+    // `undefined` even though EnvConfig declares it required.
+  } as EnvConfig;
 }
 
 async function buildAppWithAdapter(

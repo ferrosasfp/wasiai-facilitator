@@ -386,10 +386,13 @@ describe('@fastify/rate-limit integration (WFAC-40)', () => {
   it('T-RL-15 / CD-11: "RATE_LIMITED" is NOT part of X402ErrorCode union (compile-time)', async () => {
     const types = await import('../../core/types.js');
     // Runtime sanity: the X402ErrorCode type is a TS-only union so we can't
-    // directly assert its contents. The type-level assertion below (with
-    // @ts-expect-error) is the real test — if someone extends the union
-    // with 'RATE_LIMITED', the comment's directive becomes a compile error.
+    // directly assert its contents. The type-level assertion below is the real
+    // test — if someone adds 'RATE_LIMITED' to the union, the assignment stops
+    // erroring and the directive on it becomes unused (TS2578).
     //
+    // NOTE: do not start a prose line with the bare directive token; TS parses
+    // any `//` line beginning with it as a real directive (that mistake used to
+    // sit on the line above and produced a spurious TS2578 of its own).
     // @ts-expect-error — RATE_LIMITED MUST NOT be assignable to X402ErrorCode.
     const _bad: X402ErrorCode = 'RATE_LIMITED';
     void _bad;

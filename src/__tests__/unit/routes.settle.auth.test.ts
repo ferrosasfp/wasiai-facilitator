@@ -46,7 +46,7 @@ vi.mock('../../core/audit.js', () => {
 // ─── ioredis mock ───────────────────────────────────────────────────────────
 vi.mock('ioredis', () => {
   const constructorSpy = vi.fn();
-  const quitSpy = vi.fn<[], Promise<'OK'>>(() => Promise.resolve('OK'));
+  const quitSpy = vi.fn<() => Promise<'OK'>>(() => Promise.resolve('OK'));
   const store = new Map<string, string>();
   const setSpy = vi.fn(async (key: string, value: string) => {
     store.set(key, value);
@@ -165,6 +165,7 @@ function makeFakeAdapter(
     settle: (impls.settle ?? vi.fn()) as ChainAdapter['settle'],
     getPublicClient: vi.fn() as unknown as ChainAdapter['getPublicClient'],
     getWalletClient: vi.fn() as unknown as ChainAdapter['getWalletClient'],
+    probeRpc: vi.fn(async (): Promise<void> => undefined),
   };
 }
 

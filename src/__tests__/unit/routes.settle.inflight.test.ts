@@ -25,7 +25,7 @@ import type { ChainAdapter, SettleParams } from '../../chains/types.js';
 import type * as IdempotencyModule from '../../core/idempotency.js';
 
 // ─── core/idempotency.js partial mock — control the in-flight lock branch ──
-const lockStateSpy = vi.fn<[], 'acquired' | 'held' | 'skipped'>(() => 'acquired');
+const lockStateSpy = vi.fn<() => 'acquired' | 'held' | 'skipped'>(() => 'acquired');
 const releaseSpy = vi.fn(async () => undefined);
 
 vi.mock('../../core/idempotency.js', async (importOriginal) => {
@@ -157,6 +157,7 @@ function makeFakeAdapter(
     settle: settleImpl as ChainAdapter['settle'],
     getPublicClient: vi.fn() as unknown as ChainAdapter['getPublicClient'],
     getWalletClient: vi.fn() as unknown as ChainAdapter['getWalletClient'],
+    probeRpc: vi.fn(async (): Promise<void> => undefined),
   };
 }
 

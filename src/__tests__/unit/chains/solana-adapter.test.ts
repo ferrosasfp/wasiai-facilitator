@@ -366,6 +366,7 @@ function makeEvmMock(chainIdNum: number): ChainAdapter {
     })),
     getPublicClient: vi.fn(() => ({}) as never),
     getWalletClient: vi.fn(() => ({}) as never),
+    probeRpc: vi.fn(async (): Promise<void> => undefined),
   };
 }
 

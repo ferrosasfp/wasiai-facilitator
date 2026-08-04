@@ -10,6 +10,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type { Mock } from 'vitest';
+import type { Logger } from 'pino';
 import type { BuildLedgerEntryInput } from '../../core/ledger.js';
 
 // ─── infra/supabase.js mock ────────────────────────────────────────────────
@@ -28,11 +30,14 @@ vi.mock('../../infra/supabase.js', () => {
   };
 });
 
+// Mocks typed against pino's real `LogFn` signatures so the double is
+// assignable to `LedgerLogger` (= Pick<Logger, 'warn' | 'debug'>). A bare
+// `vi.fn()` is `Mock<Procedure>` and does NOT satisfy pino's overloads.
 function makeFakeLogger(): {
-  warn: ReturnType<typeof vi.fn>;
-  debug: ReturnType<typeof vi.fn>;
+  warn: Mock<Logger['warn']>;
+  debug: Mock<Logger['debug']>;
 } {
-  return { warn: vi.fn(), debug: vi.fn() };
+  return { warn: vi.fn<Logger['warn']>(), debug: vi.fn<Logger['debug']>() };
 }
 
 function successInput(): BuildLedgerEntryInput {

@@ -13,7 +13,14 @@ import type * as Web3 from '@solana/web3.js';
 const h = vi.hoisted(() => ({
   isBlockhashValidImpl: vi.fn(async (_bh: string) => ({ value: true })),
   sendRawTransactionImpl: vi.fn(async (_raw: Uint8Array) => `SIG_${Math.random().toString(16)}`),
-  confirmTransactionImpl: vi.fn(async (_sig: string) => ({ value: { err: null } })),
+  // `err` is annotated `unknown` (not inferred from the `null` default): the
+  // failure tests override this with `{ value: { err: 'InstructionError' } }`,
+  // which the inferred `{ err: null }` type would have rejected.
+  confirmTransactionImpl: vi.fn(
+    async (_sig: string): Promise<{ value: { err: unknown } }> => ({
+      value: { err: null },
+    }),
+  ),
   active: { current: 0, max: 0 },
 }));
 

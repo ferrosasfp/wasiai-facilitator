@@ -96,6 +96,7 @@ function makeFakeAdapter(
     settle: settleImpl as ChainAdapter['settle'],
     getPublicClient: vi.fn() as unknown as ChainAdapter['getPublicClient'],
     getWalletClient: vi.fn() as unknown as ChainAdapter['getWalletClient'],
+    probeRpc: vi.fn(async (): Promise<void> => undefined),
   };
 }
 
@@ -215,7 +216,11 @@ describe('settleCore (WFAC-21 W1)', () => {
   });
 
   it('T-C7: passes VerifyRequest → SettleParams reference unchanged to adapter.settle', async () => {
-    const settleSpy = vi.fn(async () => VALID_SETTLE_RESULT);
+    // The spy MUST declare the parameter it is inspected for: a zero-arg
+    // `vi.fn(async () => ...)` types `mock.calls[0]` as the empty tuple, so
+    // `calls[0][0]` is `undefined` at the type level and the assertions below
+    // would be checking a value TypeScript believes cannot exist.
+    const settleSpy = vi.fn(async (_params: SettleParams) => VALID_SETTLE_RESULT);
     const adapter = makeFakeAdapter(2368, settleSpy);
     chainRegistry.register(adapter);
 
@@ -445,6 +450,7 @@ describe('SettlementAdapter (AC-4)', () => {
           ok: false,
           error: { code: 'CHAIN_UNAVAILABLE', message: 'stub', http: 503 },
         }),
+      probeRpc: (): Promise<void> => Promise.resolve(),
     };
     expect(typeof verifyOnly.verify).toBe('function');
     expect(typeof verifyOnly.settle).toBe('function');

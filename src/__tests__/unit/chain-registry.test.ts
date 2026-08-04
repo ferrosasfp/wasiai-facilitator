@@ -25,6 +25,7 @@ function makeMockAdapter(chainIdNum: number, name = `Chain ${chainIdNum}`): Chai
     })),
     getPublicClient: vi.fn(() => ({}) as never),
     getWalletClient: vi.fn(() => ({}) as never),
+    probeRpc: vi.fn(async (): Promise<void> => undefined),
   };
 }
 

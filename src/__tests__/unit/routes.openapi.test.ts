@@ -72,7 +72,11 @@ function makeEnv(overrides: Partial<EnvConfig> = {}): EnvConfig {
     SHUTDOWN_GRACE_MS: 10000,
     REDIS_DB: 0,
     ...overrides,
-  };
+    // Deliberately partial (repo idiom, cf. routes.settle.failopen.test.ts): this
+    // fixture sets only the fields the unit under test reads. The cast is what lets
+    // it stand in for EnvConfig — every field NOT listed above reaches the code as
+    // `undefined` even though EnvConfig declares it required.
+  } as EnvConfig;
 }
 
 async function buildTestApp(): Promise<FastifyInstance> {

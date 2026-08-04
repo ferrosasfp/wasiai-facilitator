@@ -9,6 +9,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type { Mock } from 'vitest';
+import type { Logger } from 'pino';
 import type { EnvConfig } from '../../infra/env.js';
 
 // ─── @supabase/supabase-js mock ────────────────────────────────────────────
@@ -35,18 +37,21 @@ vi.mock('@supabase/supabase-js', () => {
   };
 });
 
-// Fake logger — plain vi.fn() so we can assert calls + arguments.
+// Fake logger — vi.fn() spies so we can assert calls + arguments.
+// Mocks typed against pino's real `LogFn` signatures so the double is
+// assignable to `SupabaseLogger` (= Pick<Logger, 'info'|'error'|'warn'|'debug'>).
+// A bare `vi.fn()` is `Mock<Procedure>` and does NOT satisfy pino's overloads.
 function makeFakeLogger(): {
-  info: ReturnType<typeof vi.fn>;
-  error: ReturnType<typeof vi.fn>;
-  warn: ReturnType<typeof vi.fn>;
-  debug: ReturnType<typeof vi.fn>;
+  info: Mock<Logger['info']>;
+  error: Mock<Logger['error']>;
+  warn: Mock<Logger['warn']>;
+  debug: Mock<Logger['debug']>;
 } {
   return {
-    info: vi.fn(),
-    error: vi.fn(),
-    warn: vi.fn(),
-    debug: vi.fn(),
+    info: vi.fn<Logger['info']>(),
+    error: vi.fn<Logger['error']>(),
+    warn: vi.fn<Logger['warn']>(),
+    debug: vi.fn<Logger['debug']>(),
   };
 }
 
@@ -61,7 +66,11 @@ function makeEnv(overrides: Partial<EnvConfig> = {}): EnvConfig {
     SUPABASE_URL: 'https://example.supabase.co',
     SUPABASE_SERVICE_KEY: 'sb_service_abcdef1234567890xyz',
     ...overrides,
-  };
+    // Deliberately partial (repo idiom, cf. routes.settle.failopen.test.ts): this
+    // fixture sets only the fields the unit under test reads. The cast is what lets
+    // it stand in for EnvConfig — every field NOT listed above reaches the code as
+    // `undefined` even though EnvConfig declares it required.
+  } as EnvConfig;
 }
 
 describe('redactSupabaseKey (AC-10 / CD-2)', () => {

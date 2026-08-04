@@ -36,7 +36,7 @@ vi.mock('../../../core/audit.js', () => {
 
 // ─── ioredis mock ──────────────────────────────────────────────────────────
 vi.mock('ioredis', () => {
-  const quitSpy = vi.fn<[], Promise<'OK'>>(() => Promise.resolve('OK'));
+  const quitSpy = vi.fn<() => Promise<'OK'>>(() => Promise.resolve('OK'));
   class RedisMock {
     constructor() {}
     on(): this {
@@ -77,7 +77,7 @@ function makeEnv(overrides: Partial<EnvConfig> = {}): EnvConfig {
  */
 function makeAdapterWithBreaker(chainIdNum: number, name: string) {
   let state: 'CLOSED' | 'OPEN' | 'HALF_OPEN' = 'CLOSED';
-  const setLoggerSpy = vi.fn<[Logger], void>();
+  const setLoggerSpy = vi.fn<(l: Logger) => void>();
   const adapter: ChainAdapter & {
     setLogger: (l: Logger) => void;
     getBreakerState: () => 'CLOSED' | 'OPEN' | 'HALF_OPEN';
@@ -95,6 +95,7 @@ function makeAdapterWithBreaker(chainIdNum: number, name: string) {
     settle: vi.fn() as unknown as ChainAdapter['settle'],
     getPublicClient: vi.fn() as unknown as ChainAdapter['getPublicClient'],
     getWalletClient: vi.fn() as unknown as ChainAdapter['getWalletClient'],
+    probeRpc: vi.fn(async (): Promise<void> => undefined),
     setLogger: (logger) => {
       setLoggerSpy(logger);
     },
