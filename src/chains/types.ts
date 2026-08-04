@@ -82,10 +82,12 @@ export type AssetTransferMethod = 'eip3009' | 'permit2' | 'erc7710';
  * so a request only succeeds when the transfer already exists on-chain at
  * finalized commitment.
  *
- * This facilitator DOES originate SPL transfers, but on the dedicated non-x402
- * route `POST /solana/payout` (`src/routes/solana-payout.ts`, facilitator as
- * TREASURER), never on the `/verify` + `/settle` path this literal describes
- * (facilitator as WITNESS).
+ * This facilitator DOES sign and broadcast SPL movements, but on dedicated
+ * non-x402 routes — today `POST /solana/payout` (`src/routes/solana-payout.ts`),
+ * `POST /solana/sponsor` (`src/routes/solana-sponsor.ts`) and
+ * `POST /solana/escrow/release` (`src/routes/solana-escrow.ts`); facilitator as
+ * TREASURER. Never on the `/verify` + `/settle` path this literal describes
+ * (facilitator as WITNESS): that path only reads an already-broadcast tx.
  *
  * This string is a PUBLIC CONTRACT served by `GET /supported`: renaming it
  * breaks integrators that branch on `chains[].methods`. Pinned verbatim by

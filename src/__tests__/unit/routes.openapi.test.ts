@@ -374,6 +374,44 @@ describe('GET /openapi.json', () => {
       expect(description).not.toMatch(/every chain|always/i);
     }
   });
+
+  it('T-O-DRIFT-2: the top-level `methods` union is described as a label, not as a value to put on the wire', () => {
+    // Third edited description (CR BLQ-BAJO-1). The guard above cannot cover
+    // it: this text legitimately says "every chain's `methods` array" (it IS
+    // the union), so /every chain|always/ would match its own honest wording —
+    // which is exactly why the false sentence landed here and nowhere else.
+    //
+    // The assert that applies here is the one that sentence broke. There is no
+    // wire slot for `spl-token-transfer-finalized`: the only documented one is
+    // `AcceptedExtra.assetTransferMethod` (enum eip3009/permit2/erc7710,
+    // `required`, `additionalProperties: false`), and the Solana branch of
+    // `src/core/schemas.ts` is `.strict()` with no `extra`, so a body carrying
+    // it is rejected by Zod. `src/core/verify.ts` dispatches on
+    // `accepted.network`, which is what the description must point at.
+    const endpointDescription = (spec.paths['/supported']!.get as { description?: string })
+      .description;
+    const fieldDescription = (
+      spec.components.schemas.ChainSupportedItem!.properties as Record<
+        string,
+        Record<string, unknown>
+      >
+    ).methods!.description as string | undefined;
+    const unionDescription = (
+      spec.components.schemas.SupportedResponse!.properties as Record<
+        string,
+        Record<string, unknown>
+      >
+    ).methods!.description as string | undefined;
+
+    expect(typeof unionDescription).toBe('string');
+    expect(unionDescription).toMatch(/accepted\.network/);
+    // Catches the reintroduction of an instruction to transmit the value
+    // ("which method to send" / "submit this method"), in the three edited
+    // descriptions at once.
+    for (const description of [endpointDescription, fieldDescription, unionDescription]) {
+      expect(description).not.toMatch(/\b(send|sends|sending|submit|submits)\b/i);
+    }
+  });
 });
 
 // ─── helpers ────────────────────────────────────────────────────────────────
