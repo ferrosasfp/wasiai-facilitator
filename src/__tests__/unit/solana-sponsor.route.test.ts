@@ -772,4 +772,70 @@ describe('POST /solana/sponsor', () => {
     const secretHead = Array.from(feePayerKp.secretKey.slice(0, 8)).join(',');
     expect(cap.text()).not.toContain(secretHead);
   });
+
+  // ── ★ observabilidad del 422 ────────────────────────────────────────────────
+  //
+  // ⚠️ EL AGUJERO QUE ESTOS DOS TESTS TAPAN, y por qué son DOS y no uno. El
+  // camino 403 ya pasaba su marcador a `fail()` (T-A1/T-A2 lo asertan); el 422
+  // no pasaba NADA, y es el que colapsa ~34 motivos distintos de `cr1.ts` +
+  // `broadcast.ts` en un solo `error_code: SPONSOR_REJECTED`. Consecuencia
+  // medible: un tope mal configurado en el deploy (`PRIORITY_FEE_ABOVE_MAX`) y
+  // una transacción corrupta (`BAD_DISCRIMINATOR`) producían logs IDÉNTICOS.
+  //
+  // Los dos tests tiran en direcciones opuestas a propósito: el primero exige
+  // que el motivo ESTÉ en el log, el segundo que NO esté en la respuesta. Sin el
+  // segundo, "arreglar" el primero metiendo el motivo en `error.message`
+  // quedaría verde y convertiría la ruta en un oráculo (CD-12).
+
+  it('★ el 422 del primitivo escribe el motivo del rechazo en el log', async () => {
+    // `PRIORITY_FEE_ABOVE_MAX` es el caso "mal configurado": el operador tiene
+    // que poder verlo sin adivinar. Va como literal (no importado) para que
+    // seguir el rename de una constante no lo vuelva vacuo.
+    h.cosignResult.current = {
+      ok: false,
+      code: 'SPONSOR_REJECTED',
+      reason: 'PRIORITY_FEE_ABOVE_MAX',
+    };
+    const cap = new CaptureStream();
+    const res = await withLogs(() => post(validBody(), cap));
+
+    expect(res.statusCode).toBe(422);
+    expect(errorCode(res.body)).toBe('SPONSOR_REJECTED');
+    // Precondición: el stream capturó ALGO (si no, el toContain de abajo mide
+    // el vacío y el test no prueba nada).
+    expect(cap.text().length).toBeGreaterThan(0);
+    expect(cap.text()).toContain('PRIORITY_FEE_ABOVE_MAX');
+  });
+
+  it('★ el 422 que corta en el parseo también escribe su motivo en el log', async () => {
+    // Otro sitio de 422, ANTES del primitivo: la tx no deserializa. Su motivo
+    // (`DESERIALIZE_FAILED`) sale de `parseSponsorTx`, no de `cosignAndBroadcast`,
+    // así que el test anterior no lo cubre.
+    const cap = new CaptureStream();
+    const res = await withLogs(() =>
+      post(validBody({ partialSignedTx: Buffer.from('deadbeef').toString('base64') }), cap),
+    );
+
+    expect(res.statusCode).toBe(422);
+    expect(cap.text().length).toBeGreaterThan(0);
+    expect(cap.text()).toContain('DESERIALIZE_FAILED');
+    expect(res.body).not.toContain('DESERIALIZE_FAILED');
+  });
+
+  it('★ no-oracle: el motivo del rechazo NUNCA viaja en la respuesta del 422', async () => {
+    h.cosignResult.current = {
+      ok: false,
+      code: 'SPONSOR_REJECTED',
+      reason: 'PRIORITY_FEE_ABOVE_MAX',
+    };
+    const res = await post(validBody());
+
+    expect(res.statusCode).toBe(422);
+    // El mensaje al cliente es el genérico, textual: si alguien lo interpola con
+    // el motivo (`...: ${result.reason}`) este assert cae antes que el siguiente.
+    const body = JSON.parse(res.body) as { error: { code: string; message: string } };
+    expect(body.error.message).toBe('Transaction rejected by validation');
+    // Y el motivo no aparece en NINGUNA parte del cuerpo (ni en un campo nuevo).
+    expect(res.body).not.toContain('PRIORITY_FEE_ABOVE_MAX');
+  });
 });
