@@ -3,6 +3,14 @@
 -- WKH-BLQ release-claim-lease — el claim del escrow release deja de ser PERMANENTE.
 -- Va contra bdwv (NUNCA caldz). Idempotente: safe to re-run.
 --
+-- 🔴 ORDEN: ESTA MIGRACION VA **ANTES** DE DESPLEGAR EL CODIGO DEL LEASE.
+-- Al reves rompe TODOS los releases: `markReleaseSigned` erra por columna
+-- inexistente -> SPONSOR_PERSIST_FAILED, y el `steal` tampoco puede correr, asi
+-- que cada escrow queda trabado en su primer intento. O sea: exactamente el bug
+-- que este arreglo viene a cerrar, disparado antes de tiempo y para todos.
+-- El `_down` avisaba del orden inverso; este `_up` no decia nada. Lo encontro el
+-- AR (BLQ-BAJO-1). Aplicada a bdwv el 2026-08-04, ANTES del merge del codigo.
+--
 -- QUE ARREGLA. `004` creo la tabla con UNIQUE(escrow_pda) y SIN ninguna nocion de
 -- expiracion, y la ruta escribe el claim ANTES de pedir blockhash / firmar / transmitir.
 -- Cualquier fallo posterior al INSERT (un hipo del RPC en getLatestBlockhash alcanza)
