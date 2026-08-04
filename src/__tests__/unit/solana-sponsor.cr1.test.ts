@@ -37,11 +37,22 @@ const TOKEN_PK = new PublicKey(TOKEN_PROGRAM_ID);
 const ATA_PK = new PublicKey(ASSOCIATED_TOKEN_PROGRAM_ID);
 const SYS_PK = new PublicKey(SYSTEM_PROGRAM_ID);
 
+/**
+ * El mint configurado (`SOLANA_USDC_MINT`) para toda la suite: el USDC de Circle
+ * en devnet, que es el que corre en producción. `buildDepositIx` lo usa por
+ * default, así que TODO vector que no hable del mint sigue midiendo lo suyo.
+ */
+const USDC_MINT_PK = new PublicKey(
+  // eslint-disable-next-line no-secrets/no-secrets -- mint USDC devnet de Circle (base58 público), no es un secreto.
+  '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU',
+);
+
 const CFG: Cr1Config = {
   escrowProgramId: ESCROW_PROGRAM_ID_DEFAULT,
   maxComputeUnits: 300_000,
   maxPriorityFeeMicroLamports: 50_000,
   maxFeeLamports: 100_000n,
+  usdcMint: USDC_MINT_PK.toBase58(),
 };
 
 function depositData(disc: readonly number[] = DEPOSIT_DISCRIMINATOR): Buffer {
@@ -60,6 +71,12 @@ interface IxOverrides {
   escrowState?: PublicKey;
   /** HU-SOL-20/R3 — additive: full ix-data override (to pin the `remittance_id`). */
   data?: Buffer;
+  /**
+   * Mint de la cuenta 1. El default es el CONFIGURADO: antes acá iba un pubkey al
+   * azar y la suite entera pasaba, que es exactamente el agujero que Check 4c
+   * cierra. Los vectores del mint lo pisan.
+   */
+  mint?: PublicKey;
 }
 
 function buildDepositIx(o: IxOverrides = {}): TransactionInstruction {
@@ -67,7 +84,7 @@ function buildDepositIx(o: IxOverrides = {}): TransactionInstruction {
   const reference = o.reference ?? Keypair.generate().publicKey;
   const keys: AccountMeta[] = [
     { pubkey: sender, isSigner: !o.breakSenderFlags, isWritable: !o.breakSenderFlags },
-    { pubkey: Keypair.generate().publicKey, isSigner: false, isWritable: false }, // mint
+    { pubkey: o.mint ?? USDC_MINT_PK, isSigner: false, isWritable: false }, // mint
     { pubkey: o.escrowState ?? Keypair.generate().publicKey, isSigner: false, isWritable: true }, // escrow_state
     { pubkey: Keypair.generate().publicKey, isSigner: false, isWritable: true }, // vault
     { pubkey: Keypair.generate().publicKey, isSigner: false, isWritable: true }, // sender_ata
@@ -300,6 +317,90 @@ describe('CR-1 validateDepositForSponsor', () => {
     const r = validateDepositForSponsor(tx, feePayer, CFG);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe('FEE_PAYER_MISMATCH');
+  });
+
+  // ── Check 4c — el mint del depósito ─────────────────────────────────────────
+  //
+  // El programa on-chain acepta cualquier mint a propósito y delega el control acá
+  // (doc de la cuenta `mint` en escrow-idl.ts). Estos vectores son ese control.
+
+  it('T-MINT1: deposit con el mint configurado → ok (camino de la demo)', () => {
+    const tx = buildDepositTx({ feePayer, mint: USDC_MINT_PK });
+    const r = validateDepositForSponsor(tx, feePayer, CFG);
+    expect(r.ok).toBe(true);
+  });
+
+  it('★ T-MINT2: deposit con un mint del atacante → reject MINT_MISMATCH, NO se firma', () => {
+    // El ataque completo: cliente modificado que arma el `deposit` con un mint que
+    // él acuñó. Guard A/B lo dejan pasar (el mensaje de patrocinio se arma desde la
+    // tx, así que la persona firma ese mint), y el único que puede negarse es CR-1.
+    const tx = buildDepositTx({ feePayer, mint: Keypair.generate().publicKey });
+    const r = validateDepositForSponsor(tx, feePayer, CFG);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe('MINT_MISMATCH');
+  });
+
+  it('★ T-MINT3: sin `usdcMint` en la config → reject, NUNCA pasa de largo', () => {
+    // La decisión explícita ante la env ausente: fallar cerrado. Un guard que se
+    // apaga solo cuando le falta la config es indistinguible de no tenerlo.
+    const r = validateDepositForSponsor(buildDepositTx({ feePayer }), feePayer, {
+      ...CFG,
+      usdcMint: undefined,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe('USDC_MINT_NOT_CONFIGURED');
+  });
+
+  it('T-MINT3b: `usdcMint` en "" (env seteada vacía) → mismo rechazo que ausente', () => {
+    const r = validateDepositForSponsor(buildDepositTx({ feePayer }), feePayer, {
+      ...CFG,
+      usdcMint: '',
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe('USDC_MINT_NOT_CONFIGURED');
+  });
+
+  it('T-MINT4: `usdcMint` que no es un pubkey base58 → reject, sin tirar excepción', () => {
+    const r = validateDepositForSponsor(buildDepositTx({ feePayer }), feePayer, {
+      ...CFG,
+      usdcMint: 'no-es-un-pubkey-!!!',
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe('BAD_USDC_MINT_CONFIG');
+  });
+
+  /**
+   * ⚠️ Este vector existe SÓLO para clavar la POSICIÓN de la cuenta, que es un
+   * dato que se puede equivocar en silencio: el orden real del `deposit` es
+   * [sender, mint, escrow_state, vault, sender_ata, token_program, ata_program,
+   * system_program] (escrow-idl.ts, ix `deposit`). Acá el mint configurado está
+   * en la cuenta 3 (`vault`) y en la 1 hay uno del atacante: si el índice se
+   * corriera a 3, el ataque pasaría y este test se pone rojo con `ok: true`.
+   */
+  it('★ T-MINT5: el mint bueno en la posición equivocada NO alcanza', () => {
+    const attackerMint = Keypair.generate().publicKey;
+    const sender = Keypair.generate().publicKey;
+    const ix = new TransactionInstruction({
+      programId: ESCROW_PK,
+      keys: [
+        { pubkey: sender, isSigner: true, isWritable: true },
+        { pubkey: attackerMint, isSigner: false, isWritable: false }, // 1 mint
+        { pubkey: Keypair.generate().publicKey, isSigner: false, isWritable: true }, // 2 escrow_state
+        { pubkey: USDC_MINT_PK, isSigner: false, isWritable: true }, // 3 vault ← el bueno, mal puesto
+        { pubkey: Keypair.generate().publicKey, isSigner: false, isWritable: true }, // 4 sender_ata
+        { pubkey: TOKEN_PK, isSigner: false, isWritable: false },
+        { pubkey: ATA_PK, isSigner: false, isWritable: false },
+        { pubkey: SYS_PK, isSigner: false, isWritable: false },
+        { pubkey: Keypair.generate().publicKey, isSigner: false, isWritable: false }, // reference
+      ],
+      data: depositData(),
+    });
+    const tx = new Transaction().add(ix);
+    tx.feePayer = feePayer;
+    tx.recentBlockhash = Keypair.generate().publicKey.toBase58();
+    const r = validateDepositForSponsor(tx, feePayer, CFG);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe('MINT_MISMATCH');
   });
 });
 

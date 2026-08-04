@@ -246,7 +246,11 @@ function applySponsorEnv(): void {
   process.env.SOLANA_FEE_PAYER_SPONSOR_ENABLED = 'true';
   process.env.SOLANA_FEE_PAYER_PRIVATE_KEY = KEY_JSON;
   process.env.SOLANA_RPC_URL = 'http://mock-rpc';
-  process.env.SOLANA_USDC_MINT = 'So11111111111111111111111111111111111111112';
+  // ⚠️ TIENE que ser el MISMO mint que `buildValidSponsorTx` pone en la ix: desde
+  // que CR-1 clava el mint (cr1.ts, Check 4c), un valor distinto acá haría que
+  // todo depósito de este archivo se rechace por MINT_MISMATCH. Antes eran dos
+  // pubkeys distintos y no pasaba nada, porque nadie los comparaba.
+  process.env.SOLANA_USDC_MINT = MINT.toBase58();
   process.env.SOLANA_SPONSOR_NETWORK_ID = NETWORK_ID;
 }
 
@@ -714,6 +718,61 @@ describe('POST /solana/sponsor', () => {
     expect(cap.text()).toContain('NETWORK_ID_UNSET');
     // Pero el cliente no se entera de nada de eso.
     expect(res.body).not.toContain('NETWORK_ID_UNSET');
+  });
+
+  // ── SOLANA_USDC_MINT → CR-1 (cableado) ──────────────────────────────────────
+  /**
+   * El primitivo está mockeado, así que CR-1 no corre por sí solo en este archivo.
+   * Lo que estos tests agarran es el `validate` REAL que la ruta le pasó, o sea el
+   * `Cr1Config` que la ruta armó con SU env. Un `Cr1Config` escrito a mano en un
+   * test pasaría igual aunque la ruta se olvidara de poblar `usdcMint`.
+   */
+  interface CapturedOpts {
+    validate: (tx: Transaction, feePayer: PublicKey) => { ok: boolean; reason?: string };
+  }
+  function capturedValidate(): CapturedOpts['validate'] {
+    const call = h.cosignSpy.mock.calls[0] as [string, CapturedOpts] | undefined;
+    if (call === undefined) throw new Error('el primitivo no se invocó: no hay validate que mirar');
+    return call[1].validate;
+  }
+
+  it('★ el mint que CR-1 exige sale de SOLANA_USDC_MINT, no de una constante', async () => {
+    const otroMint = Keypair.generate().publicKey;
+    process.env.SOLANA_USDC_MINT = otroMint.toBase58();
+    const res = await post(validBody());
+    expect(res.statusCode).toBe(200);
+    const validate = capturedValidate();
+    // Con la env movida, el que pasa es el mint NUEVO...
+    expect(validate(buildValidSponsorTx({ mint: otroMint }).tx, feePayerKp.publicKey).ok).toBe(
+      true,
+    );
+    // ...y el de siempre deja de pasar. Si la ruta clavara el mint en el código o
+    // no pasara `usdcMint`, una de las dos mitades se cae.
+    const r = validate(buildValidSponsorTx().tx, feePayerKp.publicKey);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('MINT_MISMATCH');
+  });
+
+  it('★ sin SOLANA_USDC_MINT, CR-1 rechaza hasta el depósito bueno (fail-closed)', async () => {
+    // CD-10: se BORRA la variable, no se la pone en "".
+    delete process.env.SOLANA_USDC_MINT;
+    const res = await post(validBody());
+    // 200 porque el primitivo está mockeado y nunca llama al validate; el punto del
+    // test es qué contesta ESE validate, no el status.
+    expect(res.statusCode).toBe(200);
+    const r = capturedValidate()(buildValidSponsorTx().tx, feePayerKp.publicKey);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('USDC_MINT_NOT_CONFIGURED');
+  });
+
+  it('★ el rechazo por mint sale como marcador al log y NO al cliente (no-oracle)', async () => {
+    h.cosignResult.current = { ok: false, code: 'SPONSOR_REJECTED', reason: 'MINT_MISMATCH' };
+    const cap = new CaptureStream();
+    const res = await withLogs(() => post(validBody(), cap));
+    expect(res.statusCode).toBe(422);
+    expect(errorCode(res.body)).toBe('SPONSOR_REJECTED');
+    expect(cap.text()).toContain('MINT_MISMATCH');
+    expect(res.body).not.toContain('MINT_MISMATCH');
   });
 
   // ── Parseo de la tx ─────────────────────────────────────────────────────────

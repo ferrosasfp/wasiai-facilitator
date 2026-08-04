@@ -37,6 +37,11 @@ const CFG: Cr1Config = {
   maxComputeUnits: 300_000,
   maxPriorityFeeMicroLamports: 50_000,
   maxFeeLamports: 100_000n,
+  // Campo del `deposit`; `validateReleaseForSponsor` no lo lee (el mint del release
+  // lo verifica `verifyVault` contra el EscrowState on-chain). Va poblado igual para
+  // que ningún vector de acá dependa de que valga `undefined`.
+  // eslint-disable-next-line no-secrets/no-secrets -- mint USDC devnet de Circle (base58 público), no es un secreto.
+  usdcMint: '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU',
 };
 
 // Fixed identities shared between the on-chain `state` and the tx accounts.

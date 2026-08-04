@@ -146,6 +146,11 @@ export const solanaEscrowReleaseRoute: FastifyPluginAsync = async (app) => {
     maxComputeUnits: env.SOLANA_SPONSOR_MAX_COMPUTE_UNITS,
     maxPriorityFeeMicroLamports: env.SOLANA_SPONSOR_MAX_PRIORITY_FEE_MICROLAMPORTS,
     maxFeeLamports: BigInt(env.SOLANA_SPONSOR_MAX_FEE_LAMPORTS),
+    // Campo compartido con el `deposit`. `validateReleaseForSponsor` NO lo lee: el
+    // mint del release se contrasta contra el `EscrowState` on-chain (`verifyVault`,
+    // chains/solana-escrow.ts:220). Va igual para que el día que lo lea encuentre
+    // el valor configurado y no un `undefined`.
+    usdcMint: env.SOLANA_USDC_MINT,
   };
 
   app.post(

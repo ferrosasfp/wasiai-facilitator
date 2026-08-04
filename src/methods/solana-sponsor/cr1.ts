@@ -43,6 +43,15 @@ export interface Cr1Config {
   readonly maxComputeUnits: number;
   readonly maxPriorityFeeMicroLamports: number;
   readonly maxFeeLamports: bigint;
+  /**
+   * El mint que un `deposit` patrocinado tiene que llevar (`SOLANA_USDC_MINT`).
+   * El tipo admite `undefined` porque la env es opcional en el schema
+   * (`infra/env.ts:182`); ese caso NO desactiva el check, lo hace rechazar
+   * (Check 4c). `validateReleaseForSponsor` comparte este tipo y no lo lee: el
+   * mint del release se verifica contra el `EscrowState` on-chain
+   * (`chains/solana-escrow.ts:220`), no contra la ix.
+   */
+  readonly usdcMint: string | undefined;
 }
 
 /** Base network fee per signature (lamports) — the current Solana constant. */
@@ -209,6 +218,45 @@ export function validateDepositForSponsor(
     if (!systemProgram.pubkey.equals(new PublicKey(SYSTEM_PROGRAM_ID))) {
       return reject('SYSTEM_PROGRAM_MISMATCH');
     }
+
+    // ── Check 4c: el MINT del depósito, clavado contra el configurado ────────
+    // El programa on-chain acepta CUALQUIER mint a propósito y lo dice: el doc de
+    // la cuenta `mint` del `deposit` (escrow-idl.ts, ix `deposit`) delega "qué
+    // token vale un dólar" en "el co-firmante off-chain, que se niega a firmar un
+    // depósito con un mint inesperado". Ese co-firmante es esta función, y hasta
+    // acá no se negaba: el índice 1 no se comparaba contra nada.
+    //
+    // El input concreto que lo delata: un cliente modificado arma el `deposit`
+    // con un mint creado por él y su propia ATA. Guard A/B pasan (el mensaje de
+    // patrocinio se arma DESDE la tx, así que la persona firma el mint que el
+    // cliente puso), y el facilitator co-firma y paga el gas de un vault sin
+    // valor. `verifyVault` sí compara el mint del `EscrowState`
+    // (chains/solana-escrow.ts:220 → MINT_MISMATCH), así que ese vault no se
+    // libera; lo que se pierde es el gas del feePayer y un `principal_in`
+    // mentiroso aguas arriba.
+    //
+    // Sin la env NO se saltea el check: se rechaza (mismo criterio que
+    // BAD_ESCROW_PROGRAM_ID_CONFIG en Check 2). Un guard que se apaga solo cuando
+    // le falta su config es indistinguible de no tenerlo, y el operador no ve la
+    // diferencia. `SOLANA_USDC_MINT` está seteada en producción — es la condición
+    // para que el adapter Solana se registre (chains/solana-adapter.ts:450-453).
+    const mint = keys[DEPOSIT_ACCOUNT_INDEX.MINT];
+    if (mint === undefined) {
+      return reject('DEPOSIT_ACCOUNTS_MISSING');
+    }
+    const configuredMint = cfg.usdcMint;
+    if (configuredMint === undefined || configuredMint.length === 0) {
+      return reject('USDC_MINT_NOT_CONFIGURED');
+    }
+    let usdcMintPk: PublicKey;
+    try {
+      usdcMintPk = new PublicKey(configuredMint);
+    } catch {
+      return reject('BAD_USDC_MINT_CONFIG');
+    }
+    if (!mint.pubkey.equals(usdcMintPk)) {
+      return reject('MINT_MISMATCH');
+    }
     // Remaining accounts (idx 8+) — the `reference` must be non-signer + non-writable.
     const remaining = keys.slice(DEPOSIT_POSITIONAL_ACCOUNTS);
     if (remaining.some((k) => k.isSigner || k.isWritable)) {
@@ -274,9 +322,10 @@ export function validateDepositForSponsor(
       if (!regSender.isSigner || !regSender.isWritable) return reject('SECOND_IX_ACCOUNTS_INVALID');
       if (regEscrowState.isSigner) return reject('SECOND_IX_ACCOUNTS_INVALID');
       // `escrow_index`'s PUBKEY is deliberately NOT derived here (AR-G4 MNR-1). CR-1
-      // does not derive `escrow_state`, `vault` or `mint` for the deposit either
-      // (Check 4 validates only the three program ids), so deriving the PDA for this
-      // one account would be incoherent with the module's own contract; the on-chain
+      // derives NO PDA for the deposit either — Check 4 pins the three program ids
+      // by pubkey and Check 4c the `mint` against the configured one, but neither
+      // `escrow_state` nor `vault` is recomputed from seeds, so deriving the PDA for
+      // this one account would be incoherent with the module's own contract; the on-chain
       // `seeds = ["escrow-index", sender]` is the real guard, and a mismatch costs the
       // sponsor only the base fee, already bounded by the rate limit + daily cap.
       if (regEscrowIndex.isSigner || !regEscrowIndex.isWritable) {

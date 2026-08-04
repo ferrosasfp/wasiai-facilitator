@@ -122,6 +122,10 @@ export const solanaSponsorRoute: FastifyPluginAsync = async (app) => {
     maxComputeUnits: env.SOLANA_SPONSOR_MAX_COMPUTE_UNITS,
     maxPriorityFeeMicroLamports: env.SOLANA_SPONSOR_MAX_PRIORITY_FEE_MICROLAMPORTS,
     maxFeeLamports: BigInt(env.SOLANA_SPONSOR_MAX_FEE_LAMPORTS),
+    // El mint que CR-1 exige en el `deposit`. Sale de la config, NUNCA del body:
+    // el mensaje de patrocinio se arma desde la tx, así que el mint que la persona
+    // firma es el que el cliente puso. Si la env falta, CR-1 rechaza (Check 4c).
+    usdcMint: env.SOLANA_USDC_MINT,
   };
   const dailyCapLamports = BigInt(env.SOLANA_SPONSOR_DAILY_MAX_LAMPORTS);
   const maxFeeLamports = cr1cfg.maxFeeLamports;
