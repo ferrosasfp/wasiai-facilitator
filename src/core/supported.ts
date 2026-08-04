@@ -4,9 +4,12 @@
  * Exposes:
  *   - SupportedResponse: top-level response shape served by GET /supported.
  *   - ChainSupportedItem: one entry per registered chain (network, name, methods).
- *   - CHAIN_METHODS_DEFAULT: module-level constant listing the methods every
- *     registered chain supports today. DT-1 — we do NOT read methods from
- *     ChainMetadata (no such field); every chain implements `eip3009` in V1.
+ *   - CHAIN_METHODS_DEFAULT: module-level FALLBACK, applied only to adapters
+ *     that do not declare their own methods. Do NOT read it as "every
+ *     registered chain supports eip3009": `getSupportedResponse()` below reads
+ *     `ChainMetadata.supportedMethods` (field added by WKH-204) and only falls
+ *     back here when that field is absent. Live case: `SolanaAdapter` declares
+ *     `spl-token-transfer-finalized` (WKH-323) and never reaches this default.
  *   - getSupportedResponse(): pure function that maps `chainRegistry.listAdapters()`
  *     to the response shape at request time (DT-3, live snapshot).
  *
@@ -24,9 +27,13 @@ import type { ChainMetadata } from '../chains/types.js';
 import { chainRegistry } from '../chains/registry.js';
 
 /**
- * Methods every chain supports in V1. DT-1: kept here (not in ChainMetadata)
- * to avoid touching adapters. WFAC-permit2 will migrate this into the adapter
- * layer when a second method lands.
+ * Default methods for adapters that do NOT declare their own
+ * `ChainMetadata.supportedMethods`. Today that is the EVM adapters, for which
+ * `eip3009` is accurate (they settle a signed EIP-3009 authorization).
+ *
+ * This is not a statement about the whole registry: an adapter that declares
+ * its own methods never reaches this default — see `SolanaAdapter`, which
+ * declares `spl-token-transfer-finalized` (WKH-323).
  */
 export const CHAIN_METHODS_DEFAULT: readonly string[] = ['eip3009'];
 
@@ -53,8 +60,11 @@ export interface SupportedResponse {
  * Build the discovery response from the live chain registry.
  *
  * - `chains`: one entry per registered adapter; `network` is `ChainMetadata.networkId`
- *   ("eip155:<chainId>"), `name` is `ChainMetadata.name`, `methods` is a copy of
- *   `CHAIN_METHODS_DEFAULT`.
+ *   ("eip155:<chainId>" on EVM rails, "solana:<cluster>" on the Solana rail since
+ *   WKH-205), `name` is `ChainMetadata.name`, and `methods` is the adapter's own
+ *   `ChainMetadata.supportedMethods` WHEN it declares one — a copy of
+ *   `CHAIN_METHODS_DEFAULT` only when it does not (see the `??` below). WKH-323:
+ *   the Solana entry reports `spl-token-transfer-finalized` through that branch.
  * - `methods`: deduped union of every chain's methods array. When there are
  *   zero registered adapters this naturally evaluates to `[]`, satisfying AC-9
  *   (`{ chains: [], methods: [] }`).
