@@ -254,7 +254,12 @@ describe('GET /supported', () => {
 
     const chains = body.chains as Array<Record<string, unknown>>;
     expect(chains.length).toBe(1);
-    expect(Object.keys(chains[0]!).sort()).toEqual(['methods', 'name', 'network']);
+    expect(Object.keys(chains[0]!).sort()).toEqual([
+      'breakerStateAbsentReason',
+      'methods',
+      'name',
+      'network',
+    ]);
     expect(typeof chains[0]!.network).toBe('string');
     expect(typeof chains[0]!.name).toBe('string');
     expect(Array.isArray(chains[0]!.methods)).toBe(true);
@@ -300,6 +305,9 @@ describe('GET /supported', () => {
       network: 'eip155:2368',
       name: 'Kite Testnet',
       methods: ['eip3009'],
+      // `makeFakeAdapter` no expone `getBreakerState`, así que la entrada dice POR QUÉ
+      // no trae estado en vez de omitirlo en silencio.
+      breakerStateAbsentReason: 'NO_BREAKER',
     });
   });
 
@@ -321,6 +329,7 @@ describe('GET /supported', () => {
       network: 'eip155:43113',
       name: 'Avalanche Fuji',
       methods: ['eip3009'],
+      breakerStateAbsentReason: 'NO_BREAKER',
     });
   });
 
@@ -626,10 +635,108 @@ describe('GET /supported', () => {
 
     const solanaEntry = body.chains.find((c) => c.network === 'solana:devnet');
     expect(solanaEntry).toBeDefined();
-    // Field ABSENT (not null, not undefined).
-    expect(Object.keys(solanaEntry!).sort()).toEqual(['methods', 'name', 'network']);
+    // `breakerState` ABSENT (not null, not undefined) — pero la entrada ya no calla el
+    // motivo: trae `breakerStateAbsentReason`.
+    expect(Object.keys(solanaEntry!).sort()).toEqual([
+      'breakerStateAbsentReason',
+      'methods',
+      'name',
+      'network',
+    ]);
 
     const evmEntry = body.chains.find((c) => c.network === 'eip155:2368');
     expect(evmEntry?.breakerState).toBe('CLOSED');
+  });
+
+  // ─── la ausencia de `breakerState` deja de ser muda ──────────────────────
+  //
+  // Antes las cuatro entradas `eip155:*` traían `breakerState` y `solana:devnet` no, y
+  // desde afuera eso se veía IGUAL que un campo perdido en el camino. Estos tests fijan
+  // las dos mitades: que la razón se diga, y que NO se invente un estado para decirla.
+
+  it('★ la entrada Solana NO trae breakerState y dice POR QUÉ: NO_BREAKER (no un CLOSED inventado)', async () => {
+    app = await buildAppWithAdapters([makeFakeSolanaAdapter()]);
+
+    const res = await app.inject({ method: 'GET', url: '/supported' });
+    const body = JSON.parse(res.body) as { chains: Array<Record<string, unknown>> };
+    const solana = body.chains.find((c) => c.network === 'solana:devnet');
+
+    // Nada verde que nada sostenga: el adaptador Solana no tiene breaker.
+    expect(Object.prototype.hasOwnProperty.call(solana, 'breakerState')).toBe(false);
+    expect(solana?.breakerStateAbsentReason).toBe('NO_BREAKER');
+    // Y la razón es "le pregunté y no tiene", NO "no lo encontré": con el lookup por
+    // `chainId` (que busca `eip155:103`) el adaptador Solana era INHALLABLE y esto
+    // saldría 'ADAPTER_LOOKUP_FAILED'. Ése es el mutante que este assert mata.
+    expect(solana?.breakerStateAbsentReason).not.toBe('ADAPTER_LOOKUP_FAILED');
+  });
+
+  it('★★ un adaptador Solana hipotético CON breaker sí reportaría su estado — la omisión de hoy es del adaptador, no del riel', async () => {
+    // Este test no describe el adaptador real (que no tiene breaker): describe que
+    // `/supported` le PREGUNTA. Sin el lookup por networkId, la entrada `solana:*`
+    // nunca podría reportar un estado aunque lo tuviera, y la omisión de hoy sería una
+    // coincidencia de dos hechos independientes en vez de una respuesta.
+    const solanaWithBreaker: SettlementAdapter & { getBreakerState: () => 'OPEN' } = {
+      ...makeFakeSolanaAdapter(),
+      getBreakerState: () => 'OPEN',
+    };
+    app = await buildAppWithAdapters([solanaWithBreaker]);
+
+    const res = await app.inject({ method: 'GET', url: '/supported' });
+    const body = JSON.parse(res.body) as { chains: Array<Record<string, unknown>> };
+    const solana = body.chains.find((c) => c.network === 'solana:devnet');
+    expect(solana?.breakerState).toBe('OPEN');
+    expect(Object.prototype.hasOwnProperty.call(solana, 'breakerStateAbsentReason')).toBe(false);
+  });
+
+  it('★★ "no tiene breaker" y "lo tiene apagado" NO son la misma respuesta', async () => {
+    // Las dos omitían `breakerState` y eran indistinguibles desde afuera. Si alguien
+    // colapsa las dos razones en una, este test muere.
+    const disabled: ChainAdapter & { getBreakerState: () => undefined } = {
+      ...makeFakeAdapter(2368, 'Kite Testnet'),
+      getBreakerState: () => undefined,
+    };
+    app = await buildAppWithAdapters([disabled, makeFakeSolanaAdapter()]);
+
+    const res = await app.inject({ method: 'GET', url: '/supported' });
+    const body = JSON.parse(res.body) as { chains: Array<Record<string, unknown>> };
+    const evm = body.chains.find((c) => c.network === 'eip155:2368');
+    const solana = body.chains.find((c) => c.network === 'solana:devnet');
+
+    expect(evm?.breakerStateAbsentReason).toBe('BREAKER_DISABLED');
+    expect(solana?.breakerStateAbsentReason).toBe('NO_BREAKER');
+    expect(evm?.breakerStateAbsentReason).not.toBe(solana?.breakerStateAbsentReason);
+  });
+
+  it('★★★ INVARIANTE: cada entrada trae EXACTAMENTE UNO de breakerState / breakerStateAbsentReason', async () => {
+    // Las tres formas posibles de adaptador en una sola respuesta.
+    const live: ChainAdapter & { getBreakerState: () => 'HALF_OPEN' } = {
+      ...makeFakeAdapter(2368, 'Kite Testnet'),
+      getBreakerState: () => 'HALF_OPEN',
+    };
+    const disabled: ChainAdapter & { getBreakerState: () => undefined } = {
+      ...makeFakeAdapter(43113, 'Avalanche Fuji'),
+      getBreakerState: () => undefined,
+    };
+    app = await buildAppWithAdapters([live, disabled, makeFakeSolanaAdapter()]);
+
+    const res = await app.inject({ method: 'GET', url: '/supported' });
+    const body = JSON.parse(res.body) as { chains: Array<Record<string, unknown>> };
+    expect(body.chains).toHaveLength(3);
+
+    for (const entry of body.chains) {
+      const hasState = Object.prototype.hasOwnProperty.call(entry, 'breakerState');
+      const hasReason = Object.prototype.hasOwnProperty.call(entry, 'breakerStateAbsentReason');
+      // Ni los dos (contradicción) ni ninguno (que es exactamente lo que un consumidor
+      // debe poder leer como "esta respuesta está incompleta").
+      expect([hasState, hasReason]).toEqual(hasState ? [true, false] : [false, true]);
+    }
+
+    expect(body.chains.find((c) => c.network === 'eip155:2368')?.breakerState).toBe('HALF_OPEN');
+    expect(body.chains.find((c) => c.network === 'eip155:43113')?.breakerStateAbsentReason).toBe(
+      'BREAKER_DISABLED',
+    );
+    expect(body.chains.find((c) => c.network === 'solana:devnet')?.breakerStateAbsentReason).toBe(
+      'NO_BREAKER',
+    );
   });
 });

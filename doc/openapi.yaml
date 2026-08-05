@@ -471,9 +471,38 @@ components:
             WFAC-41 — current per-chain circuit breaker state. OPTIONAL: emitted
             only when the adapter exposes a live breaker (i.e., `CB_ENABLED=true`
             and the adapter is Kite / Avalanche Fuji). Omitted entirely when
-            `CB_ENABLED=false` or the adapter has no breaker wrapper.
+            `CB_ENABLED=false` or the adapter has no breaker wrapper; in that case
+            `breakerStateAbsentReason` is present and says which of the two it was.
             Integrators can branch on `breakerState === 'OPEN'` to try an
             alternate chain before issuing `/verify` or `/settle`.
+        breakerStateAbsentReason:
+          type: string
+          enum: [NO_BREAKER, BREAKER_DISABLED, ADAPTER_LOOKUP_FAILED]
+          description: |
+            Why this entry carries no `breakerState`. Present in EXACTLY the entries
+            where `breakerState` is absent, so every entry always has exactly one of
+            the two. An entry with NEITHER field means the payload is incomplete or
+            the facilitator predates this field — a case that used to be
+            indistinguishable from "this chain has no breaker".
+
+            This is NOT a breaker state and must not be read as one: `NO_BREAKER`
+            does not mean healthy, it means there is nothing to look at.
+
+            - `NO_BREAKER`: the adapter exposes no breaker at all. This is the
+              `solana:*` case and it is deliberate, not a gap: the circuit breaker
+              guards the EVM path where this facilitator simulates and BROADCASTS an
+              EIP-3009 authorization paying its own gas, so opening it stops the
+              bleeding and lets a caller pick another chain before paying. On the
+              `solana:*` rail the facilitator only WITNESSES a transfer the payer
+              already broadcast (verified at `finalized`), so there is no gas of ours
+              to protect, and an open breaker would merely refuse payments that are
+              already final on-chain.
+            - `BREAKER_DISABLED`: the adapter has a breaker but it is in passthrough
+              mode (`CB_ENABLED=false`), so there is no live state to report.
+            - `ADAPTER_LOOKUP_FAILED`: the registry did not return the adapter for a
+              chain it just listed. Unreachable by construction; if you ever see it,
+              the facilitator's registry is inconsistent — do not read it as
+              "no breaker".
 
     SupportedResponse:
       type: object

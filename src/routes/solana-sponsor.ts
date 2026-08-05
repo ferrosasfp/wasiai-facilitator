@@ -38,6 +38,37 @@
  * que Guard B participe. Con una firma capturada `A` consigue exactamente el
  * monto que `V` firmó, ni un lamport más.
  *
+ * ⚠️ TRES DESENLACES, NO DOS. Un broadcast termina en `salió` (200 + firma), `no
+ * salió` (409/422/429 — probado que no se gastó) o `NO SÉ`
+ * (`SPONSOR_BROADCAST_UNKNOWN`, 502). El tercero se decide por `CosignResult.sent`,
+ * NO por el código del primitivo: `SPONSOR_BROADCAST_EXPIRED` se emite también desde
+ * sondas POSTERIORES a un `sendRawTransaction` (broadcast.ts:300-312 y :348-360) y
+ * ahí su `catch` significa "no pude preguntar", no "el blockhash venció". El detalle
+ * está en el Step 11.
+ *
+ * ⚠️ CUÁNTO CUESTA ESA MENTIRA **ACÁ**, y va dicho para que este arreglo no se lea con
+ * el peso del de `/solana/escrow/release` ni el del payout. Lo que queda en duda en el
+ * patrocinio es EL GAS DEL FEE-PAYER: unos lamports nuestros, gastados o no, que ningún
+ * reintento recupera. En un release o un payout lo que queda en duda es el dinero de una
+ * persona en manos de un tercero. Tres diferencias concretas, todas comprobables:
+ *
+ *   1. El valor que mueve el `deposit` es del PROPIO sender y va a un escrow, no a un
+ *      tercero: sigue teniendo `release` y `refund` por delante.
+ *   2. La incógnita es RESOLUBLE por cualquiera desde afuera, sin nada nuestro: el
+ *      `escrow_state` es un PDA de semillas `["escrow", sender, remittance_id]`
+ *      (`chains/escrow-idl.ts`), o sea que existe o no existe, y quien tenga esos dos
+ *      datos lo mira en la cadena. Un payout, en cambio, sólo se puede reconciliar con
+ *      la firma que el facilitator persistió.
+ *   3. No puede volverse un doble cobro: el vault de ese escrow se crea con `init` y no
+ *      con `init_if_needed` (está documentado en `chains/escrow-idl.ts`), y su dirección
+ *      se deriva del `escrow_state`, o sea de ese mismo par (sender, remittance_id). Un
+ *      segundo depósito del par no puede aterrizar.
+ *
+ * Nada de esto lo hace menos FALSO — un 409 "blockhash expired" sigue afirmando algo
+ * que no sabemos. Lo hace menos caro, y por eso este arreglo NO trae la mitad cara del
+ * exemplar (persistir la firma para reconciliar después): esta ruta no tiene ledger y
+ * agregarle uno sería construir la reconciliación de un gasto de gas.
+ *
  * Registered ONLY when `isSponsorEnabled()` (opt-in-off, CD-13) — see app.ts.
  *
  * Boundary: mirrors `src/routes/settle.ts` (auth preHandler, Zod safeParse,
@@ -74,6 +105,18 @@ type SponsorErrorCodeHttp =
   | 'SPONSOR_DAILY_CAP'
   | 'SPONSOR_BROADCAST_EXPIRED'
   | 'SPONSOR_BROADCAST_FAILED'
+  /**
+   * La tx SE TRANSMITIÓ al cluster y no se pudo determinar su suerte. NO es un
+   * fracaso y NO es un éxito: es la tercera respuesta, y existe porque las otras dos
+   * mienten en este caso. Mismo criterio que `RELEASE_BROADCAST_UNKNOWN`
+   * (routes/solana-escrow.ts) y `PAYOUT_BROADCAST_UNKNOWN` (routes/solana-payout.ts).
+   *
+   * Antes este caso salía como `SPONSOR_BROADCAST_EXPIRED / 409 / "Transaction
+   * blockhash expired"`, que de los dos lados se lee como "no salió, rearmá la tx con
+   * un blockhash nuevo y mandala de vuelta" — sobre un depósito que podía estar ya
+   * aterrizado, con el gas ya gastado.
+   */
+  | 'SPONSOR_BROADCAST_UNKNOWN'
   | 'SPONSOR_NOT_ENABLED';
 
 interface ErrorBody {
@@ -422,7 +465,69 @@ export const solanaSponsorRoute: FastifyPluginAsync = async (app) => {
         return reply.code(200).send({ signature: result.signature });
       }
 
-      // Step 11 — map the primitive error code → HTTP (no echo of the tx).
+      // ── Step 11 — "no pude preguntar" ≠ "no salió" ──────────────────────────────
+      //
+      // `CosignResult.sent` existe exactamente para esto y hasta acá esta ruta lo tiraba
+      // a la basura. El flag se prende en los DOS resultados posibles de un
+      // `sendRawTransaction` (broadcast.ts:321 cuando devuelve, :331 cuando TIRA — un
+      // socket caído no prueba que el nodo no haya aceptado la tx), y de ahí viaja a los
+      // veredictos de las sondas de frescura POSTERIORES al envío (broadcast.ts:300-312
+      // dentro del bucle, :348-366 al agotarlo). El `catch` de esas sondas significa "no
+      // pude preguntar", no "el blockhash venció" — está escrito en broadcast.ts:113-118.
+      // Traducir eso a `409 / "Transaction blockhash expired"` afirmaba que no se gastó.
+      //
+      // ⚠️ QUÉ SE PORTÓ DEL EXEMPLAR Y QUÉ NO. Son dos exemplars y NO son intercambiables:
+      // el payout (solana-payout.ts:555-598) resuelve la incógnita optimistamente porque
+      // VERIFICA LA FIRMA que persistió (`verifyPayoutSignature`) y por eso puede contestar
+      // un 200 honesto; el release (solana-escrow.ts:509-556) NO lo hace, porque releer el
+      // estado `Released` probaría que el escrow se liberó y no que lo haya hecho NUESTRA
+      // tx. Acá corresponde el SEGUNDO, y por un motivo más fuerte todavía: esta ruta no
+      // tiene NADA que verificar. El primitivo sólo devuelve la firma cuando confirmó, así
+      // que en esta rama el facilitator no la tiene ni la persistió en ningún lado — no hay
+      // ledger de patrocinios. Devolver un `{ signature }` sería inventarlo, y hasta si lo
+      // recalculáramos de la tx firmada, "existe un depósito para este par" tampoco probaría
+      // que lo puso nuestra transmisión. Ese `{ signature }` es una atribución que esta ruta
+      // NO puede sostener, así que no la hace.
+      //
+      // Y NO SE DECLARA que un reintento resuelva la incógnita, porque acá no la resuelve:
+      // a diferencia del release, esta ruta no relee nada on-chain antes de firmar, así que
+      // un depósito que YA aterrizó vuelve a intentarse y falla en el preflight (el PDA ya
+      // existe) — o sea que sale otra vez por este mismo camino. Quien puede cerrar la
+      // incógnita es el que tiene el `remittance_id`: mirando si el `escrow_state` existe.
+      if (result.sent === true) {
+        // Log PROPIO: `fail()` escribe 'solana sponsor failed', y este desenlace no es un
+        // fallo. Un log que lo llame fallo es la misma mentira corrida de superficie.
+        app.log.error(
+          {
+            request_id: requestId,
+            error_code: 'SPONSOR_BROADCAST_UNKNOWN' satisfies SponsorErrorCodeHttp,
+            http_status: 502,
+            facilitator_key_id: keyId,
+            duration_ms: Date.now() - startMs,
+            guard: result.reason,
+            // Excepción explícita y acotada a AC-10 ("nunca el body/tx"), con el mismo
+            // criterio con el que la ruta del release loguea su `escrow_pda`: es UN pubkey
+            // público leído de la lista de cuentas de la ix (no del body, no la tx, no un
+            // secreto), y es una de las dos semillas del `escrow_state`. Es media llave:
+            // la otra mitad es el `remittance_id`, que se queda del lado del cliente a
+            // propósito. Acota a qué billetera mirar; no dice qué pasó.
+            sender: claims.sender,
+          },
+          'solana sponsor outcome UNKNOWN — transaction was broadcast, on-chain effect undetermined',
+        );
+        return reply.code(502).send({
+          error: {
+            code: 'SPONSOR_BROADCAST_UNKNOWN',
+            message: 'Transaction was broadcast; its on-chain outcome could not be determined',
+            http: 502,
+          },
+        } satisfies ErrorBody);
+      }
+
+      // Step 11b — map the primitive error code → HTTP (no echo of the tx).
+      //
+      // A partir de acá `result.sent` es falso/ausente: NINGÚN envío ocurrió, así que
+      // estos códigos sí pueden afirmar que no se gastó.
       //
       // `result.reason` es el ÚNICO dato que separa los ~34 motivos que el
       // primitivo colapsa en estos cinco códigos, y va al log — nunca al body.
@@ -437,6 +542,9 @@ export const solanaSponsorRoute: FastifyPluginAsync = async (app) => {
         case 'SPONSOR_DAILY_CAP':
           return fail('SPONSOR_DAILY_CAP', 429, 'Daily sponsorship cap reached', result.reason);
         case 'SPONSOR_BROADCAST_EXPIRED':
+          // Alcanzable SÓLO sin envío previo: la sonda PRE-firma (broadcast.ts:224-232),
+          // el blockhash ya vencido antes del primer send, o un `MISSING_BLOCKHASH`. Ahí
+          // sí está probado que no se gastó nada y el 409 "rearmá y reintentá" es correcto.
           return fail(
             'SPONSOR_BROADCAST_EXPIRED',
             409,
@@ -444,7 +552,17 @@ export const solanaSponsorRoute: FastifyPluginAsync = async (app) => {
             result.reason,
           );
         case 'SPONSOR_BROADCAST_FAILED':
-          return fail('SPONSOR_BROADCAST_FAILED', 502, 'Broadcast failed', result.reason);
+          // Defensivo. El primitivo sólo emite este código tras agotar los reintentos, y
+          // para llegar ahí hubo al menos un `sendRawTransaction` (exitoso o que tiró: los
+          // dos marcan `sent`), así que en la práctica lo captura el bloque de arriba. Se
+          // deja porque el contrato del primitivo no lo garantiza por tipo, y el mensaje ya
+          // no afirma que la tx no salió — "failed" a secas se leía como "no salió".
+          return fail(
+            'SPONSOR_BROADCAST_FAILED',
+            502,
+            'Broadcast could not be confirmed',
+            result.reason,
+          );
         case 'SPONSOR_REJECTED':
         default:
           return fail('SPONSOR_REJECTED', 422, 'Transaction rejected by validation', result.reason);
