@@ -94,6 +94,22 @@ export const AMOUNT_LEN = 8;
 export const DEPOSIT_DATA_LEN = 104;
 
 /**
+ * Offset/largo del campo `authority` de la ix `deposit` — la pubkey que queda GRABADA
+ * en el `EscrowState` y que despues es la unica que puede firmar el `release`
+ * (`has_one = authority` -> `ConstraintHasOne` 2001 si firma otra).
+ *
+ * Mismo layout de arriba: 8 discriminador + 16 remittance_id + 32 beneficiary = 56.
+ *
+ * ⚠️ El input concreto que delata un offset corrido: una ix cuyo `beneficiary` y
+ * `authority` son pubkeys DISTINTAS y cuya `authority` es la configurada. Con el offset
+ * en 24 el check leeria el `beneficiary` y rechazaria un deposito legitimo; con el
+ * offset en 88 leeria los 8 bytes del `amount` + 24 mas y tampoco coincidiria. El
+ * fixture de `solana-sponsor.cr1.test.ts` (Check 4d) usa exactamente esa forma.
+ */
+export const AUTHORITY_OFFSET = 56;
+export const AUTHORITY_LEN = 32;
+
+/**
  * HU-SOL-20 / R3 — pinned shape of the ONLY 2nd business instruction CR-1 accepts:
  * `register_escrow` of the SAME escrow program. Pinned from the IDL produced by
  * `anchor build` in solana-programs (HU-SOL-20/R1) and re-vendored here by R2a

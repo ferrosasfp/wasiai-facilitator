@@ -158,7 +158,7 @@ La matriz dice `src/routes/ ↛ src/chains/*, src/methods/*` porque las rutas x4
 | Ruta | Importa de `methods/*` / `chains/*` |
 |---|---|
 | `src/routes/solana-sponsor.ts` | `methods/solana-sponsor/{broadcast,cr1,pop}.ts` |
-| `src/routes/solana-escrow.ts`  | `methods/solana-escrow/{build-release,cr1-release}.ts`, `chains/solana-escrow.ts` |
+| `src/routes/solana-escrow.ts`  | `methods/solana-escrow/{build-release,cr1-release}.ts`, `methods/solana-sponsor/{broadcast,cr1}.ts`, `methods/solana-payout/payout-shape.ts` (sólo `encodeSignatureBase58`, codificación pura), `chains/solana-escrow.ts` |
 | `src/routes/solana-payout.ts`  | `methods/solana-payout/*`, `chains/solana-escrow.ts` (`deriveAta`) |
 
 **Alcance explícito**: SOLO esas tres rutas. Cualquier otra ruta sigue bajo la

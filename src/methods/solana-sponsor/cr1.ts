@@ -21,6 +21,8 @@
 import { ComputeBudgetProgram, PublicKey, type Transaction } from '@solana/web3.js';
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
+  AUTHORITY_LEN,
+  AUTHORITY_OFFSET,
   DEPOSIT_ACCOUNT_INDEX,
   DEPOSIT_DISCRIMINATOR,
   DEPOSIT_POSITIONAL_ACCOUNTS,
@@ -52,6 +54,28 @@ export interface Cr1Config {
    * (`chains/solana-escrow.ts:220`), no contra la ix.
    */
   readonly usdcMint: string | undefined;
+  /**
+   * La release-authority de ESTA instancia, en base58, o `undefined` si esta instancia
+   * no tiene esa llave configurada. Check 4d la compara contra los 32 bytes que la ix
+   * `deposit` graba en `AUTHORITY_OFFSET`.
+   *
+   * ⚠️ `undefined` DESARMA el check (a diferencia de `usdcMint`, donde ausente ⇒
+   * rechaza). El motivo es una asimetria real de configuracion, no una preferencia:
+   * `SOLANA_USDC_MINT` es condicion para que el adapter Solana se registre siquiera
+   * (chains/solana-adapter.ts), asi que una instancia que puede patrocinar SIEMPRE la
+   * tiene — su ausencia es imposible, y rechazar es gratis. La release-authority, en
+   * cambio, tiene su propia bandera (`SOLANA_ESCROW_RELEASE_ENABLED`) independiente de
+   * la del patrocinio, y una instancia puede legitimamente tener solo la del sponsor.
+   * Rechazar ahi tumbaria una capacidad bien configurada por la falta de una env que
+   * NO es suya.
+   *
+   * Que el guard se apague en silencio seria lo peor de los dos mundos, asi que NO se
+   * apaga en silencio: `routes/solana-sponsor.ts` avisa en el arranque, una vez, si
+   * quedo desarmado. `validateDepositForSponsor` sigue siendo pura y sin logger.
+   *
+   * `validateReleaseForSponsor` comparte este tipo y NO lo lee.
+   */
+  readonly releaseAuthority: string | undefined;
 }
 
 /** Base network fee per signature (lamports) — the current Solana constant. */
@@ -261,6 +285,45 @@ export function validateDepositForSponsor(
     const remaining = keys.slice(DEPOSIT_POSITIONAL_ACCOUNTS);
     if (remaining.some((k) => k.isSigner || k.isWritable)) {
       return reject('REMAINING_ACCOUNT_FLAGS_INVALID');
+    }
+
+    // ── Check 4d: la `authority` que el depósito GRABA en el escrow ──────────
+    // Los 32 bytes de `data[56..88]` son la única pubkey que después va a poder firmar
+    // el `release` de ese escrow (`has_one = authority` ⇒ `ConstraintHasOne` 2001 si
+    // firma otra). Quién los elige es chaski, desde SU propia env, un valor que el
+    // facilitator no confirmaba contra nada — `authority` aparecía en este archivo sólo
+    // en comentarios.
+    //
+    // El input concreto: chaski se despliega con la env de la authority desalineada (o
+    // vacía, que graba la pubkey nula). Todos los depósitos siguen entrando y CR-1
+    // sigue patrocinándolos, y cada uno NACE IRRELEASEABLE. Nadie se entera hasta que
+    // la ventana de custodia (2 h) se acerca a su fin y el release devuelve
+    // `RELEASE_AUTHORITY_MISMATCH` — cuando ya no hay tiempo de arreglarlo y sólo queda
+    // el refund. Acá cuesta una respuesta 422 y el gas no se gasta.
+    //
+    // Y a diferencia del mint (Check 4c), la env que falta acá NO rechaza: ver el
+    // comentario de `Cr1Config.releaseAuthority`. Esa decisión NO es silenciosa — la
+    // ruta avisa en el arranque cuando el check queda desarmado.
+    const configuredAuthority = cfg.releaseAuthority;
+    if (configuredAuthority !== undefined && configuredAuthority.length > 0) {
+      let expectedAuthority: PublicKey;
+      try {
+        expectedAuthority = new PublicKey(configuredAuthority);
+      } catch {
+        // Config presente pero ilegible: acá sí se rechaza (mismo criterio que
+        // BAD_ESCROW_PROGRAM_ID_CONFIG). "Mal escrita" no es lo mismo que "ausente".
+        return reject('BAD_RELEASE_AUTHORITY_CONFIG');
+      }
+      if (data.length < AUTHORITY_OFFSET + AUTHORITY_LEN) {
+        // El Check 4 sólo exige 8 bytes, así que una ix corta llega hasta acá viva.
+        return reject('DEPOSIT_DATA_TOO_SHORT_FOR_AUTHORITY');
+      }
+      const declaredAuthority = Buffer.from(
+        data.subarray(AUTHORITY_OFFSET, AUTHORITY_OFFSET + AUTHORITY_LEN),
+      );
+      if (!declaredAuthority.equals(expectedAuthority.toBuffer())) {
+        return reject('DEPOSIT_AUTHORITY_MISMATCH');
+      }
     }
 
     // ── Check 4b: if a 2nd business ix exists it MUST be EXACTLY `register_escrow`

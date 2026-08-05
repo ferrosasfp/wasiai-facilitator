@@ -50,6 +50,7 @@ import { z } from 'zod';
 import { createHash } from 'node:crypto';
 import { requireFacilitatorKey } from '../middleware/auth.js';
 import { getFeePayerKeypair } from '../infra/solana-fee-payer.js';
+import { getReleaseAuthorityPubkey } from '../infra/solana-release-authority.js';
 import { cosignAndBroadcast, parseSponsorTx } from '../methods/solana-sponsor/broadcast.js';
 import { validateDepositForSponsor, type Cr1Config } from '../methods/solana-sponsor/cr1.js';
 import { extractSponsorClaims } from '../methods/solana-sponsor/sponsor-claims.js';
@@ -115,8 +116,44 @@ const SponsorRequestSchema = z.object({
   popSignature: z.string().min(1),
 });
 
+/**
+ * La release-authority de esta instancia, en base58, o `undefined` si no está
+ * configurada. NO tira: la ausencia de la llave es un estado legítimo de una instancia
+ * que sólo patrocina (bandera propia, independiente de la del sponsor).
+ *
+ * Se lee UNA vez, al registrar la ruta: `getReleaseAuthorityKeypair` cachea el Keypair,
+ * así que releerlo por request no detectaría un cambio de env de todos modos.
+ */
+function resolveReleaseAuthority(): string | undefined {
+  try {
+    return getReleaseAuthorityPubkey().toBase58();
+  } catch {
+    return undefined;
+  }
+}
+
 export const solanaSponsorRoute: FastifyPluginAsync = async (app) => {
   const env = app.env;
+  const releaseAuthority = resolveReleaseAuthority();
+  // ⚠️ El Check 4d NO se apaga en silencio. Un guard que se desarma solo cuando le
+  // falta su config es indistinguible de no tenerlo, y el operador no ve la diferencia
+  // — así que acá se ve, una vez, en el arranque. La contracara (`info`) también se
+  // emite, para que "no veo el warning" signifique "está armado" y no "no miré bien".
+  if (releaseAuthority === undefined) {
+    app.log.warn(
+      {
+        setting: 'SOLANA_ESCROW_RELEASE_AUTHORITY_SECRET_KEY',
+        value: '(unset)',
+        check: 'CR1_DEPOSIT_AUTHORITY',
+      },
+      'NOTICE: the sponsored-deposit authority check (CR-1 Check 4d) is DISARMED — this instance has no release-authority key, so it cannot tell whether the deposits it sponsors will be releasable. Set SOLANA_ESCROW_RELEASE_AUTHORITY_SECRET_KEY on any instance that also releases.',
+    );
+  } else {
+    app.log.info(
+      { check: 'CR1_DEPOSIT_AUTHORITY', release_authority: releaseAuthority },
+      'sponsorship: deposit-authority check ARMED against the configured release authority',
+    );
+  }
   const cr1cfg: Cr1Config = {
     escrowProgramId: env.SOLANA_ESCROW_PROGRAM_ID,
     maxComputeUnits: env.SOLANA_SPONSOR_MAX_COMPUTE_UNITS,
@@ -126,6 +163,9 @@ export const solanaSponsorRoute: FastifyPluginAsync = async (app) => {
     // el mensaje de patrocinio se arma desde la tx, así que el mint que la persona
     // firma es el que el cliente puso. Si la env falta, CR-1 rechaza (Check 4c).
     usdcMint: env.SOLANA_USDC_MINT,
+    // La authority que el `deposit` graba en el escrow tiene que ser la nuestra, o ese
+    // depósito nace irreleaseable (Check 4d). Ausente ⇒ check desarmado, avisado arriba.
+    releaseAuthority,
   };
   const dailyCapLamports = BigInt(env.SOLANA_SPONSOR_DAILY_MAX_LAMPORTS);
   const maxFeeLamports = cr1cfg.maxFeeLamports;

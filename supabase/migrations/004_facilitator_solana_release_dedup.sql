@@ -1,6 +1,13 @@
 -- supabase/migrations/004_facilitator_solana_release_dedup.sql
 -- WKH-216 / HU-SOL-13 (Wave 13c) — Anti-replay durable del escrow `release` (AC-5 / CD-9).
--- PENDING-DEPLOY (founder-gated, CD-5): NO aplicar hasta el cutover del release-authority.
+-- YA CORRIO contra la base de desarrollo (bdwv). Decia "PENDING-DEPLOY, NO aplicar" y
+-- eso ya no puede ser cierto: la `006` declara haberse aplicado a bdwv el 2026-08-04 y
+-- es un `ALTER TABLE` sobre ESTA tabla, que sobre una tabla inexistente habria errado.
+-- Un "no aplicar" que sobrevive a su propio cutover entrena a leer los avisos como
+-- ruido, justo en la carpeta donde el aviso importa.
+-- El estado declarado de cada migracion esta en supabase/migrations/README.md; este
+-- repo NO lleva registro de despliegue, asi que lo de arriba es una DEDUCCION, no una
+-- confirmacion de la base.
 -- Idempotente: safe to re-run. Do NOT edit once pushed — create follow-up migration.
 --
 -- Barrera dura anti-doble-release: UNIQUE(escrow_pda). El facilitator co-firma+broadcastea

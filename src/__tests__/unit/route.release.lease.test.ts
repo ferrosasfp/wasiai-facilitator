@@ -37,6 +37,9 @@ interface Row {
   network: string;
   status: string;
   claimed_at: string;
+  /** Migración 007. NULL mientras no se firmó — y eso prueba que no se transmitió nada. */
+  signature: string | null;
+  recent_blockhash: string | null;
 }
 
 type Filter = { op: 'eq' | 'lt'; col: string; value: unknown };
@@ -76,6 +79,8 @@ class FakeTable {
       network: String(obj.network),
       status: 'claimed',
       claimed_at: new Date().toISOString(),
+      signature: null,
+      recent_blockhash: null,
     });
     return { error: null };
   }
@@ -109,6 +114,10 @@ function readColumn(row: Row, col: string): unknown {
       return row.status;
     case 'claimed_at':
       return row.claimed_at;
+    case 'signature':
+      return row.signature;
+    case 'recent_blockhash':
+      return row.recent_blockhash;
     default:
       return undefined;
   }
@@ -121,6 +130,16 @@ function writeColumn(row: Row, col: string, value: unknown): void {
       break;
     case 'claimed_at':
       row.claimed_at = String(value);
+      break;
+    // ⚠️ El `default: break` de abajo COME cualquier columna que la app escriba y el
+    // doble no conozca. Estas dos están acá explícitamente para que la persistencia de
+    // la firma (007) se pueda AFIRMAR: sin ellas, un `markReleaseSigned` que dejara de
+    // escribirlas pasaría inadvertido.
+    case 'signature':
+      row.signature = value === null ? null : String(value);
+      break;
+    case 'recent_blockhash':
+      row.recent_blockhash = value === null ? null : String(value);
       break;
     default:
       break;
@@ -214,6 +233,14 @@ function makeFilterChain(
   };
 }
 
+/** Tx firmada mínima: lo único que `onSigned` lee es `signatures[0].signature`. */
+function signedTxDouble(): Transaction {
+  const kp = Keypair.generate();
+  return {
+    signatures: [{ publicKey: kp.publicKey, signature: Buffer.alloc(64, 7) }],
+  } as unknown as Transaction;
+}
+
 vi.mock('../../methods/solana-sponsor/broadcast.js', async (importActual) => {
   const actual = await importActual<typeof SponsorBroadcastModule>();
   return {
@@ -225,7 +252,11 @@ vi.mock('../../methods/solana-sponsor/broadcast.js', async (importActual) => {
       h.cosignCalls.n += 1;
       // Contrato real del primitivo: firma, y SÓLO transmite si `onSigned` autorizó.
       if (opts.onSigned) {
-        const persisted = await opts.onSigned({} as Transaction);
+        // El primitivo real llama `onSigned` DESPUÉS de `partialSign`, así que la tx
+        // que recibe YA tiene la firma cruda en `signatures[0]`. El doble entregaba un
+        // `{}` pelado, que alcanzaba mientras `onSigned` sólo movía un estado y deja de
+        // alcanzar ahora que además lee la firma para persistirla.
+        const persisted = await opts.onSigned(signedTxDouble());
         if (!persisted.ok) {
           return {
             ok: false,
@@ -302,10 +333,13 @@ function depositedState(): EscrowStateDecoded {
   return {
     sender: SENDER,
     beneficiary: Keypair.generate().publicKey.toBase58(),
-    authority: Keypair.generate().publicKey.toBase58(),
+    // La authority REAL de la ruta: un pubkey al azar acá describe un escrow que no se
+    // puede liberar nunca (ConstraintHasOne 2001), y el Step 4b lo corta antes del claim.
+    authority: releaseAuthorityKp.publicKey.toBase58(),
     mint: USDC_MINT,
     amount: '3000000',
-    deadline: '1790000000',
+    // Relativo a AHORA: una constante en el futuro caduca sola.
+    deadline: String(Math.floor(Date.now() / 1000) + 3600),
     status: 'Deposited',
     bump: 254,
     escrowStatePda: Keypair.generate().publicKey.toBase58(),
@@ -385,6 +419,9 @@ describe('POST /solana/escrow/release — lease del claim', () => {
     expect(JSON.parse(first.body).error.code).toBe('RELEASE_BROADCAST_EXPIRED');
     expect(table.rows).toHaveLength(1); // el claim quedó escrito
     expect(h.broadcasts.list).toHaveLength(0); // y no se transmitió nada
+    // 007: una fila SIN firma es la prueba durable de ese "no se transmitió nada".
+    expect(table.rows.at(0)?.signature).toBeNull();
+    expect(table.rows.at(0)?.recent_blockhash).toBeNull();
 
     // 2) Reintento INMEDIATO: el lease está vigente ⇒ sigue siendo 409 (la barrera no
     //    se aflojó; sólo dejó de ser eterna).
@@ -401,6 +438,10 @@ describe('POST /solana/escrow/release — lease del claim', () => {
     expect(h.broadcasts.list).toHaveLength(1);
     expect(table.rows).toHaveLength(1); // nunca se creó una fila nueva
     expect(table.rows.at(0)?.status).toBe('signed');
+    // 007: ahora la firma existe DEL LADO NUESTRO, no sólo en el body de la respuesta
+    // (que es lo único que había, porque el logger redacta el campo `signature`).
+    expect(table.rows.at(0)?.signature).toBeTruthy();
+    expect(table.rows.at(0)?.recent_blockhash).toBeTruthy();
   });
 
   /**
