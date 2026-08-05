@@ -42,6 +42,8 @@ const CFG: Cr1Config = {
   // que ningún vector de acá dependa de que valga `undefined`.
   // eslint-disable-next-line no-secrets/no-secrets -- mint USDC devnet de Circle (base58 público), no es un secreto.
   usdcMint: '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU',
+  // Compartido con el `deposit` (Check 4d). `validateReleaseForSponsor` NO lo lee.
+  releaseAuthority: undefined,
 };
 
 // Fixed identities shared between the on-chain `state` and the tx accounts.

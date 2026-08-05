@@ -190,6 +190,11 @@ export const solanaEscrowReleaseRoute: FastifyPluginAsync = async (app) => {
     // chains/solana-escrow.ts:220). Va igual para que el día que lo lea encuentre
     // el valor configurado y no un `undefined`.
     usdcMint: env.SOLANA_USDC_MINT,
+    // Idem: campo compartido con el `deposit` (Check 4d de `validateDepositForSponsor`).
+    // `validateReleaseForSponsor` NO lo lee — la authority del release se compara contra
+    // el `EscrowState` on-chain en el Step 4b de esta misma ruta. Va `undefined` para no
+    // sugerir que acá hay un guard que no existe.
+    releaseAuthority: undefined,
   };
 
   app.post(

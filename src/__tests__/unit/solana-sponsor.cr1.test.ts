@@ -47,13 +47,45 @@ const USDC_MINT_PK = new PublicKey(
   '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU',
 );
 
+/**
+ * La release-authority configurada. `RELEASE_AUTHORITY_PK` es la de una instancia que
+ * TAMBIEN libera; `CFG` la deja en `undefined` a proposito, que es la instancia
+ * sponsor-only y el estado en el que TODOS los vectores preexistentes siguen midiendo
+ * lo suyo (el Check 4d desarmado no cambia una sola linea de su recorrido).
+ */
+const RELEASE_AUTHORITY_PK = Keypair.generate().publicKey;
+
 const CFG: Cr1Config = {
   escrowProgramId: ESCROW_PROGRAM_ID_DEFAULT,
   maxComputeUnits: 300_000,
   maxPriorityFeeMicroLamports: 50_000,
   maxFeeLamports: 100_000n,
   usdcMint: USDC_MINT_PK.toBase58(),
+  releaseAuthority: undefined,
 };
+
+/** La misma config, pero en una instancia que SI tiene la llave del release. */
+const CFG_WITH_AUTHORITY: Cr1Config = {
+  ...CFG,
+  releaseAuthority: RELEASE_AUTHORITY_PK.toBase58(),
+};
+
+/**
+ * `data` de un `deposit` con el layout REAL: 8 disc + 16 rid + 32 beneficiary +
+ * 32 authority + 8 amount + 8 deadline = 104. El `beneficiary` es SIEMPRE otra pubkey
+ * distinta de la authority: si el offset estuviera corrido a 24, un deposito legitimo
+ * se rechazaria y el test lo caza.
+ */
+function depositDataWithAuthority(authority: PublicKey): Buffer {
+  return Buffer.concat([
+    Buffer.from([...DEPOSIT_DISCRIMINATOR]),
+    Buffer.alloc(16), // remittance_id
+    Keypair.generate().publicKey.toBuffer(), // beneficiary (NUNCA igual a la authority)
+    authority.toBuffer(), // <- AUTHORITY_OFFSET = 56
+    Buffer.alloc(8), // amount
+    Buffer.alloc(8), // deadline
+  ]);
+}
 
 function depositData(disc: readonly number[] = DEPOSIT_DISCRIMINATOR): Buffer {
   return Buffer.concat([Buffer.from([...disc]), Buffer.alloc(16 + 32 + 32 + 8 + 8)]);
@@ -401,6 +433,118 @@ describe('CR-1 validateDepositForSponsor', () => {
     const r = validateDepositForSponsor(tx, feePayer, CFG);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe('MINT_MISMATCH');
+  });
+
+  // ── Check 4d — la `authority` que el depósito GRABA en el escrow ─────────────
+  //
+  // `data[56..88]` es la única pubkey que después puede firmar el `release` de ese
+  // escrow. Quién la elige es chaski, desde SU env, y el facilitator no la comparaba
+  // contra nada. Un depósito con la authority equivocada se patrocina igual y NACE
+  // IRRELEASEABLE: nadie se entera hasta que la ventana de custodia (2 h) se acaba.
+
+  it('T-AUTH1: authority = la configurada → ok (el camino real)', () => {
+    const tx = buildDepositTx({
+      feePayer,
+      data: depositDataWithAuthority(RELEASE_AUTHORITY_PK),
+    });
+    const r = validateDepositForSponsor(tx, feePayer, CFG_WITH_AUTHORITY);
+    expect(r.ok).toBe(true);
+  });
+
+  it('★ T-AUTH2: authority ajena → reject DEPOSIT_AUTHORITY_MISMATCH, NO se firma', () => {
+    // La env de chaski desalineada. Antes: 200, gas gastado, escrow irreleaseable.
+    const tx = buildDepositTx({
+      feePayer,
+      data: depositDataWithAuthority(Keypair.generate().publicKey),
+    });
+    const r = validateDepositForSponsor(tx, feePayer, CFG_WITH_AUTHORITY);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe('DEPOSIT_AUTHORITY_MISMATCH');
+  });
+
+  it('★ T-AUTH2b: authority en la pubkey NULA (env vacía del lado de chaski) → reject', () => {
+    // Una env vacía no explota: graba 32 ceros, que es un pubkey válido y de nadie.
+    const tx = buildDepositTx({ feePayer, data: depositDataWithAuthority(PublicKey.default) });
+    const r = validateDepositForSponsor(tx, feePayer, CFG_WITH_AUTHORITY);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe('DEPOSIT_AUTHORITY_MISMATCH');
+  });
+
+  /**
+   * ★★ LA DECISIÓN DE MODO DE FALLA, y por qué es la CONTRARIA a la del mint (T-MINT3).
+   *
+   * `SOLANA_USDC_MINT` es condición para que el adapter Solana se registre, así que una
+   * instancia que puede patrocinar SIEMPRE la tiene: rechazar ante su ausencia no le
+   * cuesta nada a nadie. La release-authority tiene bandera propia
+   * (`SOLANA_ESCROW_RELEASE_ENABLED`), independiente de la del sponsor, y una instancia
+   * puede tener legítimamente sólo la del sponsor. Rechazar ahí tumbaría el patrocinio
+   * entero — una capacidad bien configurada — por la falta de una env que no es suya.
+   *
+   * Lo que hace que esto NO sea "un guard que se apaga solo": la ruta avisa en el
+   * arranque cuando queda desarmado (solana-sponsor.route.test.ts lo clava).
+   */
+  it('★★ T-AUTH3: sin release-authority configurada → el check se DESARMA, no rechaza', () => {
+    const tx = buildDepositTx({
+      feePayer,
+      data: depositDataWithAuthority(Keypair.generate().publicKey),
+    });
+    // Misma tx que T-AUTH2 (authority ajena), pero en una instancia sponsor-only.
+    const r = validateDepositForSponsor(tx, feePayer, { ...CFG, releaseAuthority: undefined });
+    expect(r.ok).toBe(true);
+  });
+
+  it('T-AUTH3b: release-authority en "" (env seteada vacía) → también desarmado', () => {
+    const tx = buildDepositTx({
+      feePayer,
+      data: depositDataWithAuthority(Keypair.generate().publicKey),
+    });
+    const r = validateDepositForSponsor(tx, feePayer, { ...CFG, releaseAuthority: '' });
+    expect(r.ok).toBe(true);
+  });
+
+  it('T-AUTH4: release-authority presente pero ilegible → reject (≠ ausente)', () => {
+    // "Mal escrita" NO es "ausente": una config presente y rota es un error del
+    // operador, y ahí sí se falla cerrado (mismo criterio que BAD_ESCROW_PROGRAM_ID).
+    const tx = buildDepositTx({
+      feePayer,
+      data: depositDataWithAuthority(RELEASE_AUTHORITY_PK),
+    });
+    const r = validateDepositForSponsor(tx, feePayer, {
+      ...CFG,
+      releaseAuthority: 'no-es-un-pubkey-!!!',
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe('BAD_RELEASE_AUTHORITY_CONFIG');
+  });
+
+  it('T-AUTH5: ix-data más corta que el offset → reject, sin tirar excepción', () => {
+    // El Check 4 sólo exige 8 bytes, así que una ix truncada llega viva hasta acá.
+    const tx = buildDepositTx({
+      feePayer,
+      data: Buffer.concat([Buffer.from([...DEPOSIT_DISCRIMINATOR]), Buffer.alloc(20)]),
+    });
+    const r = validateDepositForSponsor(tx, feePayer, CFG_WITH_AUTHORITY);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe('DEPOSIT_DATA_TOO_SHORT_FOR_AUTHORITY');
+  });
+
+  /**
+   * ★ CLAVO DEL OFFSET. El fixture pone `beneficiary` (offset 24) y `authority`
+   * (offset 56) en pubkeys DISTINTAS, así que un offset corrido a 24 leería el
+   * beneficiary y rechazaría este depósito legítimo. Sin este test, `AUTHORITY_OFFSET`
+   * se podría equivocar y la suite entera seguiría verde con el check comparando el
+   * campo equivocado contra sí mismo.
+   */
+  it('★ T-AUTH6: el offset es 56 — el beneficiary (24) NO se confunde con la authority', () => {
+    const data = depositDataWithAuthority(RELEASE_AUTHORITY_PK);
+    // El fixture cumple su premisa: los dos campos son distintos.
+    expect(data.subarray(24, 56).equals(data.subarray(56, 88))).toBe(false);
+    const r = validateDepositForSponsor(
+      buildDepositTx({ feePayer, data }),
+      feePayer,
+      CFG_WITH_AUTHORITY,
+    );
+    expect(r.ok).toBe(true);
   });
 });
 

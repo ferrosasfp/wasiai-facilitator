@@ -133,12 +133,15 @@ function signMessage(kp: Keypair, message: string): string {
   return bs58.encode(cryptoSign(null, Buffer.from(message, 'utf8'), key));
 }
 
-function depositData(remittanceId: string, amountMinor: bigint): Buffer {
+function depositData(remittanceId: string, amountMinor: bigint, authority?: PublicKey): Buffer {
   const data = Buffer.alloc(DEPOSIT_DATA_LEN);
   Buffer.from([...DEPOSIT_DISCRIMINATOR]).copy(data, 0);
   createHash('sha256').update(remittanceId, 'utf8').digest().subarray(0, 16).copy(data, 8);
   Keypair.generate().publicKey.toBuffer().copy(data, 24); // beneficiary
-  Keypair.generate().publicKey.toBuffer().copy(data, 56); // authority
+  // La authority por default es un pubkey al azar — o sea la de un depósito que NADIE
+  // podría liberar. Es el estado real de este archivo antes del Check 4d, y sigue
+  // pasando porque en este entorno el check está DESARMADO (sin release-authority).
+  (authority ?? Keypair.generate().publicKey).toBuffer().copy(data, 56); // authority
   data.writeBigUInt64LE(amountMinor, AMOUNT_OFFSET);
   data.writeBigInt64LE(1900000000n, 96);
   return data;
@@ -161,6 +164,8 @@ function buildValidSponsorTx(opts?: {
   amountMinor?: bigint;
   mint?: PublicKey;
   remittanceId?: string;
+  /** `authority` grabada en `data[56..88]` — lo que CR-1 Check 4d compara. */
+  authority?: PublicKey;
 }): ValidSponsorTx {
   const senderKeypair = opts?.senderKeypair ?? Keypair.generate();
   const mint = opts?.mint ?? MINT;
@@ -176,7 +181,11 @@ function buildValidSponsorTx(opts?: {
       { pubkey: new PublicKey(ASSOCIATED_TOKEN_PROGRAM_ID), isSigner: false, isWritable: false },
       { pubkey: new PublicKey(SYSTEM_PROGRAM_ID), isSigner: false, isWritable: false },
     ],
-    data: depositData(opts?.remittanceId ?? REMITTANCE_ID, opts?.amountMinor ?? AMOUNT_MINOR),
+    data: depositData(
+      opts?.remittanceId ?? REMITTANCE_ID,
+      opts?.amountMinor ?? AMOUNT_MINOR,
+      opts?.authority,
+    ),
   });
   const tx = new Transaction().add(ix);
   tx.feePayer = feePayerKp.publicKey;
@@ -763,6 +772,98 @@ describe('POST /solana/sponsor', () => {
     const r = capturedValidate()(buildValidSponsorTx().tx, feePayerKp.publicKey);
     expect(r.ok).toBe(false);
     expect(r.reason).toBe('USDC_MINT_NOT_CONFIGURED');
+  });
+
+  // ── SOLANA_ESCROW_RELEASE_AUTHORITY_SECRET_KEY → CR-1 Check 4d (cableado) ────
+  /**
+   * Mismo método que los del mint: se agarra el `validate` REAL que la ruta le pasó al
+   * primitivo. Un `Cr1Config` escrito a mano en un test pasaría igual aunque la ruta se
+   * olvidara de poblar `releaseAuthority` — que es exactamente el modo en que un guard
+   * nuevo puede quedar sin cablear y con la suite verde.
+   */
+  const RELEASE_KP = Keypair.generate();
+
+  function withReleaseAuthorityEnv<T>(fn: () => Promise<T>): Promise<T> {
+    const saved = process.env.SOLANA_ESCROW_RELEASE_AUTHORITY_SECRET_KEY;
+    process.env.SOLANA_ESCROW_RELEASE_AUTHORITY_SECRET_KEY = JSON.stringify(
+      Array.from(RELEASE_KP.secretKey),
+    );
+    const restore = async (): Promise<void> => {
+      if (saved === undefined) delete process.env.SOLANA_ESCROW_RELEASE_AUTHORITY_SECRET_KEY;
+      else process.env.SOLANA_ESCROW_RELEASE_AUTHORITY_SECRET_KEY = saved;
+      const { resetReleaseAuthorityForTesting } =
+        await import('../../infra/solana-release-authority.js');
+      resetReleaseAuthorityForTesting();
+    };
+    return fn().then(
+      async (v) => {
+        await restore();
+        return v;
+      },
+      async (e: unknown) => {
+        await restore();
+        throw e;
+      },
+    );
+  }
+
+  it('★ la authority que CR-1 exige sale de la env del release, no de una constante', async () => {
+    await withReleaseAuthorityEnv(async () => {
+      const { resetReleaseAuthorityForTesting } =
+        await import('../../infra/solana-release-authority.js');
+      resetReleaseAuthorityForTesting();
+      const res = await post(validBody());
+      expect(res.statusCode).toBe(200);
+      const validate = capturedValidate();
+      // El depósito que nombra NUESTRA authority pasa...
+      expect(
+        validate(buildValidSponsorTx({ authority: RELEASE_KP.publicKey }).tx, feePayerKp.publicKey)
+          .ok,
+      ).toBe(true);
+      // ...y el que nombra otra (la env de chaski desalineada) deja de pasar. Si la
+      // ruta no pasara `releaseAuthority`, la segunda mitad se cae.
+      const r = validate(
+        buildValidSponsorTx({ authority: Keypair.generate().publicKey }).tx,
+        feePayerKp.publicKey,
+      );
+      expect(r.ok).toBe(false);
+      expect(r.reason).toBe('DEPOSIT_AUTHORITY_MISMATCH');
+    });
+  });
+
+  it('★★ sin la llave del release, el patrocinio NO se cae: el check queda desarmado', async () => {
+    // La decisión de modo de falla, medida. `SOLANA_ESCROW_RELEASE_AUTHORITY_SECRET_KEY`
+    // NO está seteada en este entorno (una instancia sponsor-only, que es legítima).
+    // Si el check rechazara ante su ausencia — como sí hace el del mint — tumbaría una
+    // capacidad bien configurada por una env que no es suya.
+    const res = await post(validBody());
+    expect(res.statusCode).toBe(200);
+    const r = capturedValidate()(
+      buildValidSponsorTx({ authority: Keypair.generate().publicKey }).tx,
+      feePayerKp.publicKey,
+    );
+    expect(r.ok).toBe(true);
+  });
+
+  it('★★ ...y ese desarme NO es silencioso: el arranque lo dice', async () => {
+    const cap = new CaptureStream();
+    await withLogs(() => post(validBody(), cap));
+    expect(cap.text().length).toBeGreaterThan(0);
+    expect(cap.text()).toContain('CR1_DEPOSIT_AUTHORITY');
+    expect(cap.text()).toContain('DISARMED');
+  });
+
+  it('★ con la llave presente el arranque NO avisa de desarme', async () => {
+    await withReleaseAuthorityEnv(async () => {
+      const { resetReleaseAuthorityForTesting } =
+        await import('../../infra/solana-release-authority.js');
+      resetReleaseAuthorityForTesting();
+      const cap = new CaptureStream();
+      await withLogs(() => post(validBody(), cap));
+      // El `warn` del desarme no aparece. (El `info` del armado no se mide acá: el
+      // nivel del capture es 'warn', y subirlo mediría el logger, no este guard.)
+      expect(cap.text()).not.toContain('DISARMED');
+    });
   });
 
   it('★ el rechazo por mint sale como marcador al log y NO al cliente (no-oracle)', async () => {
