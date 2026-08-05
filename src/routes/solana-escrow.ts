@@ -22,6 +22,13 @@
  *   - el Step 4 de ESTA misma invocación, que corta con 409 si el escrow ya figura
  *     `Released` on-chain — la tentativa anterior que SÍ aterrizó se detecta ahí.
  *
+ * TRES DESENLACES, NO DOS. Un broadcast termina en `salió` (200 + firma), `no salió`
+ * (409/422/500 — probado que no se gastó) o `NO SÉ` (`RELEASE_BROADCAST_UNKNOWN`, 502).
+ * El tercero se decide por `CosignResult.sent`, no por el código del primitivo, porque
+ * `SPONSOR_BROADCAST_EXPIRED` se emite también DESPUÉS de un envío exitoso y ahí no
+ * significa "venció" sino "no pude preguntar". La firma y el blockhash quedan en el
+ * claim (`markReleaseSigned`, migración 007) para poder reconciliar ese "no sé".
+ *
  * ⚠️ SECURITY: the release-authority signs ONLY after `validateReleaseForSponsor`
  * (CR-1 of the release) authorizes the exact `release` tx (fail-closed, CD-3). The
  * `beneficiary` is ALWAYS `escrow_state.beneficiary` read on-chain (CD-4), never
@@ -64,6 +71,11 @@ import { buildReleaseTx } from '../methods/solana-escrow/build-release.js';
 import { validateReleaseForSponsor } from '../methods/solana-escrow/cr1-release.js';
 import { cosignAndBroadcast } from '../methods/solana-sponsor/broadcast.js';
 import type { Cr1Config } from '../methods/solana-sponsor/cr1.js';
+// Pure base58 encoder for a raw ed25519 signature. It lives under
+// `methods/solana-payout/` because WKH-302 needed it first; it is data encoding with
+// no payout semantics, so re-implementing it here would be a second copy of the same
+// three lines in the money path. OWNERS.md [6] lists this import.
+import { encodeSignatureBase58 } from '../methods/solana-payout/payout-shape.js';
 
 type ReleaseErrorCode =
   | 'INVALID_PAYLOAD'
@@ -72,7 +84,18 @@ type ReleaseErrorCode =
   | 'RELEASE_STORE_UNAVAILABLE'
   | 'RELEASE_NOT_ENABLED'
   | 'RELEASE_BROADCAST_EXPIRED'
-  | 'RELEASE_BROADCAST_FAILED';
+  | 'RELEASE_BROADCAST_FAILED'
+  /**
+   * La tx SE TRANSMITIÓ al cluster y no se pudo determinar su suerte. NO es un
+   * fracaso y NO es un éxito: es la tercera respuesta, y existe porque las otras dos
+   * mienten en este caso. Copiado de `PAYOUT_BROADCAST_UNKNOWN`
+   * (routes/solana-payout.ts), que resolvió exactamente esto para el payout.
+   *
+   * Antes este caso salía como `RELEASE_BROADCAST_EXPIRED / 409 / "Transaction
+   * blockhash expired"`, que de los dos lados se lee como "no salió, reintentá" —
+   * y el beneficiario podía estar ya cobrado.
+   */
+  | 'RELEASE_BROADCAST_UNKNOWN';
 
 interface ErrorBody {
   readonly error: {
@@ -330,8 +353,12 @@ export const solanaEscrowReleaseRoute: FastifyPluginAsync = async (app) => {
 
       // Step 6 — build the release tx from ON-CHAIN state (beneficiary from state, CD-4).
       let releaseTxBase64: string;
+      // Se saca del `try` porque el Step 7 lo persiste junto con la firma: es el dato
+      // que acota la ventana en la que esa tx pudo entrar al cluster.
+      let recentBlockhash: string;
       try {
         const { blockhash } = await connection.getLatestBlockhash('confirmed');
+        recentBlockhash = blockhash;
         releaseTxBase64 = buildReleaseTx({
           state,
           remittanceId: body.remittanceId,
@@ -363,7 +390,26 @@ export const solanaEscrowReleaseRoute: FastifyPluginAsync = async (app) => {
         // También re-ancla el lease en el instante de la firma, que es el único
         // momento a partir del cual pudo existir una tx: sin eso el lease tendría que
         // cubrir un hueco sin cota (un `getLatestBlockhash` colgado se lo come solo).
-        onSigned: () => markReleaseSigned(claimEntry, app.log),
+        //
+        // Y ADEMÁS persiste la FIRMA y el BLOCKHASH (migración 007). Hasta acá la
+        // firma de un release existía en un solo lugar: el body de la respuesta HTTP.
+        // La tabla no tenía columna y `infra/logger.ts` redacta el campo `signature`,
+        // así que una respuesta perdida no dejaba NADA nuestro con qué reconciliar —
+        // justo el dato que hace falta cuando el desenlace queda en "no sé".
+        // Mismo lugar y mismo orden que `markSigned` del payout: entre `partialSign`
+        // y `serialize`, o sea antes de que la tx pueda existir para el cluster.
+        onSigned: async (tx) => {
+          const raw = tx.signatures.at(0)?.signature;
+          // Sin firma no hay nada que persistir, y persistir "no sé qué firmé" es
+          // peor que no persistir: `{ ok:false }` ⇒ el primitivo NO transmite.
+          if (!raw) return { ok: false };
+          return markReleaseSigned(
+            claimEntry,
+            encodeSignatureBase58(Uint8Array.from(raw)),
+            recentBlockhash,
+            app.log,
+          );
+        },
       });
 
       if (result.ok) {
@@ -379,7 +425,58 @@ export const solanaEscrowReleaseRoute: FastifyPluginAsync = async (app) => {
         return reply.code(200).send({ signature: result.signature });
       }
 
-      // Step 8 — map the primitive error code → HTTP (no echo of the tx/state).
+      // ── Step 8 — "no pude preguntar" ≠ "no salió" ───────────────────────────────
+      //
+      // `CosignResult.sent` existe exactamente para esto, y hasta acá esta ruta era la
+      // que lo tiraba a la basura (el único consumidor era el payout).
+      // `SPONSOR_BROADCAST_EXPIRED` se emite desde DOS sondas que corren DESPUÉS de un
+      // `sendRawTransaction` exitoso (broadcast.ts:291-301 y :339-349), y el `catch` de
+      // esas sondas significa "no pude preguntar", no "el blockhash venció". Traducirlo
+      // a `409 RELEASE_BROADCAST_EXPIRED / "Transaction blockhash expired"` afirmaba
+      // "no salió, reintentá" sobre un escrow que podía estar ya liberado.
+      //
+      // Con `sent` en true la disposición del valor es DESCONOCIDA y así se contesta.
+      // Ningún reintento se pierde por esto: la próxima invocación relee el estado
+      // on-chain en el Step 4 y, si el release SÍ aterrizó, corta con
+      // `RELEASE_REPLAY / 409 / "Escrow already released"` — que es el desenlace
+      // honesto. Y la firma quedó persistida en el claim (Step 7) para reconciliar.
+      //
+      // NO se intenta resolver la incógnita acá con una relectura del `EscrowState`,
+      // a diferencia del payout: el payout verifica LA FIRMA (`verifyPayoutSignature`)
+      // y por eso puede devolver un 200 honesto. Acá lo único que se podría mirar es
+      // el estado `Released`, que prueba que el escrow se liberó pero NO que lo haya
+      // hecho NUESTRA tx, así que un `{ signature }` de vuelta sería una atribución
+      // que no podemos sostener.
+      if (result.sent === true) {
+        // Log PROPIO: `fail()` escribe 'solana escrow release failed', y este
+        // desenlace no es un fallo. Un log que lo llame fallo es la misma mentira que
+        // el 409, corrida a otra superficie.
+        app.log.error(
+          {
+            request_id: requestId,
+            error_code: 'RELEASE_BROADCAST_UNKNOWN' satisfies ReleaseErrorCode,
+            http_status: 502,
+            facilitator_key_id: keyId,
+            duration_ms: Date.now() - startMs,
+            guard: result.reason,
+            // Con qué buscar la firma persistida en `facilitator_solana_release_claims`.
+            // Es un PDA público, no PII y no un secreto.
+            escrow_pda: state.escrowStatePda,
+          },
+          'solana escrow release outcome UNKNOWN — transaction was broadcast, on-chain effect undetermined',
+        );
+        return reply.code(502).send({
+          error: {
+            code: 'RELEASE_BROADCAST_UNKNOWN',
+            message: 'Transaction was broadcast; its on-chain outcome could not be determined',
+            http: 502,
+          },
+        } satisfies ErrorBody);
+      }
+
+      // Step 8b — map the primitive error code → HTTP (no echo of the tx/state).
+      // A partir de acá `result.sent` es falso/ausente: NINGÚN envío tuvo éxito, así
+      // que estos códigos sí pueden afirmar que no se gastó.
       switch (result.code) {
         case 'SPONSOR_UNSUPPORTED_TX':
           return fail(
@@ -389,6 +486,9 @@ export const solanaEscrowReleaseRoute: FastifyPluginAsync = async (app) => {
             result.reason,
           );
         case 'SPONSOR_BROADCAST_EXPIRED':
+          // Alcanzable SÓLO sin envío previo (la sonda PRE-firma de broadcast.ts:224-232,
+          // o un blockhash ya vencido antes del primer send). Ahí sí está probado que
+          // no se gastó nada, y el 409 "reintentá" es correcto.
           return fail(
             'RELEASE_BROADCAST_EXPIRED',
             409,
@@ -396,7 +496,17 @@ export const solanaEscrowReleaseRoute: FastifyPluginAsync = async (app) => {
             result.reason,
           );
         case 'SPONSOR_BROADCAST_FAILED':
-          return fail('RELEASE_BROADCAST_FAILED', 502, 'Broadcast failed', result.reason);
+          // Defensivo. El primitivo sólo emite este código tras agotar los reintentos,
+          // y para llegar ahí ya hubo al menos un `sendRawTransaction` (exitoso o que
+          // tiró, los dos marcan `sent`), así que en la práctica lo captura el bloque
+          // de arriba. Se deja porque el contrato del primitivo no lo garantiza por
+          // tipo, y el mensaje ya no afirma que la tx no salió.
+          return fail(
+            'RELEASE_BROADCAST_FAILED',
+            502,
+            'Broadcast could not be confirmed',
+            result.reason,
+          );
         case 'SPONSOR_PERSIST_FAILED':
           // La cerca no se pudo tomar (otro request ya pasó a `signed`, o el store
           // no respondió). El primitivo NO transmitió, así que este request no

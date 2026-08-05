@@ -22,6 +22,9 @@ interface Row {
   network: string;
   status: string;
   claimed_at: string;
+  /** Migración 007. NULL mientras no se firmó — y eso prueba que no se transmitió nada. */
+  signature: string | null;
+  recent_blockhash: string | null;
 }
 
 type Filter = { op: 'eq' | 'lt'; col: string; value: unknown };
@@ -69,6 +72,8 @@ class FakeTable {
       network: String(obj.network),
       status: 'claimed',
       claimed_at: new Date().toISOString(),
+      signature: null,
+      recent_blockhash: null,
     });
     return { error: null };
   }
@@ -106,6 +111,10 @@ function readColumn(row: Row, col: string): unknown {
       return row.status;
     case 'claimed_at':
       return row.claimed_at;
+    case 'signature':
+      return row.signature;
+    case 'recent_blockhash':
+      return row.recent_blockhash;
     default:
       return undefined;
   }
@@ -118,6 +127,15 @@ function writeColumn(row: Row, col: string, value: unknown): void {
       break;
     case 'claimed_at':
       row.claimed_at = String(value);
+      break;
+    // ⚠️ Sin estos dos casos el `default: break` se COME la firma y la persistencia de
+    // 007 no se podría afirmar: `markReleaseSigned` podría dejar de escribirla y el
+    // doble diría lo mismo.
+    case 'signature':
+      row.signature = value === null ? null : String(value);
+      break;
+    case 'recent_blockhash':
+      row.recent_blockhash = value === null ? null : String(value);
       break;
     default:
       break;
@@ -173,6 +191,10 @@ const ENTRY: ReleaseClaimEntry = {
 };
 
 const LEASE_MS = 180_000;
+
+/** Firma + blockhash que `markReleaseSigned` persiste (migración 007). */
+const SIGNATURE = 'SIGrelease1111111111111111111111111111111111';
+const BLOCKHASH = 'Blockhash11111111111111111111111111111111111';
 
 let table: FakeTable;
 
@@ -249,7 +271,7 @@ describe('stealStaleReleaseClaim — el claim trabado se vuelve recuperable', ()
     // escrow quedaba irreleaseable. Lo que lo hace seguro no es el status sino que el
     // lease supera la vida de un blockhash (más el chequeo on-chain de la ruta).
     await claimEscrowRelease(ENTRY, logger);
-    expect(await markReleaseSigned(ENTRY, logger)).toEqual({ ok: true });
+    expect(await markReleaseSigned(ENTRY, SIGNATURE, BLOCKHASH, logger)).toEqual({ ok: true });
     table.age(LEASE_MS + 60_000);
     expect((await stealStaleReleaseClaim(ENTRY, LEASE_MS, logger)).stolen).toBe(true);
     // Y vuelve a 'claimed', para que la cerca de un solo disparo pueda ganarse de nuevo.
@@ -282,13 +304,48 @@ describe('stealStaleReleaseClaim — el claim trabado se vuelve recuperable', ()
   });
 });
 
+describe('markReleaseSigned — la firma queda del lado nuestro (007)', () => {
+  /**
+   * ★ Hasta la 007 la firma de un release existía en UN solo lugar: el body de la
+   * respuesta HTTP. La tabla no tenía columna y `infra/logger.ts` redacta el campo
+   * `signature`, así que una respuesta perdida (timeout, proceso reiniciado, sonda
+   * post-envío que no pudo preguntar) no dejaba NADA con qué reconciliar.
+   */
+  it('★ persiste `signature` y `recent_blockhash` junto con la transición a signed', async () => {
+    await claimEscrowRelease(ENTRY, logger);
+    // Antes de firmar la fila NO tiene firma, y ESA es la dirección que prueba algo:
+    // sin firma no se transmitió nada (la firma se escribe antes de `serialize`).
+    expect(table.rows.at(0)?.signature).toBeNull();
+    expect(table.rows.at(0)?.recent_blockhash).toBeNull();
+
+    expect(await markReleaseSigned(ENTRY, SIGNATURE, BLOCKHASH, logger)).toEqual({ ok: true });
+
+    expect(table.rows.at(0)?.status).toBe('signed');
+    expect(table.rows.at(0)?.signature).toBe(SIGNATURE);
+    expect(table.rows.at(0)?.recent_blockhash).toBe(BLOCKHASH);
+  });
+
+  it('★ el que PIERDE la cerca no pisa la firma del que la ganó', async () => {
+    await claimEscrowRelease(ENTRY, logger);
+    expect(await markReleaseSigned(ENTRY, SIGNATURE, BLOCKHASH, logger)).toEqual({ ok: true });
+    // El perdedor llega con OTRA firma: el filtro `status='claimed'` no matchea, así
+    // que su UPDATE no toca nada. Si lo tocara, la fila quedaría apuntando a una tx
+    // que nunca se transmitió y la reconciliación miraría la transacción equivocada.
+    expect(
+      await markReleaseSigned(ENTRY, 'OTRAfirma1111111111111111111111', 'OtroBlockhash111', logger),
+    ).toEqual({ ok: false });
+    expect(table.rows.at(0)?.signature).toBe(SIGNATURE);
+    expect(table.rows.at(0)?.recent_blockhash).toBe(BLOCKHASH);
+  });
+});
+
 describe('markReleaseSigned — la cerca de un solo disparo', () => {
   it('★ dos firmantes que sobrevivieron al lease → exactamente uno puede transmitir', async () => {
     await claimEscrowRelease(ENTRY, logger);
     table.latencyMs = 2;
     const [a, b] = await Promise.all([
-      markReleaseSigned(ENTRY, logger),
-      markReleaseSigned(ENTRY, logger),
+      markReleaseSigned(ENTRY, SIGNATURE, BLOCKHASH, logger),
+      markReleaseSigned(ENTRY, SIGNATURE, BLOCKHASH, logger),
     ]);
     expect([a.ok, b.ok].filter(Boolean)).toHaveLength(1);
   });
@@ -299,14 +356,14 @@ describe('markReleaseSigned — la cerca de un solo disparo', () => {
     await claimEscrowRelease(ENTRY, logger); // A
     table.age(LEASE_MS + 60_000);
     expect((await stealStaleReleaseClaim(ENTRY, LEASE_MS, logger)).stolen).toBe(true); // B
-    expect(await markReleaseSigned(ENTRY, logger)).toEqual({ ok: true }); // B firma primero
-    expect(await markReleaseSigned(ENTRY, logger)).toEqual({ ok: false }); // A llega tarde
+    expect(await markReleaseSigned(ENTRY, SIGNATURE, BLOCKHASH, logger)).toEqual({ ok: true }); // B firma primero
+    expect(await markReleaseSigned(ENTRY, SIGNATURE, BLOCKHASH, logger)).toEqual({ ok: false }); // A llega tarde
   });
 
   it('re-ancla el lease en el instante de la firma', async () => {
     await claimEscrowRelease(ENTRY, logger);
     table.age(LEASE_MS + 60_000);
-    await markReleaseSigned(ENTRY, logger);
+    await markReleaseSigned(ENTRY, SIGNATURE, BLOCKHASH, logger);
     // El claim era robable un instante antes de firmar; después de firmar ya no.
     expect((await stealStaleReleaseClaim(ENTRY, LEASE_MS, logger)).stolen).toBe(false);
   });
@@ -315,14 +372,14 @@ describe('markReleaseSigned — la cerca de un solo disparo', () => {
     await claimEscrowRelease(ENTRY, logger);
 
     h.nullClient.on = true;
-    expect(await markReleaseSigned(ENTRY, logger)).toEqual({ ok: false });
+    expect(await markReleaseSigned(ENTRY, SIGNATURE, BLOCKHASH, logger)).toEqual({ ok: false });
     h.nullClient.on = false;
 
     table.errorMode = { message: 'boom' };
-    expect(await markReleaseSigned(ENTRY, logger)).toEqual({ ok: false });
+    expect(await markReleaseSigned(ENTRY, SIGNATURE, BLOCKHASH, logger)).toEqual({ ok: false });
     table.errorMode = null;
 
     table.throwMode = true;
-    expect(await markReleaseSigned(ENTRY, logger)).toEqual({ ok: false });
+    expect(await markReleaseSigned(ENTRY, SIGNATURE, BLOCKHASH, logger)).toEqual({ ok: false });
   });
 });

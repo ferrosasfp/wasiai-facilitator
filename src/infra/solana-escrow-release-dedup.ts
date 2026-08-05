@@ -201,10 +201,24 @@ export async function stealStaleReleaseClaim(
  * re-anchoring the lease would have to cover an unbounded gap (a hung
  * `getLatestBlockhash` alone can eat it) and a takeover could race a live tx.
  *
+ * IT ALSO PERSISTS `signature` + `recentBlockhash` (migration 007). Until it did,
+ * the ONLY place a release signature ever existed was the HTTP response body: the
+ * table had no column for it and `src/infra/logger.ts` redacts the `signature`
+ * field, so a lost response left NOTHING on our side to reconcile with. Writing it
+ * here is free — a Solana signature exists before the tx is transmitted — and it is
+ * the same ordering `facilitator_solana_payouts` relies on (invariant I2): a row
+ * WITHOUT a signature proves nothing was broadcast.
+ *
+ * ⚠️ The converse is NOT true and must not be read into it: a row WITH a signature
+ * says the tx was signed. It does not say it was sent, and it does not say it
+ * landed. Only the chain answers that.
+ *
  * FAIL-CLOSED: null client / error / exception ⇒ `{ ok:false }` ⇒ no broadcast.
  */
 export async function markReleaseSigned(
   entry: ReleaseClaimEntry,
+  signature: string,
+  recentBlockhash: string,
   logger?: ReleaseDedupLogger,
 ): Promise<{ ok: boolean }> {
   try {
@@ -218,7 +232,12 @@ export async function markReleaseSigned(
     }
     const { data, error } = await client
       .from(TABLE)
-      .update({ status: 'signed', claimed_at: new Date().toISOString() })
+      .update({
+        status: 'signed',
+        claimed_at: new Date().toISOString(),
+        signature,
+        recent_blockhash: recentBlockhash,
+      })
       .eq('escrow_pda', entry.escrowPda)
       .eq('network', entry.network)
       .eq('status', 'claimed')
