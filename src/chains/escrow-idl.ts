@@ -146,6 +146,42 @@ export const escrowIdl = {
           name: 'token_program',
           address: 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
         },
+        {
+          name: 'escrow_index',
+          docs: [
+            'Índice del sender, cuenta OPCIONAL. Si se la pasa, `close` saca de `entries` el',
+            '`remittance_id` que está cerrando; si se la omite, `close` no la lee ni la crea (un sender',
+            'que nunca llamó `register_escrow` no tiene esta PDA y su `close` tiene que funcionar igual).',
+            '',
+            'Omitirla se escribe `escrowIndex: null` EXPLÍCITO. Dejar la clave afuera del objeto de',
+            'cuentas NO la omite: el cliente deriva la PDA `["escrow-index", sender]` a partir de las',
+            'seeds que declara este IDL y la manda igual, y si esa cuenta no existe la tx revierte con',
+            '`AccountNotInitialized` (3012), un error que no nombra la palabra "opcional" y manda a',
+            'buscar donde no es.',
+            '',
+            'Omitirla cuando el índice SÍ existe y SÍ contiene el id no revierte: deja la entrada',
+            'colgada, ocupando uno de los 32 lugares hasta que alguien llame `deregister_escrow` con ese',
+            'id. O sea que la omisión reintroduce, para ese id, el cap monótono que esta cuenta existe',
+            'para evitar.',
+            '',
+            'Regla para el cliente: un `getAccountInfo` sobre `["escrow-index", sender]` antes de armar',
+            'la tx. Si devuelve una cuenta, pasarla; si devuelve null, `null` explícito.',
+          ],
+          writable: true,
+          optional: true,
+          pda: {
+            seeds: [
+              {
+                kind: 'const',
+                value: [101, 115, 99, 114, 111, 119, 45, 105, 110, 100, 101, 120],
+              },
+              {
+                kind: 'account',
+                path: 'sender',
+              },
+            ],
+          },
+        },
       ],
       args: [
         {

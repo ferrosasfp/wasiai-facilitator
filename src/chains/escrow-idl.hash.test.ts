@@ -20,6 +20,15 @@ import { canonicalSha256 } from './canonical-hash.js';
 // Pinneada y verificada en F2 sobre los 3 IDL reales (todos canonicalizan igual, address DR5G).
 // HU-SOL-20/R2a: re-pinneada tras R1 (EscrowIndex + register_escrow/deregister_escrow). `EscrowState`
 // NO cambió: mismo discriminator y mismo layout, por eso el decode de la cuenta es idéntico.
+// RE-PIN 2026-08-05 — despliegue en devnet (slot 481495859, binario verificado byte a byte contra el
+// artefacto local). Diff normalizado del IDL entero (claves ordenadas): la ÚNICA diferencia es que
+// `close` suma una SÉPTIMA cuenta, `escrow_index`, `optional: true`, al final de la lista (después de
+// `token_program`). Ningún discriminador se movió: los 6 de instrucciones y los 2 de cuentas
+// (`EscrowIndex`, `EscrowState`) son idénticos. `deposit`, `release`, `refund`, `register_escrow` y
+// `deregister_escrow` conservan cuentas, orden y args; los errores siguen 6000..6008 sin renumerar.
+// `EscrowStatus` sigue con 3 variantes, así que el decode de la cuenta no se mueve. Este repo firma
+// `release` y lee `EscrowState`: ninguno de los dos cambió de forma, y `close` no lo invoca acá.
+// Anterior: fb64c937dbdab7a58045e663a85724808c4539707fedbdf244e11a28dbe5c071.
 // RE-PIN 2026-08-01 — ventana de custodia. Diff instrucción por instrucción contra el IDL nuevo:
 // `close` suma la cuenta `sender_ata` (barrido del vault) y entran los errores 6006 DeadlineTooSoon,
 // 6007 DeadlineTooFar y 6008 ReleaseWindowClosed. Ningún código existente se renumeró ni se borró.
@@ -27,7 +36,7 @@ import { canonicalSha256 } from './canonical-hash.js';
 // cuentas y args; EscrowStatus sigue con 3 variantes, así que el decode de la cuenta es idéntico.
 // Este repo firma `release` y lee `EscrowState`: ninguno de los dos cambió de forma.
 // Anterior: 4bcc34a997396d360ab996ea5bb1015ffdd8a1d357d3f4b4cffcbfe8ea98d12b.
-const ESCROW_IDL_SHA256 = 'fb64c937dbdab7a58045e663a85724808c4539707fedbdf244e11a28dbe5c071';
+const ESCROW_IDL_SHA256 = 'bfbdfe5aedd55d68e6dda4663b5d26daada815c99db03df34a1601fe4a4d3922';
 
 describe('WKH-227 AC-2/AC-3 · escrow IDL canonical hash lock', () => {
   it('AC-2: el IDL vendoreado canonicaliza al hash pinneado', () => {
