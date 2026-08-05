@@ -333,10 +333,13 @@ function depositedState(): EscrowStateDecoded {
   return {
     sender: SENDER,
     beneficiary: Keypair.generate().publicKey.toBase58(),
-    authority: Keypair.generate().publicKey.toBase58(),
+    // La authority REAL de la ruta: un pubkey al azar acá describe un escrow que no se
+    // puede liberar nunca (ConstraintHasOne 2001), y el Step 4b lo corta antes del claim.
+    authority: releaseAuthorityKp.publicKey.toBase58(),
     mint: USDC_MINT,
     amount: '3000000',
-    deadline: '1790000000',
+    // Relativo a AHORA: una constante en el futuro caduca sola.
+    deadline: String(Math.floor(Date.now() / 1000) + 3600),
     status: 'Deposited',
     bump: 254,
     escrowStatePda: Keypair.generate().publicKey.toBase58(),

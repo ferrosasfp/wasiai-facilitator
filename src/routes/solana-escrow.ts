@@ -86,6 +86,22 @@ type ReleaseErrorCode =
   | 'RELEASE_BROADCAST_EXPIRED'
   | 'RELEASE_BROADCAST_FAILED'
   /**
+   * El plazo del escrow venció: on-chain `release` sólo entra con `now < deadline`
+   * (escrow-idl.ts:518), y pasado ese instante el programa devuelve
+   * `ReleaseWindowClosed` (6008). NO es transitorio y NO se arregla reintentando:
+   * ese escrow ya sólo puede terminar en `refund`. Por eso NO comparte código con
+   * `RELEASE_REJECTED`, que es el cajón de las causas reintentables/ambiguas.
+   */
+  | 'RELEASE_WINDOW_CLOSED'
+  /**
+   * El escrow se creó nombrando OTRA authority, así que este facilitator no puede
+   * liberarlo nunca: on-chain `has_one = authority` devuelve `ConstraintHasOne`
+   * (2001). Es un problema de CONFIGURACIÓN (la env desde la que chaski elige la
+   * authority no coincide con nuestra llave), no del estado del escrow — acción
+   * opuesta a la del plazo vencido, y por eso código propio.
+   */
+  | 'RELEASE_AUTHORITY_MISMATCH'
+  /**
    * La tx SE TRANSMITIÓ al cluster y no se pudo determinar su suerte. NO es un
    * fracaso y NO es un éxito: es la tercera respuesta, y existe porque las otras dos
    * mienten en este caso. Copiado de `PAYOUT_BROADCAST_UNKNOWN`
@@ -304,6 +320,66 @@ export const solanaEscrowReleaseRoute: FastifyPluginAsync = async (app) => {
       const verified = verifyVault(state, vaultAmount, usdcMint);
       if (!verified.ok) {
         return fail('RELEASE_REJECTED', 422, 'Vault verification failed', verified.reason);
+      }
+
+      // ── Step 4b — dos condiciones que la CADENA va a rechazar y que ya tenemos
+      // leídas en la mano. `readEscrowState` decodifica `deadline` y `authority`
+      // (chains/solana-escrow.ts:179-182) y hasta acá NO los leía nadie: la ruta
+      // reclamaba el claim, pedía blockhash, firmaba y transmitía una tx condenada a
+      // `ReleaseWindowClosed` (6008) o a `ConstraintHasOne` (2001). Cada una de esas
+      // quemaba gas, quemaba un lease de `SOLANA_ESCROW_RELEASE_LEASE_MS` y volvía como
+      // un 502 opaco por algo que se veía de antemano.
+      //
+      // Van ANTES del claim a propósito, por el mismo criterio que el payout usa con su
+      // pre-check de fondeo (solana-payout.ts:18-24): un rechazo barato no puede quemar
+      // el claim, porque el claim vivo hace que el reintento legítimo coma un 409
+      // durante todo el lease.
+      //
+      // ⚠️ SON PRE-CHEQUEOS, NO GARANTÍAS. Sólo AGREGAN rechazos; nada de lo que ya
+      // rechazaba deja de rechazarse. Que pasen no promete que la cadena acepte (el
+      // estado puede cambiar entre esta lectura y el aterrizaje) — la única
+      // autorización real sigue siendo la del programa on-chain.
+
+      // 4b-1 — el plazo. On-chain `release` sólo entra con `now < deadline`
+      // (escrow-idl.ts:518: "`release` sólo entra con `now < deadline` y `refund` sólo
+      // con `now >= deadline`").
+      //
+      // ⚠️ El reloj es EL NUESTRO, no el del cluster (`Clock::unix_timestamp`). Los dos
+      // pueden diferir en segundos, así que en el borde exacto este chequeo puede
+      // rechazar un release que la cadena todavía aceptaría — un escrow al que le
+      // quedan segundos de ventana termina en refund igual. Lo que NO puede es dejar
+      // pasar de más y aflojar algo. Corolario honesto: un servidor con el reloj
+      // groseramente adelantado rechaza TODOS los releases (fail-closed: no se pierde
+      // plata, se pierde disponibilidad).
+      let deadlineSec: bigint;
+      try {
+        deadlineSec = BigInt(state.deadline);
+      } catch {
+        // Un `deadline` que no es un entero decimal significa que no entendemos el
+        // estado que acabamos de decodificar. No se firma sobre lo que no se entiende.
+        return fail('RELEASE_REJECTED', 422, 'Escrow state unreadable', 'DEADLINE_UNPARSEABLE');
+      }
+      if (BigInt(Math.floor(Date.now() / 1000)) >= deadlineSec) {
+        return fail(
+          'RELEASE_WINDOW_CLOSED',
+          409,
+          'Release window closed: this escrow can no longer be released, only refunded',
+          'DEADLINE_PASSED',
+        );
+      }
+
+      // 4b-2 — la authority. El programa la valida con `has_one = authority`
+      // (escrow-idl.ts:511) contra la que quedó grabada en el `EscrowState` al depositar.
+      // Si no es la nuestra, la tx se rechaza con `ConstraintHasOne` (2001) SIEMPRE.
+      // Se compara contra la MISMA pubkey con la que se arma la tx (Step 6) y con la que
+      // se co-firma (Step 7): el Step 3 ya resolvió la Keypair, así que acá no tira.
+      if (state.authority !== getReleaseAuthorityPubkey().toBase58()) {
+        return fail(
+          'RELEASE_AUTHORITY_MISMATCH',
+          422,
+          'This escrow names a different release authority',
+          'AUTHORITY_MISMATCH',
+        );
       }
 
       // Step 5 — dedup claim (AC-5 / CD-9, fail-closed, mutate-first).

@@ -19,15 +19,25 @@ import type { EscrowStateDecoded } from '../../chains/solana-escrow.js';
 import { computeReleaseAttestation } from '../../routes/solana-escrow.js';
 
 const USDC_MINT = Keypair.generate().publicKey.toBase58();
+const releaseAuthorityKp = Keypair.generate();
 
+/**
+ * ⚠️ La authority del fixture ERA UN PUBKEY AL AZAR, y toda la suite pasaba. Un escrow
+ * asi no se puede liberar NUNCA (`has_one = authority` -> ConstraintHasOne 2001), o sea
+ * que el camino feliz estaba ejercitando exactamente el agujero que el Step 4b cierra.
+ * Ahora es la authority real de la ruta, y los vectores que hablan de ella la pisan.
+ *
+ * Idem el `deadline`: ahora se declara relativo a AHORA, porque una constante en el
+ * futuro caduca sola y el dia que caduque estos tests fallarian por el motivo equivocado.
+ */
 function depositedState(overrides: Partial<EscrowStateDecoded> = {}): EscrowStateDecoded {
   return {
     sender: Keypair.generate().publicKey.toBase58(),
     beneficiary: Keypair.generate().publicKey.toBase58(),
-    authority: Keypair.generate().publicKey.toBase58(),
+    authority: releaseAuthorityKp.publicKey.toBase58(),
     mint: USDC_MINT,
     amount: '3000000',
-    deadline: '1790000000',
+    deadline: String(Math.floor(Date.now() / 1000) + 3600),
     status: 'Deposited',
     bump: 254,
     escrowStatePda: Keypair.generate().publicKey.toBase58(),
@@ -43,6 +53,8 @@ const h = vi.hoisted(() => ({
       | { ok: false; code: string; reason: string },
   },
   cosignSpy: vi.fn(),
+  /** Un rechazo BARATO no puede quemar el claim: el reintento legítimo comería un 409. */
+  claimSpy: vi.fn(),
   readResult: {
     current: { ok: true, state: null, vaultAmount: '3000000' } as {
       ok: boolean;
@@ -83,7 +95,7 @@ vi.mock('../../chains/solana-escrow.js', async (importActual) => {
 
 vi.mock('../../infra/solana-escrow-release-dedup.js', () => ({
   claimEscrowRelease: (...args: unknown[]) => {
-    void args;
+    h.claimSpy(...args);
     return Promise.resolve(h.claimResult.current);
   },
   // Lease del claim: por defecto NO se puede tomar (lease vigente), que es lo que
@@ -100,7 +112,6 @@ vi.mock('../../infra/solana-escrow-release-dedup.js', () => ({
   },
 }));
 
-const releaseAuthorityKp = Keypair.generate();
 const KEY_JSON = JSON.stringify(Array.from(releaseAuthorityKp.secretKey));
 const ATTEST_SECRET = 'test-release-secret';
 const SENDER = Keypair.generate().publicKey.toBase58();
@@ -217,6 +228,7 @@ describe('POST /solana/escrow/release', () => {
     applyReleaseEnv();
     h.cosignResult.current = { ok: true, signature: 'SIGrel123' };
     h.cosignSpy.mockReset();
+    h.claimSpy.mockReset();
     h.readResult.current = { ok: true, state: depositedState(), vaultAmount: '3000000' };
     h.claimResult.current = { ok: true, claimed: true };
     h.stealResult.current = { ok: true, stolen: false };
@@ -340,6 +352,104 @@ describe('POST /solana/escrow/release', () => {
     expect(second.statusCode).toBe(409);
     // cosign NOT re-invoked (still 1 total).
     expect(h.cosignSpy).toHaveBeenCalledTimes(1);
+  });
+
+  // ── Step 4b — las dos condiciones que la CADENA ya iba a rechazar ────────────
+  //
+  // `readEscrowState` decodifica `deadline` y `authority` y hasta acá no los leía
+  // nadie: la ruta reclamaba el claim, firmaba y transmitía una tx condenada a
+  // `ReleaseWindowClosed` (6008) o a `ConstraintHasOne` (2001). Cada aserción
+  // `claimSpy NOT called` es la parte cara: un rechazo barato que quema el claim deja
+  // al reintento legítimo comiendo 409 durante todo el lease.
+
+  it('★ deadline vencido → 409 RELEASE_WINDOW_CLOSED, sin firmar y SIN quemar el claim', async () => {
+    h.readResult.current = {
+      ok: true,
+      state: depositedState({ deadline: String(Math.floor(Date.now() / 1000) - 1) }),
+      vaultAmount: '3000000',
+    };
+    app = await buildReleaseApp();
+    const res = await inject(app, validBody());
+    expect(res.statusCode).toBe(409);
+    const body = JSON.parse(res.body) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe('RELEASE_WINDOW_CLOSED');
+    // El mensaje tiene que decir que NO es reintentable: ese escrow ya sólo va a refund.
+    expect(body.error.message).toContain('refunded');
+    expect(h.cosignSpy).not.toHaveBeenCalled();
+    expect(h.claimSpy).not.toHaveBeenCalled();
+  });
+
+  it('★ el borde exacto: `now == deadline` ya está cerrado (on-chain pide `now < deadline`)', async () => {
+    h.readResult.current = {
+      ok: true,
+      state: depositedState({ deadline: String(Math.floor(Date.now() / 1000)) }),
+      vaultAmount: '3000000',
+    };
+    app = await buildReleaseApp();
+    const res = await inject(app, validBody());
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body).error.code).toBe('RELEASE_WINDOW_CLOSED');
+    expect(h.cosignSpy).not.toHaveBeenCalled();
+  });
+
+  it('deadline vigente (1 h por delante) → sigue liberándose (el guard no rechaza de más)', async () => {
+    h.readResult.current = {
+      ok: true,
+      state: depositedState({ deadline: String(Math.floor(Date.now() / 1000) + 3600) }),
+      vaultAmount: '3000000',
+    };
+    app = await buildReleaseApp();
+    const res = await inject(app, validBody());
+    expect(res.statusCode).toBe(200);
+    expect(h.cosignSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('★ authority ajena → 422 RELEASE_AUTHORITY_MISMATCH, sin firmar y SIN quemar el claim', async () => {
+    h.readResult.current = {
+      ok: true,
+      state: depositedState({ authority: Keypair.generate().publicKey.toBase58() }),
+      vaultAmount: '3000000',
+    };
+    app = await buildReleaseApp();
+    const res = await inject(app, validBody());
+    expect(res.statusCode).toBe(422);
+    expect(JSON.parse(res.body).error.code).toBe('RELEASE_AUTHORITY_MISMATCH');
+    expect(h.cosignSpy).not.toHaveBeenCalled();
+    expect(h.claimSpy).not.toHaveBeenCalled();
+  });
+
+  /**
+   * ★★ EL PUNTO DE LOS DOS CÓDIGOS. "El plazo venció" es IRREVERSIBLE (ese escrow ya
+   * sólo puede terminar en refund) y "esta authority no es la de este escrow" es un
+   * problema de CONFIGURACIÓN. Las acciones son opuestas, así que un solo código
+   * (`RELEASE_REJECTED / 422`, que es donde caían las dos antes) no sirve.
+   */
+  it('★★ las dos condiciones son distinguibles entre sí y del rechazo genérico', async () => {
+    const responses: { code: string; status: number }[] = [];
+
+    for (const state of [
+      depositedState({ deadline: String(Math.floor(Date.now() / 1000) - 1) }),
+      depositedState({ authority: Keypair.generate().publicKey.toBase58() }),
+      depositedState({ status: 'Refunded' }), // rechazo genérico preexistente
+    ]) {
+      h.readResult.current = { ok: true, state, vaultAmount: '3000000' };
+      const instance = await buildReleaseApp();
+      const res = await inject(instance, validBody());
+      responses.push({
+        code: (JSON.parse(res.body) as { error: { code: string } }).error.code,
+        status: res.statusCode,
+      });
+      await instance.close();
+    }
+
+    expect(responses.map((r) => r.code)).toEqual([
+      'RELEASE_WINDOW_CLOSED',
+      'RELEASE_AUTHORITY_MISMATCH',
+      'RELEASE_REJECTED',
+    ]);
+    // Y los tres códigos son distintos entre sí (no es sólo el orden del array).
+    expect(new Set(responses.map((r) => r.code)).size).toBe(3);
+    expect(h.cosignSpy).not.toHaveBeenCalled();
   });
 
   // ── ★ observabilidad del 422 ────────────────────────────────────────────────
