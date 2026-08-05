@@ -274,6 +274,70 @@ describe('cosignAndBroadcast primitive', () => {
     expect(released).toEqual([]);
   });
 
+  /**
+   * La QUINTA superficie del "no sé": la contabilidad del cap diario. Devolver los
+   * lamports reservados afirma "no se gastó" tan claramente como un 409, sólo que en
+   * otro lado. `SPONSOR_BROADCAST_EXPIRED` emitido DESPUÉS de un envío caía del lado
+   * del release porque la regla estaba escrita nombrando un código en vez de la
+   * propiedad ("pudo haber aterrizado").
+   *
+   * Los dos tests de abajo cubren las DOS formas en que la sonda posterior al envío
+   * termina en EXPIRED: la que responde "ya no es válido" y la que no responde nada.
+   */
+  it('★ el EXPIRED POSTERIOR a un envío (blockhash vencido entre reintentos) → reserva CONSERVADA', async () => {
+    // pre-sign true, i=0 true (envía), confirm falla, i=1 false → EXPIRED con sent=true.
+    h.isBlockhashValidImpl
+      .mockResolvedValueOnce({ value: true })
+      .mockResolvedValueOnce({ value: true })
+      .mockResolvedValue({ value: false });
+    h.confirmTransactionImpl.mockResolvedValue({ value: { err: 'InstructionError' } });
+    const released: bigint[] = [];
+    const feePayerKp = Keypair.generate();
+    const tx = buildSignedTxBase64(feePayerKp, Keypair.generate());
+    const r = await cosignAndBroadcast(tx, {
+      ...baseOpts(feePayerKp),
+      maxRebroadcasts: 1,
+      onFeeEstimated: async () => ({ ok: true }),
+      onFeeReleased: async (lamports) => {
+        released.push(lamports);
+      },
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toBe('SPONSOR_BROADCAST_EXPIRED');
+      expect(r.sent).toBe(true); // hubo envío: el gas pudo haberse cobrado
+    }
+    expect(h.sendRawTransactionImpl).toHaveBeenCalled();
+    expect(released).toEqual([]);
+  });
+
+  it('★ el EXPIRED de "no pude preguntar" POSTERIOR a un envío → reserva CONSERVADA', async () => {
+    // pre-sign true, i=0 true (envía), confirm falla, i=1 la sonda TIRA → BLOCKHASH_CHECK_FAILED.
+    h.isBlockhashValidImpl
+      .mockResolvedValueOnce({ value: true })
+      .mockResolvedValueOnce({ value: true })
+      .mockRejectedValue(new Error('rpc down'));
+    h.confirmTransactionImpl.mockResolvedValue({ value: { err: 'InstructionError' } });
+    const released: bigint[] = [];
+    const feePayerKp = Keypair.generate();
+    const tx = buildSignedTxBase64(feePayerKp, Keypair.generate());
+    const r = await cosignAndBroadcast(tx, {
+      ...baseOpts(feePayerKp),
+      maxRebroadcasts: 1,
+      onFeeEstimated: async () => ({ ok: true }),
+      onFeeReleased: async (lamports) => {
+        released.push(lamports);
+      },
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toBe('SPONSOR_BROADCAST_EXPIRED');
+      expect(r.reason).toBe('BLOCKHASH_CHECK_FAILED');
+      expect(r.sent).toBe(true);
+    }
+    expect(released).toEqual([]);
+  });
+
   it('AR-MNR-1c: success → reservation KEPT (spend happened, no release)', async () => {
     const released: bigint[] = [];
     const feePayerKp = Keypair.generate();

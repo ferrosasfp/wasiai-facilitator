@@ -511,7 +511,7 @@ export const solanaEscrowReleaseRoute: FastifyPluginAsync = async (app) => {
       // `CosignResult.sent` existe exactamente para esto, y hasta acá esta ruta era la
       // que lo tiraba a la basura (el único consumidor era el payout).
       // `SPONSOR_BROADCAST_EXPIRED` se emite desde DOS sondas que corren DESPUÉS de un
-      // `sendRawTransaction` exitoso (broadcast.ts:291-301 y :339-349), y el `catch` de
+      // `sendRawTransaction` exitoso (broadcast.ts:300-312 y :348-360), y el `catch` de
       // esas sondas significa "no pude preguntar", no "el blockhash venció". Traducirlo
       // a `409 RELEASE_BROADCAST_EXPIRED / "Transaction blockhash expired"` afirmaba
       // "no salió, reintentá" sobre un escrow que podía estar ya liberado.

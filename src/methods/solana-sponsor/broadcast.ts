@@ -257,11 +257,21 @@ export async function cosignAndBroadcast(
   // the fee upper bound BEFORE any spend. Release it for every terminal outcome
   // that guarantees NO fee was charged on-chain (pre-sign reject, stale/expired
   // blockhash) so a tx that never landed cannot auto-exhaust the caller's daily
-  // budget. The ONLY debit we KEEP is `SPONSOR_BROADCAST_FAILED`: there the tx
-  // may have landed but we couldn't confirm it, so we conservatively keep the
-  // charge to protect the fee-payer wallet. The CHECK stayed pre-sign — this
-  // compensation only touches accounting, never weakening fail-closed.
-  if (reserved && !result.ok && result.code !== 'SPONSOR_BROADCAST_FAILED' && opts.onFeeReleased) {
+  // budget. Debits for AMBIGUOUS outcomes are KEPT, conservatively, to protect the
+  // fee-payer wallet. The CHECK stayed pre-sign — this compensation only touches
+  // accounting, never weakening fail-closed.
+  //
+  // ⚠️ `sent` ENTRA EN ESTA CUENTA, y antes no entraba. La regla ya era "conservá el
+  // débito cuando la tx pudo haber aterrizado", y estaba escrita nombrando UN código
+  // (`SPONSOR_BROADCAST_FAILED`) en vez de la propiedad. `SPONSOR_BROADCAST_EXPIRED`
+  // también se emite DESPUÉS de un envío (líneas 300-312 y 348-360) y caía del lado
+  // del release: la contabilidad devolvía los lamports afirmando "no se gastó" sobre
+  // un gas que puede estar gastado. Es la MISMA mentira que el 409 de la ruta, corrida
+  // a la superficie del cap diario, y por eso se arregla junto. Los otros dos callers
+  // (payout, release) no pasan `onFeeReleased`, así que esto sólo toca al patrocinio.
+  const mayHaveSpent =
+    !result.ok && (result.code === 'SPONSOR_BROADCAST_FAILED' || result.sent === true);
+  if (reserved && !result.ok && !mayHaveSpent && opts.onFeeReleased) {
     await opts.onFeeReleased(v.feeUpperBoundLamports);
   }
 

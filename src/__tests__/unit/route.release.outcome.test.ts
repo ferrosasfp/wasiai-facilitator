@@ -3,7 +3,7 @@
  *
  * `salió` / `no salió` / `NO SÉ`. El tercero existe porque los otros dos mienten en
  * su caso: `SPONSOR_BROADCAST_EXPIRED` se emite también desde sondas que corren
- * DESPUÉS de un `sendRawTransaction` exitoso (broadcast.ts:291-301 y :339-349), y el
+ * DESPUÉS de un `sendRawTransaction` exitoso (broadcast.ts:300-312 y :348-360), y el
  * `catch` de esas sondas significa "no pude preguntar", no "el blockhash venció".
  * `CosignResult.sent` es lo único que los separa, y esta ruta lo descartaba.
  *
