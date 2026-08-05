@@ -79,7 +79,7 @@ The Solana fee-payer sponsorship and the escrow release path are under active co
 
 ## API
 
-x402 spec-compliant. `/verify` and `/settle` require a facilitator API key in production, sent as the `x-facilitator-key` header.
+x402 spec-compliant. `/verify` and `/settle` require a facilitator API key in production, sent as `Authorization: Bearer <key>`. That is the only header the server reads (`src/middleware/auth.ts`); a request that carries the key anywhere else gets a 401.
 
 | Method | Path | Purpose | Signs on-chain |
 |---|---|---|:---:|
@@ -126,7 +126,7 @@ The server listens on port 3002 by default.
 ### Testing
 
 ```bash
-npm test               # vitest, 1052 tests across 76 files
+npm test               # vitest, whole suite (the run prints the file/test counts)
 npm run test:coverage  # with coverage
 npm run typecheck      # tsc --noEmit
 npm run lint           # eslint, zero warnings allowed
@@ -142,7 +142,7 @@ Everything is configured through environment variables. `.env.example` documents
 | Variable | Purpose |
 |---|---|
 | `OPERATOR_PRIVATE_KEY` | Signer that submits EVM settlements and pays gas |
-| `FACILITATOR_API_KEYS` | Comma-separated caller keys, required in production, sent as `x-facilitator-key` |
+| `FACILITATOR_API_KEYS` | Comma-separated caller keys, required in production, sent as `Authorization: Bearer <key>` |
 | `<CHAIN>_RPC_URL` / `<CHAIN>_ENABLED` | Per-chain RPC endpoint and opt-in flag |
 | `REDIS_URL` | Rate limits, idempotency and the daily settle cap |
 | `CORS_ALLOWED_ORIGINS` | Comma-separated allow-list. Set an explicit list in production |
