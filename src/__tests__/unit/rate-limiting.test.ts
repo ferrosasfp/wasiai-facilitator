@@ -36,10 +36,11 @@
  *   CD-11 → T-RL-15  (type-level: RATE_LIMITED NOT in X402ErrorCode)
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { Writable } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 import type { X402ErrorCode } from '../../core/types.js';
+import { drainAndCloseApps, trackApp, trackPending } from '../helpers/app-lifecycle.js';
 
 // ─── core/audit.js mock (mirror routes.settle.test.ts pattern) ─────────────
 vi.mock('../../core/audit.js', () => {
@@ -72,9 +73,21 @@ class CaptureStream extends Writable {
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
-/** Build an app with low per-route caps so 3 inject calls trigger 429. */
-async function makeApp(
+/** Build an app with low per-route caps so 3 inject calls trigger 429.
+ *
+ * Sync wrapper so the boot promise itself is tracked: a test that times out
+ * mid-boot leaves this promise running, and `afterEach` has to wait for it or
+ * the leftover work steals the next test's clock (see
+ * helpers/app-lifecycle.ts). */
+function makeApp(
   overrides: Record<string, string> = {},
+  capture?: CaptureStream,
+): Promise<FastifyInstance> {
+  return trackPending(makeAppInner(overrides, capture));
+}
+
+async function makeAppInner(
+  overrides: Record<string, string>,
   capture?: CaptureStream,
 ): Promise<FastifyInstance> {
   const rawEnv: NodeJS.ProcessEnv = {
@@ -89,7 +102,9 @@ async function makeApp(
     ...overrides,
   };
   const { buildApp } = await import('../../app.js');
-  return buildApp({ rawEnv, loggerDestination: capture, skipDomainCheck: true });
+  // trackApp registers the instance the moment it boots — NOT when the test
+  // assigns it to a local, which never happens if the test already timed out.
+  return trackApp(await buildApp({ rawEnv, loggerDestination: capture, skipDomainCheck: true }));
 }
 
 /** Arbitrary malformed payload — triggers 400 before rate-limit? No: the
@@ -108,7 +123,38 @@ async function makeApp(
 const ANY_PAYLOAD = JSON.stringify({ anything: 'here' });
 
 describe('@fastify/rate-limit integration (WFAC-40)', () => {
-  let app: FastifyInstance | undefined;
+  // NOTE: there is deliberately NO describe-scoped `app` variable any more.
+  // It used to be shared mutable state BETWEEN tests: a timed-out test keeps
+  // running its body, and when its continuation reached `app.inject(...)` it
+  // read whatever the CURRENT test had just assigned — injecting a ghost
+  // request into the live app and inflating its audit/ledger spies. Each test
+  // now holds its own `const app`; cleanup is centralised in
+  // `drainAndCloseApps()`, which tracks instances itself.
+
+  // Warm-up, not a test. `makeApp` imports `src/app.ts` lazily; on an idle box
+  // that import is 626 ms cold / 0.1 ms warm, and the first boot + request adds
+  // the rest — T-RL-1 measured 1085 ms against 4-18 ms for T-RL-2..T-RL-17.
+  // Paying it here moves it off T-RL-1's `testTimeout` budget and onto the
+  // separate `hookTimeout` one. It does NOT make the suite faster; it stops one
+  // fixed cost from being charged to a single test.
+  //
+  // The warm-up app is its own instance with its own LocalStore, so the two
+  // /verify calls below consume no quota that any test observes.
+  beforeAll(async () => {
+    const warm = await makeApp();
+    await warm.inject({
+      method: 'POST',
+      url: '/verify',
+      headers: { 'content-type': 'application/json', 'x-forwarded-for': '9.9.0.1' },
+      payload: ANY_PAYLOAD,
+    });
+    await warm.inject({
+      method: 'GET',
+      url: '/supported',
+      headers: { 'x-forwarded-for': '9.9.0.1' },
+    });
+    await drainAndCloseApps();
+  });
 
   beforeEach(async () => {
     const audit = (await import('../../core/audit.js')) as unknown as {
@@ -120,16 +166,18 @@ describe('@fastify/rate-limit integration (WFAC-40)', () => {
   });
 
   afterEach(async () => {
-    if (app) {
-      await app.close();
-      app = undefined;
-    }
+    // Barrier, not just cleanup: a timed-out test leaves its `inject()` running.
+    // Here the poisoned target is the module-level `core/audit.js` spy pair that
+    // `beforeEach` clears — a stale 429 arriving after the clear makes the next
+    // test's audit assertion read like a hook bug. Same channel as the adapter
+    // leak documented in helpers/app-lifecycle.ts.
+    await drainAndCloseApps();
     vi.restoreAllMocks();
   });
 
   // ─── T-RL-1 (AC-1): /verify 429 on max+1 ─────────────────────────────────
   it('T-RL-1 / AC-1: /verify returns 429 after exceeding RATE_LIMIT_VERIFY_MAX', async () => {
-    app = await makeApp({ RATE_LIMIT_VERIFY_MAX: '2' });
+    const app = await makeApp({ RATE_LIMIT_VERIFY_MAX: '2' });
     const headers = { 'content-type': 'application/json', 'x-forwarded-for': '9.9.9.9' };
 
     const r1 = await app.inject({ method: 'POST', url: '/verify', headers, payload: ANY_PAYLOAD });
@@ -143,7 +191,7 @@ describe('@fastify/rate-limit integration (WFAC-40)', () => {
 
   // ─── T-RL-2 (AC-2): /settle 429 on max+1 ─────────────────────────────────
   it('T-RL-2 / AC-2: /settle returns 429 after exceeding RATE_LIMIT_SETTLE_MAX', async () => {
-    app = await makeApp({ RATE_LIMIT_SETTLE_MAX: '2' });
+    const app = await makeApp({ RATE_LIMIT_SETTLE_MAX: '2' });
     const headers = { 'content-type': 'application/json', 'x-forwarded-for': '9.9.9.10' };
 
     const r1 = await app.inject({ method: 'POST', url: '/settle', headers, payload: ANY_PAYLOAD });
@@ -157,7 +205,7 @@ describe('@fastify/rate-limit integration (WFAC-40)', () => {
 
   // ─── T-RL-3 (AC-3): /supported 429 on max+1 ──────────────────────────────
   it('T-RL-3 / AC-3: /supported returns 429 after exceeding RATE_LIMIT_SUPPORTED_MAX', async () => {
-    app = await makeApp({ RATE_LIMIT_SUPPORTED_MAX: '2' });
+    const app = await makeApp({ RATE_LIMIT_SUPPORTED_MAX: '2' });
     const headers = { 'x-forwarded-for': '9.9.9.11' };
 
     const r1 = await app.inject({ method: 'GET', url: '/supported', headers });
@@ -171,7 +219,7 @@ describe('@fastify/rate-limit integration (WFAC-40)', () => {
 
   // ─── T-RL-4 (AC-4): 429 body shape exact ─────────────────────────────────
   it('T-RL-4 / AC-4: 429 body has EXACTLY { error: { code, message, http } } — no extras (CD-3)', async () => {
-    app = await makeApp({ RATE_LIMIT_VERIFY_MAX: '1' });
+    const app = await makeApp({ RATE_LIMIT_VERIFY_MAX: '1' });
     const headers = { 'content-type': 'application/json', 'x-forwarded-for': '9.9.9.12' };
 
     await app.inject({ method: 'POST', url: '/verify', headers, payload: ANY_PAYLOAD });
@@ -196,7 +244,7 @@ describe('@fastify/rate-limit integration (WFAC-40)', () => {
 
   // ─── T-RL-5 (AC-4): 429 Content-Type ─────────────────────────────────────
   it('T-RL-5 / AC-4: 429 response is Content-Type application/json', async () => {
-    app = await makeApp({ RATE_LIMIT_VERIFY_MAX: '1' });
+    const app = await makeApp({ RATE_LIMIT_VERIFY_MAX: '1' });
     const headers = { 'content-type': 'application/json', 'x-forwarded-for': '9.9.9.13' };
 
     await app.inject({ method: 'POST', url: '/verify', headers, payload: ANY_PAYLOAD });
@@ -214,7 +262,7 @@ describe('@fastify/rate-limit integration (WFAC-40)', () => {
 
   // ─── T-RL-6 (AC-5): X-RateLimit-* headers ────────────────────────────────
   it('T-RL-6 / AC-5: 429 response includes X-RateLimit-Limit / Remaining / Reset headers', async () => {
-    app = await makeApp({ RATE_LIMIT_VERIFY_MAX: '1' });
+    const app = await makeApp({ RATE_LIMIT_VERIFY_MAX: '1' });
     const headers = { 'content-type': 'application/json', 'x-forwarded-for': '9.9.9.14' };
 
     await app.inject({ method: 'POST', url: '/verify', headers, payload: ANY_PAYLOAD });
@@ -236,7 +284,7 @@ describe('@fastify/rate-limit integration (WFAC-40)', () => {
 
   // ─── T-RL-7 (AC-6): RATE_LIMIT_ENABLED=false → global bypass ─────────────
   it('T-RL-7 / AC-6: RATE_LIMIT_ENABLED=false → plugin not registered, no 429 ever', async () => {
-    app = await makeApp({ RATE_LIMIT_ENABLED: 'false', RATE_LIMIT_VERIFY_MAX: '2' });
+    const app = await makeApp({ RATE_LIMIT_ENABLED: 'false', RATE_LIMIT_VERIFY_MAX: '2' });
     const headers = { 'content-type': 'application/json', 'x-forwarded-for': '9.9.9.15' };
 
     const results: number[] = [];
@@ -254,7 +302,7 @@ describe('@fastify/rate-limit integration (WFAC-40)', () => {
 
   // ─── T-RL-8 (AC-7): /health exempt ───────────────────────────────────────
   it('T-RL-8 / AC-7: /health never triggers 429 (config.rateLimit:false)', async () => {
-    app = await makeApp({ RATE_LIMIT_VERIFY_MAX: '1' });
+    const app = await makeApp({ RATE_LIMIT_VERIFY_MAX: '1' });
     const headers = { 'x-forwarded-for': '9.9.9.16' };
 
     for (let i = 0; i < 5; i++) {
@@ -266,7 +314,7 @@ describe('@fastify/rate-limit integration (WFAC-40)', () => {
 
   // ─── T-RL-9 (AC-7): /openapi.json exempt ─────────────────────────────────
   it('T-RL-9 / AC-7: /openapi.json never triggers 429 (config.rateLimit:false, CD-6)', async () => {
-    app = await makeApp({ RATE_LIMIT_VERIFY_MAX: '1' });
+    const app = await makeApp({ RATE_LIMIT_VERIFY_MAX: '1' });
     const headers = { 'x-forwarded-for': '9.9.9.17' };
 
     for (let i = 0; i < 5; i++) {
@@ -285,7 +333,7 @@ describe('@fastify/rate-limit integration (WFAC-40)', () => {
   // The assertion (two distinct IPs → separate quotas) is preserved; only the
   // VECTOR changed from spoofable XFF to the real peer address.
   it('T-RL-10 / AC-8: distinct peer IPs consume separate quotas (remoteAddress)', async () => {
-    app = await makeApp({ RATE_LIMIT_VERIFY_MAX: '2' });
+    const app = await makeApp({ RATE_LIMIT_VERIFY_MAX: '2' });
 
     const headers = { 'content-type': 'application/json' };
 
@@ -320,7 +368,7 @@ describe('@fastify/rate-limit integration (WFAC-40)', () => {
   // ─── T-RL-11 (AC-9): warn log emitted with NO PII ────────────────────────
   it('T-RL-11 / AC-9: rate limit exceeded log has request_id+path, NO ip/user_agent', async () => {
     const capture = new CaptureStream();
-    app = await makeApp({ RATE_LIMIT_VERIFY_MAX: '1' }, capture);
+    const app = await makeApp({ RATE_LIMIT_VERIFY_MAX: '1' }, capture);
     const headers = { 'content-type': 'application/json', 'x-forwarded-for': '9.9.9.18' };
 
     await app.inject({ method: 'POST', url: '/verify', headers, payload: ANY_PAYLOAD });
@@ -347,14 +395,14 @@ describe('@fastify/rate-limit integration (WFAC-40)', () => {
     // `makeApp()` defaults to NODE_ENV=test without REDIS_URL → getRedisClient()
     // returns null → plugin uses LocalStore. This test proves the boot path
     // doesn't throw (DT-10 SDD).
-    app = await makeApp();
+    const app = await makeApp();
     const r = await app.inject({ method: 'GET', url: '/health' });
     expect(r.statusCode).toBe(200);
   });
 
   // ─── T-RL-14 (AC-11): audit hook captures 429 ────────────────────────────
   it('T-RL-14 / AC-11: onResponse audit hook fires on 429 with statusCode=429 and path=/verify', async () => {
-    app = await makeApp({ RATE_LIMIT_VERIFY_MAX: '1' });
+    const app = await makeApp({ RATE_LIMIT_VERIFY_MAX: '1' });
     const headers = { 'content-type': 'application/json', 'x-forwarded-for': '9.9.9.19' };
 
     await app.inject({ method: 'POST', url: '/verify', headers, payload: ANY_PAYLOAD });
@@ -402,7 +450,7 @@ describe('@fastify/rate-limit integration (WFAC-40)', () => {
 
   // ─── T-RL-16 (AC-4 + CD-3): no extra fields in 429 body ──────────────────
   it('T-RL-16 / AC-4 + CD-3: 429 body does NOT contain retryAfter/limit/remaining/reset/ban', async () => {
-    app = await makeApp({ RATE_LIMIT_VERIFY_MAX: '1' });
+    const app = await makeApp({ RATE_LIMIT_VERIFY_MAX: '1' });
     const headers = { 'content-type': 'application/json', 'x-forwarded-for': '9.9.9.20' };
 
     await app.inject({ method: 'POST', url: '/verify', headers, payload: ANY_PAYLOAD });
@@ -424,7 +472,7 @@ describe('@fastify/rate-limit integration (WFAC-40)', () => {
 
   // ─── T-RL-17 (CD-13): disabled build does NOT expose X-RateLimit-* headers
   it('T-RL-17 / CD-13: RATE_LIMIT_ENABLED=false → no X-RateLimit-* headers on any response', async () => {
-    app = await makeApp({ RATE_LIMIT_ENABLED: 'false' });
+    const app = await makeApp({ RATE_LIMIT_ENABLED: 'false' });
     const headers = { 'content-type': 'application/json', 'x-forwarded-for': '9.9.9.21' };
 
     const r = await app.inject({

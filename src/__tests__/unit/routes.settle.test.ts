@@ -30,13 +30,14 @@
  *   - CD-6  → T-R18
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { Writable } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 import type { EnvConfig } from '../../infra/env.js';
 import { chainRegistry } from '../../chains/registry.js';
 import { asChainId } from '../../core/types.js';
 import type { ChainAdapter, SettleParams } from '../../chains/types.js';
+import { drainAndCloseApps, trackApp, trackPending } from '../helpers/app-lifecycle.js';
 
 // ─── core/ledger.js mock (WFAC-32 W3) ──────────────────────────────────────
 // Keep `buildLedgerEntry` as a simple passthrough-shaped structural mock.
@@ -222,12 +223,27 @@ function makeEnv(overrides: Partial<EnvConfig> = {}): EnvConfig {
   } as EnvConfig;
 }
 
-async function buildAppWithAdapter(
+/**
+ * Sync wrapper so the boot promise itself is tracked. A test that times out
+ * mid-boot leaves this promise running; `afterEach` has to wait for it or the
+ * leftover work steals the next test's clock (see helpers/app-lifecycle.ts).
+ */
+function buildAppWithAdapter(
   adapter: ChainAdapter,
   opts: {
     capture?: CaptureStream;
     env?: EnvConfig;
   } = {},
+): Promise<FastifyInstance> {
+  return trackPending(buildAppWithAdapterInner(adapter, opts));
+}
+
+async function buildAppWithAdapterInner(
+  adapter: ChainAdapter,
+  opts: {
+    capture?: CaptureStream;
+    env?: EnvConfig;
+  },
 ): Promise<FastifyInstance> {
   const { resetRedisClientForTests } = await import('../../infra/redis.js');
   resetRedisClientForTests();
@@ -236,17 +252,44 @@ async function buildAppWithAdapter(
 
   const { buildApp } = await import('../../app.js');
   const env = opts.env ?? makeEnv();
-  return buildApp({
-    env,
-    loggerDestination: opts.capture,
-    skipDomainCheck: true, // WFAC-53 CD-16 — fake adapter, no real readContract mock
-  });
+  // trackApp registers the instance the moment it boots — NOT when the test
+  // assigns it to a local, which never happens if the test already timed out.
+  return trackApp(
+    await buildApp({
+      env,
+      loggerDestination: opts.capture,
+      skipDomainCheck: true, // WFAC-53 CD-16 — fake adapter, no real readContract mock
+    }),
+  );
 }
 
 // ─── tests ─────────────────────────────────────────────────────────────────
 
 describe('POST /settle', () => {
-  let app: FastifyInstance | undefined;
+  // NOTE: there is deliberately NO describe-scoped `app` variable any more.
+  // It used to be shared mutable state BETWEEN tests: a timed-out test keeps
+  // running its body, and when its continuation reached `app.inject(...)` it
+  // read whatever the CURRENT test had just assigned — injecting a ghost
+  // request into the live app and inflating its audit/ledger spies. Each test
+  // now holds its own `const app`; cleanup is centralised in
+  // `drainAndCloseApps()`, which tracks instances itself.
+
+  // Warm-up, not a test. `buildAppWithAdapter` imports `src/app.ts` lazily; on
+  // an idle box that import is 626 ms cold / 0.1 ms warm, and the first boot +
+  // request adds the rest — T-R1 measured 1071 ms against 4-9 ms for T-R2..T-R9.
+  // Paying it here moves it off T-R1's `testTimeout` budget and onto the
+  // separate `hookTimeout` one. It does NOT make the suite faster; it stops one
+  // fixed cost from being charged to a single test.
+  beforeAll(async () => {
+    const warm = await buildAppWithAdapter(makeFakeAdapter(2368, async () => VALID_SETTLE_RESULT));
+    await warm.inject({
+      method: 'POST',
+      url: '/settle',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify(VALID_BODY),
+    });
+    await drainAndCloseApps();
+  });
 
   beforeEach(async () => {
     const ioredis = await import('ioredis');
@@ -273,10 +316,15 @@ describe('POST /settle', () => {
   });
 
   afterEach(async () => {
-    if (app) {
-      await app.close();
-      app = undefined;
-    }
+    // Barrier, not just cleanup: a timed-out test leaves its `inject()` running,
+    // and that stale request resolves its adapter from the shared
+    // `chainRegistry` at REQUEST time — after the next test already registered
+    // its own. Measured before this drain existed:
+    // `--testTimeout=100` on this file failed T-R6 with
+    // `expected "vi.fn()" to be called 2 times, but got 5 times`, the extras
+    // coming from the 5 predecessors that had timed out.
+    // See helpers/app-lifecycle.ts.
+    await drainAndCloseApps();
     vi.restoreAllMocks();
   });
 
@@ -284,7 +332,7 @@ describe('POST /settle', () => {
 
   it('T-R1 / AC-1: returns 200 with exact 7-field SettleResult body', async () => {
     const adapter = makeFakeAdapter(2368, async () => VALID_SETTLE_RESULT);
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
 
     const res = await app.inject({
       method: 'POST',
@@ -317,7 +365,7 @@ describe('POST /settle', () => {
   it('T-R2 / AC-2: returns 400 INVALID_PAYLOAD on malformed body, adapter NOT invoked', async () => {
     const settleSpy = vi.fn(async () => VALID_SETTLE_RESULT);
     const adapter = makeFakeAdapter(2368, settleSpy);
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
 
     // Case A: missing x402Version
     const { x402Version: _v, ...missingVersion } = VALID_BODY;
@@ -365,7 +413,7 @@ describe('POST /settle', () => {
   it('T-R3 / AC-3: returns 400 NETWORK_MISMATCH for bad network formats and unregistered chain', async () => {
     const settleSpy = vi.fn(async () => VALID_SETTLE_RESULT);
     const adapter = makeFakeAdapter(2368, settleSpy);
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
 
     // Sub-case A: solana:1
     const rA = await app.inject({
@@ -422,7 +470,7 @@ describe('POST /settle', () => {
       ok: false,
       error: { code: 'INVALID_SIGNATURE', message: 'bad sig', http: 401 },
     }));
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
 
     const res = await app.inject({
       method: 'POST',
@@ -443,7 +491,7 @@ describe('POST /settle', () => {
       ok: false,
       error: { code: 'INSUFFICIENT_BALANCE', message: 'no funds', http: 402 },
     }));
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
 
     const res = await app.inject({
       method: 'POST',
@@ -465,7 +513,7 @@ describe('POST /settle', () => {
       error: { code: 'SIMULATION_FAILED', message: 'rpc down', http: 500 },
     }));
     const adapter = makeFakeAdapter(2368, settleSpy);
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
 
     const r1 = await app.inject({
       method: 'POST',
@@ -492,7 +540,7 @@ describe('POST /settle', () => {
       error: { code: 'TRANSACTION_FAILED', message: 'reverted', http: 500 },
     }));
     const adapter = makeFakeAdapter(2368, settleSpy);
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
 
     const r1 = await app.inject({
       method: 'POST',
@@ -518,7 +566,7 @@ describe('POST /settle', () => {
   it('T-R8 / AC-8: idempotency hit on success — adapter called once, bodies identical', async () => {
     const settleSpy = vi.fn(async () => VALID_SETTLE_RESULT);
     const adapter = makeFakeAdapter(2368, settleSpy);
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
 
     const r1 = await app.inject({
       method: 'POST',
@@ -546,7 +594,7 @@ describe('POST /settle', () => {
       error: { code: 'INVALID_SIGNATURE', message: 'bad', http: 401 },
     }));
     const adapter = makeFakeAdapter(2368, settleSpy);
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
 
     const r1 = await app.inject({
       method: 'POST',
@@ -571,7 +619,7 @@ describe('POST /settle', () => {
   it('T-R10 / AC-10: Redis unavailable → warn log + proceeds', async () => {
     const capture = new CaptureStream();
     const adapter = makeFakeAdapter(2368, async () => VALID_SETTLE_RESULT);
-    app = await buildAppWithAdapter(adapter, {
+    const app = await buildAppWithAdapter(adapter, {
       capture,
       env: makeEnv({ NODE_ENV: 'test', REDIS_URL: undefined }),
     });
@@ -597,7 +645,7 @@ describe('POST /settle', () => {
     const adapter = makeFakeAdapter(2368, async () => {
       throw new Error('boom');
     });
-    app = await buildAppWithAdapter(adapter, { capture });
+    const app = await buildAppWithAdapter(adapter, { capture });
 
     const res = await app.inject({
       method: 'POST',
@@ -628,7 +676,7 @@ describe('POST /settle', () => {
   it('T-R12 / AC-12: success log has tx_hash and NO PII', async () => {
     const capture = new CaptureStream();
     const adapter = makeFakeAdapter(2368, async () => VALID_SETTLE_RESULT);
-    app = await buildAppWithAdapter(adapter, { capture });
+    const app = await buildAppWithAdapter(adapter, { capture });
 
     await app.inject({
       method: 'POST',
@@ -662,7 +710,7 @@ describe('POST /settle', () => {
       ok: false,
       error: { code: 'INVALID_SIGNATURE', message: 'bad', http: 401 },
     }));
-    app = await buildAppWithAdapter(adapter, { capture });
+    const app = await buildAppWithAdapter(adapter, { capture });
 
     // 1. INVALID_PAYLOAD
     await app.inject({
@@ -710,7 +758,7 @@ describe('POST /settle', () => {
 
   it('T-R14 / AC-14: non-JSON Content-Type → 415 or 400 (Fastify default)', async () => {
     const adapter = makeFakeAdapter(2368, async () => VALID_SETTLE_RESULT);
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
 
     const res = await app.inject({
       method: 'POST',
@@ -725,7 +773,7 @@ describe('POST /settle', () => {
 
   it('T-R15 / CD-11 nuevo: cached 200 replay body is byte-exact identical to fresh response', async () => {
     const adapter = makeFakeAdapter(2368, async () => VALID_SETTLE_RESULT);
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
 
     const r1 = await app.inject({
       method: 'POST',
@@ -759,7 +807,7 @@ describe('POST /settle', () => {
   it('T-R16 / CD-12 nuevo: cached-hit success log ALSO contains tx_hash', async () => {
     const capture = new CaptureStream();
     const adapter = makeFakeAdapter(2368, async () => VALID_SETTLE_RESULT);
-    app = await buildAppWithAdapter(adapter, { capture });
+    const app = await buildAppWithAdapter(adapter, { capture });
 
     // First call primes the cache.
     await app.inject({
@@ -789,7 +837,7 @@ describe('POST /settle', () => {
 
   it('T-R17 / CD-15 nuevo: buildApp registers BOTH verifyRoute and settleRoute', async () => {
     const adapter = makeFakeAdapter(2368, async () => VALID_SETTLE_RESULT);
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
 
     // /settle responds 200 with the happy-path body.
     const rSettle = await app.inject({
@@ -827,7 +875,7 @@ describe('POST /settle', () => {
 
   it('T20 / AC-1: success path invokes persistLedgerEntry exactly once with success entry', async () => {
     const adapter = makeFakeAdapter(2368, async () => VALID_SETTLE_RESULT);
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
     const ledger = (await import('../../core/ledger.js')) as unknown as {
       __persistSpy: ReturnType<typeof vi.fn>;
       __buildSpy: ReturnType<typeof vi.fn>;
@@ -858,7 +906,7 @@ describe('POST /settle', () => {
       ok: false,
       error: { code: 'INSUFFICIENT_BALANCE', message: 'no funds', http: 402 },
     }));
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
     const ledger = (await import('../../core/ledger.js')) as unknown as {
       __persistSpy: ReturnType<typeof vi.fn>;
       __buildSpy: ReturnType<typeof vi.fn>;
@@ -885,7 +933,7 @@ describe('POST /settle', () => {
     const adapter = makeFakeAdapter(2368, async () => {
       throw new Error('rpc down');
     });
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
     const ledger = (await import('../../core/ledger.js')) as unknown as {
       __persistSpy: ReturnType<typeof vi.fn>;
       __buildSpy: ReturnType<typeof vi.fn>;
@@ -910,7 +958,7 @@ describe('POST /settle', () => {
 
   it('T24: cache-hit does NOT invoke persistLedgerEntry (only first request persists)', async () => {
     const adapter = makeFakeAdapter(2368, async () => VALID_SETTLE_RESULT);
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
     const ledger = (await import('../../core/ledger.js')) as unknown as {
       __persistSpy: ReturnType<typeof vi.fn>;
       __buildSpy: ReturnType<typeof vi.fn>;
@@ -941,7 +989,7 @@ describe('POST /settle', () => {
 
   it('T-AR-1 / AC-1: success path invokes persistAuditEntry once with resolved IP + UA + idempotencyKey', async () => {
     const adapter = makeFakeAdapter(2368, async () => VALID_SETTLE_RESULT);
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
     const audit = (await import('../../core/audit.js')) as unknown as {
       __persistAuditSpy: ReturnType<typeof vi.fn>;
       __buildAuditSpy: ReturnType<typeof vi.fn>;
@@ -986,7 +1034,7 @@ describe('POST /settle', () => {
 
   it('T-AR-2 / AC-12: success path propagates 64-char hex idempotencyKey', async () => {
     const adapter = makeFakeAdapter(2368, async () => VALID_SETTLE_RESULT);
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
     const audit = (await import('../../core/audit.js')) as unknown as {
       __buildAuditSpy: ReturnType<typeof vi.fn>;
     };
@@ -1006,7 +1054,7 @@ describe('POST /settle', () => {
 
   it('T-AR-3 / AC-13: 400 Zod path populates errorCode=INVALID_PAYLOAD', async () => {
     const adapter = makeFakeAdapter(2368, async () => VALID_SETTLE_RESULT);
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
     const audit = (await import('../../core/audit.js')) as unknown as {
       __buildAuditSpy: ReturnType<typeof vi.fn>;
     };
@@ -1031,7 +1079,7 @@ describe('POST /settle', () => {
     const adapter = makeFakeAdapter(2368, async () => {
       throw new Error('adapter exploded');
     });
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
     const audit = (await import('../../core/audit.js')) as unknown as {
       __buildAuditSpy: ReturnType<typeof vi.fn>;
     };
@@ -1060,7 +1108,7 @@ describe('POST /settle', () => {
       ok: false,
       error: { code: 'INSUFFICIENT_BALANCE', message: 'no funds', http: 402 },
     }));
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
     const audit = (await import('../../core/audit.js')) as unknown as {
       __buildAuditSpy: ReturnType<typeof vi.fn>;
     };
@@ -1083,7 +1131,7 @@ describe('POST /settle', () => {
 
   it('T-AR-6 / AC-4: forged array XFF is ignored — resolved request.ip recorded', async () => {
     const adapter = makeFakeAdapter(2368, async () => VALID_SETTLE_RESULT);
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
     const audit = (await import('../../core/audit.js')) as unknown as {
       __buildAuditSpy: ReturnType<typeof vi.fn>;
     };
@@ -1108,7 +1156,7 @@ describe('POST /settle', () => {
 
   it('T-AR-7 / AC-5: no XFF → falls back to request.ip', async () => {
     const adapter = makeFakeAdapter(2368, async () => VALID_SETTLE_RESULT);
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
     const audit = (await import('../../core/audit.js')) as unknown as {
       __buildAuditSpy: ReturnType<typeof vi.fn>;
     };
@@ -1129,7 +1177,7 @@ describe('POST /settle', () => {
 
   it('T-AR-8 / AC-8: empty user-agent header → userAgentRaw=null', async () => {
     const adapter = makeFakeAdapter(2368, async () => VALID_SETTLE_RESULT);
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
     const audit = (await import('../../core/audit.js')) as unknown as {
       __buildAuditSpy: ReturnType<typeof vi.fn>;
     };
@@ -1151,7 +1199,7 @@ describe('POST /settle', () => {
 
   it('T-AR-9 / AC-9: persistAuditEntry rejection is swallowed by Fastify — response still 200', async () => {
     const adapter = makeFakeAdapter(2368, async () => VALID_SETTLE_RESULT);
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
     const audit = (await import('../../core/audit.js')) as unknown as {
       __persistAuditSpy: ReturnType<typeof vi.fn>;
     };
@@ -1180,7 +1228,7 @@ describe('POST /settle', () => {
         retryAfterMs: 7500,
       },
     }));
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
 
     const res = await app.inject({
       method: 'POST',
@@ -1206,7 +1254,7 @@ describe('POST /settle', () => {
         retryAfterMs: 2000,
       },
     }));
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
 
     const res = await app.inject({
       method: 'POST',
@@ -1230,7 +1278,7 @@ describe('POST /settle', () => {
         http: 503,
       },
     }));
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
 
     const res = await app.inject({
       method: 'POST',
