@@ -24,13 +24,14 @@
  *   - AC-13 → T-R16
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { Writable } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 import type { EnvConfig } from '../../infra/env.js';
 import { chainRegistry } from '../../chains/registry.js';
 import { asChainId } from '../../core/types.js';
 import type { ChainAdapter, VerifyParams } from '../../chains/types.js';
+import { drainAndCloseApps, trackApp, trackPending } from '../helpers/app-lifecycle.js';
 
 // ─── core/audit.js mock (WFAC-33 W4) ───────────────────────────────────────
 vi.mock('../../core/audit.js', () => {
@@ -194,12 +195,27 @@ function makeEnv(overrides: Partial<EnvConfig> = {}): EnvConfig {
   } as EnvConfig;
 }
 
-async function buildAppWithAdapter(
+/**
+ * Sync wrapper so the boot promise itself is tracked. A test that times out
+ * mid-boot leaves this promise running; `afterEach` has to wait for it or the
+ * leftover work steals the next test's clock (see helpers/app-lifecycle.ts).
+ */
+function buildAppWithAdapter(
   adapter: ChainAdapter,
   opts: {
     capture?: CaptureStream;
     env?: EnvConfig;
   } = {},
+): Promise<FastifyInstance> {
+  return trackPending(buildAppWithAdapterInner(adapter, opts));
+}
+
+async function buildAppWithAdapterInner(
+  adapter: ChainAdapter,
+  opts: {
+    capture?: CaptureStream;
+    env?: EnvConfig;
+  },
 ): Promise<FastifyInstance> {
   const { resetRedisClientForTests } = await import('../../infra/redis.js');
   resetRedisClientForTests();
@@ -208,17 +224,44 @@ async function buildAppWithAdapter(
 
   const { buildApp } = await import('../../app.js');
   const env = opts.env ?? makeEnv();
-  return buildApp({
-    env,
-    loggerDestination: opts.capture,
-    skipDomainCheck: true, // WFAC-53 CD-16 — fake adapter, no real readContract mock
-  });
+  // trackApp registers the instance the moment it boots — NOT when the test
+  // assigns it to a local, which never happens if the test already timed out.
+  return trackApp(
+    await buildApp({
+      env,
+      loggerDestination: opts.capture,
+      skipDomainCheck: true, // WFAC-53 CD-16 — fake adapter, no real readContract mock
+    }),
+  );
 }
 
 // ─── tests ─────────────────────────────────────────────────────────────────
 
 describe('POST /verify', () => {
-  let app: FastifyInstance | undefined;
+  // NOTE: there is deliberately NO describe-scoped `app` variable any more.
+  // It used to be shared mutable state BETWEEN tests: a timed-out test keeps
+  // running its body, and when its continuation reached `app.inject(...)` it
+  // read whatever the CURRENT test had just assigned — injecting a ghost
+  // request into the live app and inflating its audit/ledger spies. Each test
+  // now holds its own `const app`; cleanup is centralised in
+  // `drainAndCloseApps()`, which tracks instances itself.
+
+  // Warm-up, not a test. `buildAppWithAdapter` imports `src/app.ts` lazily; on
+  // an idle box that import is 626 ms cold / 0.1 ms warm, and the first boot +
+  // request adds the rest — T-R1 measured 1069 ms against 4-8 ms for T-R2..T-R9.
+  // Paying it here moves it off T-R1's `testTimeout` budget and onto the
+  // separate `hookTimeout` one. It does NOT make the suite faster; it stops one
+  // fixed cost from being charged to a single test.
+  beforeAll(async () => {
+    const warm = await buildAppWithAdapter(makeFakeAdapter(2368, async () => VALID_ADAPTER_RESULT));
+    await warm.inject({
+      method: 'POST',
+      url: '/verify',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify(VALID_BODY),
+    });
+    await drainAndCloseApps();
+  });
 
   beforeEach(async () => {
     const ioredis = await import('ioredis');
@@ -238,10 +281,13 @@ describe('POST /verify', () => {
   });
 
   afterEach(async () => {
-    if (app) {
-      await app.close();
-      app = undefined;
-    }
+    // Barrier, not just cleanup: a timed-out test leaves its `inject()` running,
+    // and that stale request resolves its adapter from the shared
+    // `chainRegistry` at REQUEST time — after the next test already registered
+    // its own. Without this drain the next test fails with
+    // `expected "vi.fn()" to not be called at all`, blaming the wrong test for
+    // a clock problem. See helpers/app-lifecycle.ts.
+    await drainAndCloseApps();
     vi.restoreAllMocks();
   });
 
@@ -249,7 +295,7 @@ describe('POST /verify', () => {
 
   it('T-R1 / AC-1: returns 200 with exact 7-field spec body', async () => {
     const adapter = makeFakeAdapter(2368, async () => VALID_ADAPTER_RESULT);
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
 
     const res = await app.inject({
       method: 'POST',
@@ -278,7 +324,7 @@ describe('POST /verify', () => {
   it('T-R2 / AC-2: emits info log "verify ok" with required fields and no PII', async () => {
     const capture = new CaptureStream();
     const adapter = makeFakeAdapter(2368, async () => VALID_ADAPTER_RESULT);
-    app = await buildAppWithAdapter(adapter, { capture });
+    const app = await buildAppWithAdapter(adapter, { capture });
 
     await app.inject({
       method: 'POST',
@@ -306,7 +352,7 @@ describe('POST /verify', () => {
   it('T-R3 / AC-3: 400 INVALID_PAYLOAD when x402Version missing, adapter NOT called', async () => {
     const verifySpy = vi.fn(async () => VALID_ADAPTER_RESULT);
     const adapter = makeFakeAdapter(2368, verifySpy);
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
 
     const { x402Version: _v, ...rest } = VALID_BODY;
     void _v;
@@ -326,7 +372,7 @@ describe('POST /verify', () => {
   it('T-R4 / AC-3: 400 INVALID_PAYLOAD when x402Version !== 2 (CD-8)', async () => {
     const verifySpy = vi.fn(async () => VALID_ADAPTER_RESULT);
     const adapter = makeFakeAdapter(2368, verifySpy);
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
 
     const bad = { ...VALID_BODY, x402Version: 1 };
     const res = await app.inject({
@@ -344,7 +390,7 @@ describe('POST /verify', () => {
   it('T-R5 / AC-3: 400 INVALID_PAYLOAD when resource missing', async () => {
     const verifySpy = vi.fn(async () => VALID_ADAPTER_RESULT);
     const adapter = makeFakeAdapter(2368, verifySpy);
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
 
     const { resource: _r, ...rest } = VALID_BODY;
     void _r;
@@ -365,7 +411,7 @@ describe('POST /verify', () => {
   it('T-R6 / AC-4: 400 NETWORK_MISMATCH on malformed network "solana:1"', async () => {
     const verifySpy = vi.fn(async () => VALID_ADAPTER_RESULT);
     const adapter = makeFakeAdapter(2368, verifySpy);
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
 
     const bad = { ...VALID_BODY, accepted: { ...VALID_BODY.accepted, network: 'solana:1' } };
     const res = await app.inject({
@@ -384,7 +430,7 @@ describe('POST /verify', () => {
   it('T-R7 / AC-4: 400 NETWORK_MISMATCH for "eip155:0" (CD-13)', async () => {
     const verifySpy = vi.fn(async () => VALID_ADAPTER_RESULT);
     const adapter = makeFakeAdapter(2368, verifySpy);
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
 
     const bad = { ...VALID_BODY, accepted: { ...VALID_BODY.accepted, network: 'eip155:0' } };
     const res = await app.inject({
@@ -403,7 +449,7 @@ describe('POST /verify', () => {
 
   it('T-R8 / AC-5: 400 NETWORK_MISMATCH when chainId not registered', async () => {
     const adapter = makeFakeAdapter(2368, async () => VALID_ADAPTER_RESULT);
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
 
     const bad = {
       ...VALID_BODY,
@@ -427,7 +473,7 @@ describe('POST /verify', () => {
       ok: false,
       error: { code: 'INVALID_SIGNATURE', message: 'custom msg', http: 401 },
     }));
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
 
     const res = await app.inject({
       method: 'POST',
@@ -453,7 +499,7 @@ describe('POST /verify', () => {
         http: 400,
       },
     }));
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
 
     const res = await app.inject({
       method: 'POST',
@@ -477,7 +523,7 @@ describe('POST /verify', () => {
         http: 400,
       },
     }));
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
 
     const res = await app.inject({
       method: 'POST',
@@ -496,7 +542,7 @@ describe('POST /verify', () => {
   it('T-R12 / AC-9: returns cached response on second identical request (adapter called once)', async () => {
     const verifySpy = vi.fn(async () => VALID_ADAPTER_RESULT);
     const adapter = makeFakeAdapter(2368, verifySpy);
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
 
     const r1 = await app.inject({
       method: 'POST',
@@ -521,7 +567,7 @@ describe('POST /verify', () => {
   it('T-R13 / AC-10: logs warn and proceeds when Redis unavailable', async () => {
     const capture = new CaptureStream();
     const adapter = makeFakeAdapter(2368, async () => VALID_ADAPTER_RESULT);
-    app = await buildAppWithAdapter(adapter, {
+    const app = await buildAppWithAdapter(adapter, {
       capture,
       env: makeEnv({ NODE_ENV: 'test', REDIS_URL: undefined }),
     });
@@ -548,7 +594,7 @@ describe('POST /verify', () => {
       ok: false,
       error: { code: 'INVALID_SIGNATURE', message: 'bad', http: 401 },
     }));
-    app = await buildAppWithAdapter(adapter, { capture });
+    const app = await buildAppWithAdapter(adapter, { capture });
 
     // 1. INVALID_PAYLOAD
     await app.inject({
@@ -607,7 +653,7 @@ describe('POST /verify', () => {
       ok: false,
       error: { code: 'INVALID_SIGNATURE', message: 'bad', http: 401 },
     }));
-    app = await buildAppWithAdapter(adapter, { capture });
+    const app = await buildAppWithAdapter(adapter, { capture });
 
     // 1. INVALID_PAYLOAD
     await app.inject({
@@ -651,7 +697,7 @@ describe('POST /verify', () => {
 
   it('T-R16 / AC-13: returns 415 or 400 for non-JSON Content-Type', async () => {
     const adapter = makeFakeAdapter(2368, async () => VALID_ADAPTER_RESULT);
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
 
     const res = await app.inject({
       method: 'POST',
@@ -669,7 +715,7 @@ describe('POST /verify', () => {
     const adapter = makeFakeAdapter(2368, async () => {
       throw new Error('adapter kaboom');
     });
-    app = await buildAppWithAdapter(adapter, { capture });
+    const app = await buildAppWithAdapter(adapter, { capture });
 
     const res = await app.inject({
       method: 'POST',
@@ -698,7 +744,7 @@ describe('POST /verify', () => {
     const adapter = makeFakeAdapter(2368, async () => {
       throw new Error(`ecrecover failed for signature ${leakyHex}`);
     });
-    app = await buildAppWithAdapter(adapter, { capture });
+    const app = await buildAppWithAdapter(adapter, { capture });
 
     const res = await app.inject({
       method: 'POST',
@@ -729,7 +775,7 @@ describe('POST /verify', () => {
       error: { code: 'INVALID_SIGNATURE', message: 'bad', http: 401 },
     }));
     const adapter = makeFakeAdapter(2368, verifySpy);
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
 
     const r1 = await app.inject({
       method: 'POST',
@@ -758,7 +804,7 @@ describe('POST /verify', () => {
       error: { code: 'SIMULATION_FAILED', message: 'rpc down', http: 500 },
     }));
     const adapter = makeFakeAdapter(2368, verifySpy);
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
 
     const r1 = await app.inject({
       method: 'POST',
@@ -781,7 +827,7 @@ describe('POST /verify', () => {
 
   it('T-AV-1 / AC-1: /verify success invokes persistAuditEntry once with no errorCode/idempotencyKey', async () => {
     const adapter = makeFakeAdapter(2368, async () => VALID_ADAPTER_RESULT);
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
     const audit = (await import('../../core/audit.js')) as unknown as {
       __persistAuditSpy: ReturnType<typeof vi.fn>;
       __buildAuditSpy: ReturnType<typeof vi.fn>;
@@ -812,7 +858,7 @@ describe('POST /verify', () => {
 
   it('T-AV-2 / AC-13: /verify 400 Zod path populates errorCode=INVALID_PAYLOAD', async () => {
     const adapter = makeFakeAdapter(2368, async () => VALID_ADAPTER_RESULT);
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
     const audit = (await import('../../core/audit.js')) as unknown as {
       __buildAuditSpy: ReturnType<typeof vi.fn>;
     };
@@ -837,7 +883,7 @@ describe('POST /verify', () => {
     const adapter = makeFakeAdapter(2368, async () => {
       throw new Error('adapter exploded');
     });
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
     const audit = (await import('../../core/audit.js')) as unknown as {
       __buildAuditSpy: ReturnType<typeof vi.fn>;
     };
@@ -863,7 +909,7 @@ describe('POST /verify', () => {
       ok: false,
       error: { code: 'INVALID_SIGNATURE', message: 'bad sig', http: 400 },
     }));
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
     const audit = (await import('../../core/audit.js')) as unknown as {
       __buildAuditSpy: ReturnType<typeof vi.fn>;
     };
@@ -886,7 +932,7 @@ describe('POST /verify', () => {
 
   it('T-AV-5 / AC-12: /verify success leaves idempotencyKey undefined (builder will null it)', async () => {
     const adapter = makeFakeAdapter(2368, async () => VALID_ADAPTER_RESULT);
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
     const audit = (await import('../../core/audit.js')) as unknown as {
       __buildAuditSpy: ReturnType<typeof vi.fn>;
     };
@@ -916,7 +962,7 @@ describe('POST /verify', () => {
         retryAfterMs: 7500,
       },
     }));
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
 
     const res = await app.inject({
       method: 'POST',
@@ -942,7 +988,7 @@ describe('POST /verify', () => {
         retryAfterMs: 2000,
       },
     }));
-    app = await buildAppWithAdapter(adapter);
+    const app = await buildAppWithAdapter(adapter);
 
     const res = await app.inject({
       method: 'POST',
