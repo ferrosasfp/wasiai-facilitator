@@ -62,6 +62,25 @@ export async function verifyCore(parsed: VerifyRequest): Promise<Result<VerifyRe
     }
     return lookup.adapter.verify(parsed as unknown as VerifyParams);
   }
+  if (namespace === 'casper') {
+    if (!/^casper:(casper|casper-test)$/u.test(network)) {
+      return {
+        ok: false,
+        error: buildX402Error('NETWORK_MISMATCH', 'network must be casper:<casper|casper-test>'),
+      };
+    }
+    const lookup = chainRegistry.getAdapterByNetworkId(network);
+    if (!lookup.ok) {
+      return {
+        ok: false,
+        error: buildX402Error(
+          'CHAIN_UNAVAILABLE',
+          'Network namespace recognized but no adapter registered',
+        ),
+      };
+    }
+    return lookup.adapter.verify(parsed as unknown as VerifyParams);
+  }
 
   // Step 1 — parse network string.
   const m = EIP155_RE.exec(parsed.accepted.network);
