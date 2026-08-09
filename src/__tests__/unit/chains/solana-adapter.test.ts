@@ -456,7 +456,10 @@ describe('ChainRegistry generalization (T-REG)', () => {
     try {
       expect(chainRegistry.register(makeAdapter(vi.fn())).ok).toBe(true);
 
-      const response = getSupportedResponse();
+      // WKH-342 — el argumento es la señal de rutas dedicadas, requerida y ortogonal a
+      // lo que este test mide: `[]` acá no dice "no hay rutas", dice "esta llamada no
+      // pregunta por rutas". Lo que se mide sigue siendo `chains`/`methods`.
+      const response = getSupportedResponse([]);
       const entry = response.chains.find((c) => c.network === 'solana:devnet');
       expect(entry).toBeDefined();
       expect(entry?.methods).toEqual([SPL_TOKEN_TRANSFER_FINALIZED]);

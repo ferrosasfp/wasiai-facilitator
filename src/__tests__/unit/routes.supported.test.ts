@@ -19,8 +19,15 @@
  *   - AC-6  → T-R6   (POST /supported → 404, no side effects)
  *   - AC-7  → T-R7   (info log 'supported ok' with required fields)
  *   - AC-8  → T-R8   (log has no PII — no ip, no headers, no user-agent)
- *   - AC-9  → T-R9   (zero adapters → { chains: [], methods: [] })
+ *   - AC-9  → T-R9   (zero adapters → { chains: [], methods: [], dedicatedRoutes: [] })
  *   - AC-10 → T-R10  (content-type application/json + valid JSON)
+ *
+ * WKH-342 — `dedicatedRoutes` (los tres bloques `describe` del final del archivo):
+ *   - T-A1   gate de payout ON  → el id sale, y sólo ése
+ *   - T-A2   gate OFF           → array presente y vacío + POST 404
+ *   - T-A2b  `hasRoute` cruza la encapsulación del plugin (era DERIVADO)
+ *   - T-A3   candado de "aditivo": `chains`/`methods` sin un solo cambio
+ *   - T-A4   pureza de `getSupportedResponse()` + T-A4b el parámetro es requerido
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -240,7 +247,11 @@ describe('GET /supported', () => {
 
   // ─── AC-1 ──────────────────────────────────────────────────────────────
 
-  it('T-R1 / AC-1: returns 200 with exact top-level shape { chains, methods }', async () => {
+  // WKH-342 — la lista de claves creció a tres. No es un aflojamiento de la
+  // aserción: sigue siendo igualdad exacta de claves, con `dedicatedRoutes` como
+  // parte del contrato (`core/supported.ts` lo declara requerido en
+  // `SupportedResponse`, no opcional). Una 4ª clave sigue poniendo esto en rojo.
+  it('T-R1 / AC-1: returns 200 with exact top-level shape { chains, dedicatedRoutes, methods }', async () => {
     const kite = makeFakeAdapter(2368, 'Kite Testnet');
     app = await buildAppWithAdapters([kite]);
 
@@ -248,9 +259,10 @@ describe('GET /supported', () => {
     expect(res.statusCode).toBe(200);
 
     const body = JSON.parse(res.body) as Record<string, unknown>;
-    expect(Object.keys(body).sort()).toEqual(['chains', 'methods']);
+    expect(Object.keys(body).sort()).toEqual(['chains', 'dedicatedRoutes', 'methods']);
     expect(Array.isArray(body.chains)).toBe(true);
     expect(Array.isArray(body.methods)).toBe(true);
+    expect(Array.isArray(body.dedicatedRoutes)).toBe(true);
 
     const chains = body.chains as Array<Record<string, unknown>>;
     expect(chains.length).toBe(1);
@@ -411,14 +423,19 @@ describe('GET /supported', () => {
 
   // ─── AC-9 ──────────────────────────────────────────────────────────────
 
-  it('T-R9 / AC-9: zero adapters registered → 200 with { chains: [], methods: [] }', async () => {
+  it('T-R9 / AC-9: zero adapters registered → 200 with { chains: [], methods: [], dedicatedRoutes: [] }', async () => {
     app = await buildAppWithAdapters([]);
 
     const res = await app.inject({ method: 'GET', url: '/supported' });
     expect(res.statusCode).toBe(200);
 
     const body = JSON.parse(res.body) as unknown;
-    expect(body).toEqual({ chains: [], methods: [] });
+    // WKH-342 — `dedicatedRoutes: []` acá NO es "el campo no aplica": es la respuesta
+    // negativa. Esta app se construye con `skipDomainCheck` y sin ningún
+    // `SOLANA_*_ENABLED`, así que ninguna de las tres rutas opt-in está registrada y
+    // `hasRoute` devuelve `false` para las tres. Igualdad profunda: si el campo se
+    // fuera, esto se pone rojo.
+    expect(body).toEqual({ chains: [], methods: [], dedicatedRoutes: [] });
   });
 
   // ─── AC-10 ─────────────────────────────────────────────────────────────
@@ -738,5 +755,319 @@ describe('GET /supported', () => {
     expect(body.chains.find((c) => c.network === 'solana:devnet')?.breakerStateAbsentReason).toBe(
       'NO_BREAKER',
     );
+  });
+});
+
+// ─── WKH-342 · `dedicatedRoutes`: la existencia del transporte, derivada del router ──
+//
+// Estos cuatro tests NO usan `buildAppWithAdapters`: ese helper inyecta un `EnvConfig`
+// deliberadamente parcial (ver su fixture `makeEnv`), y `solanaPayoutRoute` hace
+// `BigInt(env.SOLANA_PAYOUT_MAX_AMOUNT_ATOMIC)` en el cuerpo del plugin
+// (`src/routes/solana-payout.ts:252`) — con el parcial eso tira `TypeError` al registrar
+// y la app no llega a existir. MEDIDO 2026-08-09. Así que acá se construye con el
+// `parseEnv(process.env)` real, que es también el único camino que ejercita el gate de
+// verdad (`isSolanaPayoutEnabled` lee `process.env` directo, no `EnvConfig`).
+const WKH342_ENVS = [
+  'SOLANA_PAYOUT_ENABLED',
+  'SOLANA_PAYOUT_OPERATOR_SECRET_KEY',
+  'SOLANA_RPC_URL',
+  'SOLANA_USDC_MINT',
+  'SOLANA_FEE_PAYER_PRIVATE_KEY',
+  'SOLANA_FEE_PAYER_SPONSOR_ENABLED',
+  'SOLANA_ESCROW_RELEASE_AUTHORITY_SECRET_KEY',
+  'SOLANA_ESCROW_RELEASE_ENABLED',
+] as const;
+
+const wkh342SavedEnv = new Map<string, string | undefined>();
+
+function wkh342ClearEnv(): void {
+  // Snapshot via Map, not `process.env[k]`: el idiom del repo
+  // (`solana-payout.env-optin.test.ts:37`) evita el `security/detect-object-injection`
+  // que `eslint --max-warnings 0` trata como error.
+  const snapshot = new Map(Object.entries(process.env));
+  for (const k of WKH342_ENVS) {
+    wkh342SavedEnv.set(k, snapshot.get(k));
+    delete process.env[k as keyof NodeJS.ProcessEnv];
+  }
+}
+
+function wkh342RestoreEnv(): void {
+  for (const [k, v] of wkh342SavedEnv) {
+    if (v === undefined) delete process.env[k as keyof NodeJS.ProcessEnv];
+    else process.env[k as keyof NodeJS.ProcessEnv] = v;
+  }
+  wkh342SavedEnv.clear();
+}
+
+async function wkh342ValidKey(): Promise<string> {
+  const { Keypair } = await import('@solana/web3.js');
+  return JSON.stringify(Array.from(Keypair.generate().secretKey));
+}
+
+/** Turn the payout gate ON via the env it really reads (`process.env`, not EnvConfig). */
+async function wkh342EnablePayout(): Promise<void> {
+  const { Keypair } = await import('@solana/web3.js');
+  process.env.SOLANA_PAYOUT_ENABLED = 'true';
+  process.env.SOLANA_PAYOUT_OPERATOR_SECRET_KEY = await wkh342ValidKey();
+  process.env.SOLANA_RPC_URL = 'http://mock-rpc';
+  process.env.SOLANA_USDC_MINT = Keypair.generate().publicKey.toBase58();
+}
+
+/**
+ * Real `parseEnv(process.env)` + real gates + a caller-chosen set of adapters.
+ * `adapters` is applied AFTER `_resetForTesting()` and after `buildApp`, which is
+ * safe because `/supported` reads the registry at request time (live snapshot).
+ */
+async function buildRealEnvApp(
+  adapters: readonly SettlementAdapter[] = [],
+): Promise<FastifyInstance> {
+  const { resetRedisClientForTests } = await import('../../infra/redis.js');
+  const { resetPayoutOperatorForTesting } = await import('../../infra/solana-payout-operator.js');
+  const { resetFeePayerForTesting } = await import('../../infra/solana-fee-payer.js');
+  const { resetReleaseAuthorityForTesting } =
+    await import('../../infra/solana-release-authority.js');
+  resetRedisClientForTests();
+  resetPayoutOperatorForTesting();
+  resetFeePayerForTesting();
+  resetReleaseAuthorityForTesting();
+  chainRegistry._resetForTesting();
+  const { buildApp } = await import('../../app.js');
+  const app = await buildApp({ skipDomainCheck: true });
+  for (const adapter of adapters) chainRegistry.register(adapter);
+  return app;
+}
+
+async function readDedicated(a: FastifyInstance): Promise<unknown> {
+  const res = await a.inject({ method: 'GET', url: '/supported' });
+  expect(res.statusCode).toBe(200);
+  return (JSON.parse(res.body) as Record<string, unknown>).dedicatedRoutes;
+}
+
+describe('WKH-342 — GET /supported publica las rutas dedicadas registradas', () => {
+  let app: FastifyInstance | undefined;
+
+  beforeEach(() => wkh342ClearEnv());
+
+  afterEach(async () => {
+    if (app) {
+      await app.close();
+      app = undefined;
+    }
+    wkh342RestoreEnv();
+    chainRegistry._resetForTesting();
+  });
+
+  it('★ T-A1 / AC-1: gate de payout satisfecho ⟹ dedicatedRoutes trae "POST /solana/payout" y SÓLO ésa', async () => {
+    // Gate de payout ON; los de sponsor y release quedan OFF (su flag no está puesta),
+    // así que la respuesta correcta es exactamente UNA de las tres. Eso es lo que mata
+    // al mutante "publicar la tabla entera sin preguntarle al router": ese mutante
+    // devolvería las tres.
+    await wkh342EnablePayout();
+    // Las dos claves de los OTROS dos gates presentes y distintas: así el `[…]` de una
+    // sola ruta no puede explicarse por "las claves de sponsor/release faltaban". Lo que
+    // las deja fuera es su FLAG, que sigue sin poner.
+    process.env.SOLANA_FEE_PAYER_PRIVATE_KEY = await wkh342ValidKey();
+    process.env.SOLANA_ESCROW_RELEASE_AUTHORITY_SECRET_KEY = await wkh342ValidKey();
+
+    app = await buildRealEnvApp();
+
+    expect(await readDedicated(app)).toEqual(['POST /solana/payout']);
+
+    // Control de que el campo habla del router y no de un literal: la ruta EXISTE en
+    // esta misma app. Sin esta línea, un `['POST /solana/payout']` hardcodeado también
+    // pasaría el `toEqual` de arriba.
+    const hit = await app.inject({
+      method: 'POST',
+      url: '/solana/payout',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify({}),
+    });
+    expect(hit.statusCode).not.toBe(404);
+  });
+
+  it('★ T-A2 / AC-1: gate NO satisfecho ⟹ el campo es un array que NO la contiene, y el POST da 404', async () => {
+    // Ningún `SOLANA_*` puesto (el beforeEach los borró): las tres rutas quedan sin
+    // registrar. La afirmación negativa es EXPLÍCITA — array presente, vacío — y no una
+    // ausencia de campo: un consumidor tiene que poder distinguir las dos cosas.
+    app = await buildRealEnvApp();
+
+    const dedicated = await readDedicated(app);
+    expect(Array.isArray(dedicated)).toBe(true);
+    expect(dedicated).not.toContain('POST /solana/payout');
+    expect(dedicated).toEqual([]);
+
+    const hit = await app.inject({
+      method: 'POST',
+      url: '/solana/payout',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify({}),
+    });
+    expect(hit.statusCode).toBe(404);
+  });
+
+  it('★ T-A2b: `hasRoute` ATRAVIESA la encapsulación del plugin — antes de este test era DERIVADO', async () => {
+    // `app.register(solanaPayoutRoute)` (`app.ts:423`) y `app.register(supportedRoute)`
+    // (`:425`) son scopes encapsulados distintos. Que el handler de /supported vea la
+    // ruta del otro scope se leía del código de find-my-way
+    // (`node_modules/fastify/lib/route.js:175-182`: un `router` por servidor), no de una
+    // medición. Este par de aserciones lo mide: MISMA app, el POST no da 404 Y el campo
+    // trae el id. Si fastify encapsulara el router, el primero seguiría verde y el
+    // segundo se pondría rojo.
+    await wkh342EnablePayout();
+
+    app = await buildRealEnvApp();
+
+    const hit = await app.inject({
+      method: 'POST',
+      url: '/solana/payout',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify({}),
+    });
+    expect(hit.statusCode).not.toBe(404);
+    expect(await readDedicated(app)).toContain('POST /solana/payout');
+  });
+});
+
+// ⚠️ AB-WKH-342-2 — este bloque NO puede usar `buildAppWithAdapters`, y el motivo es el
+// defecto que casi dejó el candado inerte. Con ese helper NINGUNA de las tres rutas
+// dedicadas está registrada, así que `dedicatedRoutes` sale `[]`; y con `[]` el mutante
+// que este test tiene que cazar —volcar los ids dentro de la unión `methods`— no cambia
+// NADA de la respuesta. MEDIDO 2026-08-09: con el mutante aplicado a
+// `core/supported.ts` (`new Set([...chains.flatMap(...), ...dedicatedRoutes])`) la suite
+// daba `28 passed` y T-A3 verde. El fixture del caso POSITIVO tiene que tener algo que
+// se pueda filtrar: por eso acá el gate de payout va ON.
+describe('WKH-342 — el cambio es ADITIVO: chains/methods intactos (T-A3)', () => {
+  let app: FastifyInstance | undefined;
+
+  beforeEach(() => wkh342ClearEnv());
+
+  afterEach(async () => {
+    if (app) {
+      await app.close();
+      app = undefined;
+    }
+    wkh342RestoreEnv();
+    chainRegistry._resetForTesting();
+    vi.restoreAllMocks();
+  });
+
+  it('★ T-A3 / AC-7: chains conserva forma y valores, el invariante del breaker sigue en pie, y methods NO gana ningún string de payout', async () => {
+    const live: ChainAdapter & { getBreakerState: () => 'CLOSED' } = {
+      ...makeFakeAdapter(2368, 'Kite Testnet'),
+      getBreakerState: () => 'CLOSED',
+    };
+    const disabled: ChainAdapter & { getBreakerState: () => undefined } = {
+      ...makeFakeAdapter(43113, 'Avalanche Fuji'),
+      getBreakerState: () => undefined,
+    };
+    await wkh342EnablePayout();
+    app = await buildRealEnvApp([live, disabled, makeFakeSolanaAdapter()]);
+
+    const res = await app.inject({ method: 'GET', url: '/supported' });
+    const body = JSON.parse(res.body) as {
+      chains: Array<Record<string, unknown> & { network: string }>;
+      methods: string[];
+      dedicatedRoutes: string[];
+    };
+
+    // 1. `chains` byte por byte igual a lo que publicaba antes de WKH-342. Igualdad
+    //    profunda del array COMPLETO: filtrar una entrada, renombrar una clave o
+    //    agregarle un campo pone esto en rojo.
+    expect(body.chains).toEqual([
+      {
+        network: 'eip155:2368',
+        name: 'Kite Testnet',
+        methods: ['eip3009'],
+        breakerState: 'CLOSED',
+      },
+      {
+        network: 'eip155:43113',
+        name: 'Avalanche Fuji',
+        methods: ['eip3009'],
+        breakerStateAbsentReason: 'BREAKER_DISABLED',
+      },
+      {
+        network: 'solana:devnet',
+        name: 'Solana Devnet',
+        methods: [SPL_TOKEN_TRANSFER_FINALIZED],
+        breakerStateAbsentReason: 'NO_BREAKER',
+      },
+    ]);
+
+    // 2. El invariante exactamente-uno-de-los-dos, re-verificado con el campo nuevo en
+    //    la respuesta: agregar `dedicatedRoutes` no tocó las entradas.
+    for (const entry of body.chains) {
+      const hasState = Object.prototype.hasOwnProperty.call(entry, 'breakerState');
+      const hasReason = Object.prototype.hasOwnProperty.call(entry, 'breakerStateAbsentReason');
+      expect([hasState, hasReason]).toEqual(hasState ? [true, false] : [false, true]);
+    }
+
+    // 3. `methods` es la unión de los rieles ADAPTADORES y de nada más. Ningún id de
+    //    ruta dedicada se filtró acá: son cosas distintas (un método de pago vs. la
+    //    existencia de un transporte) y mezclarlas rompería a los consumidores que
+    //    ramifican por `methods`.
+    expect(body.methods).toEqual(['eip3009', SPL_TOKEN_TRANSFER_FINALIZED]);
+    for (const method of body.methods) {
+      expect(method).not.toMatch(/payout|sponsor|release|^POST /i);
+    }
+
+    // 4. Y el control positivo, sin el cual los tres puntos de arriba pasan por vacío:
+    //    en ESTA app hay un id publicado. Si esta aserción cae, el punto 3 dejó de medir
+    //    algo (no habría nada que filtrar hacia `methods`).
+    expect(body.dedicatedRoutes).toEqual(['POST /solana/payout']);
+  });
+});
+
+describe('WKH-342 — getSupportedResponse() sigue pura y exige el parámetro (T-A4)', () => {
+  afterEach(() => {
+    chainRegistry._resetForTesting();
+  });
+
+  it('★ T-A4 / AC-1: mismo registry + mismo argumento ⟹ misma respuesta; el argumento se refleja tal cual', async () => {
+    const { getSupportedResponse } = await import('../../core/supported.js');
+    chainRegistry._resetForTesting();
+    chainRegistry.register(makeFakeAdapter(2368, 'Kite Testnet'));
+
+    const a = getSupportedResponse(['POST /solana/payout']);
+    const b = getSupportedResponse(['POST /solana/payout']);
+    expect(a).toEqual(b);
+    expect(a.dedicatedRoutes).toEqual(['POST /solana/payout']);
+
+    // El argumento es lo ÚNICO que mueve el campo: mismo registry, otro argumento, otro
+    // valor. Un cuerpo que ignorara el parámetro y derivara la lista de otra parte
+    // (registry, un literal) pasaría el `toEqual` de arriba y muere acá.
+    expect(getSupportedResponse([]).dedicatedRoutes).toEqual([]);
+    expect(getSupportedResponse(['POST /solana/sponsor']).dedicatedRoutes).toEqual([
+      'POST /solana/sponsor',
+    ]);
+
+    // No es un alias del array del llamador: mutar el propio no cambia una respuesta ya
+    // devuelta.
+    const mutable: Array<'POST /solana/payout'> = ['POST /solana/payout'];
+    const snapshot = getSupportedResponse(mutable);
+    mutable.length = 0;
+    expect(snapshot.dedicatedRoutes).toEqual(['POST /solana/payout']);
+  });
+
+  it('★ T-A4b / AC-1: el parámetro es REQUERIDO — llamarla sin él NO compila', async () => {
+    const { getSupportedResponse } = await import('../../core/supported.js');
+    chainRegistry._resetForTesting();
+
+    // Dos aserciones sobre la MISMA llamada, y hacen falta las dos:
+    //
+    // (a) COMPILACIÓN — la evalúa `npm run typecheck:tests` (`tsconfig.test.json`
+    //     incluye `src/**/*`), NO `npm run typecheck`, cuyo `exclude` deja afuera los
+    //     `.test.ts`. Mutante que la mata: volver el parámetro opcional con default
+    //     (`dedicatedRoutes: readonly DedicatedRouteId[] = []`) ⟹ la llamada compila, el
+    //     `@ts-expect-error` se queda sin error que esperar y `typecheck:tests` falla
+    //     con TS2578 ("Unused '@ts-expect-error' directive").
+    // (b) RUNTIME — el olvido no se disfraza de respuesta negativa: `[...undefined]`
+    //     tira `TypeError`. Con el default, esta llamada devolvería
+    //     `dedicatedRoutes: []`, o sea "ninguna de las tres rutas existe", publicado
+    //     como un hecho cuando lo cierto es que nadie preguntó.
+    expect(() =>
+      // @ts-expect-error — WKH-342: sin argumento tiene que ser un error de tipos.
+      getSupportedResponse(),
+    ).toThrow(TypeError);
   });
 });
