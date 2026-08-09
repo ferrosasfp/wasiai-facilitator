@@ -508,14 +508,50 @@ components:
       type: object
       description: |
         Discovery snapshot. Matches `SupportedResponse` in
-        `src/core/supported.ts`.
-      required: [chains, methods]
+        `src/core/supported.ts` — and that claim is now MECHANICAL, not prose:
+        `T-O6` derives the expected key set by calling `getSupportedResponse()`
+        and comparing it against this schema, so a field the code emits and this
+        schema omits is a red test. Before WKH-342 that guard only compared the
+        spec with itself, and the endpoint spent one commit serving a body this
+        schema rejected (`additionalProperties: false` + `dedicatedRoutes`).
+      required: [chains, methods, dedicatedRoutes]
       additionalProperties: false
       properties:
         chains:
           type: array
           items:
             $ref: "#/components/schemas/ChainSupportedItem"
+        dedicatedRoutes:
+          type: array
+          description: |
+            WKH-342 — the opt-in Solana transport routes THIS instance currently
+            has registered. Always present, always an array (possibly empty).
+            These are not chain adapters, so they never appeared in `chains` or
+            `methods`; this field is additive and removes nothing.
+
+            THREE outcomes a consumer can read, and there are three, not two:
+            - field ABSENT from the JSON: **unknown**. The facilitator predates
+              WKH-342, or something rewrote the response. It does NOT mean the
+              route is missing.
+            - present and CONTAINS the id: the route is registered; a POST to
+              that path will not hit Fastify's default 404.
+            - present and does NOT contain it: the route is not registered. `[]`
+              is this answer ("none of the three"), not an absence.
+
+            So branch on `Array.isArray(body.dedicatedRoutes)` — never on
+            truthiness and never on `.length`: `[]` and `undefined` are both
+            falsy and they are OPPOSITE outcomes.
+
+            What this field does NOT say: anything about whether the route will
+            AUTHORISE the call. A listed `POST /solana/payout` and a 403 from a
+            daily cap coexist without contradiction — this is existence of the
+            transport, not permission.
+          items:
+            type: string
+            enum:
+              - POST /solana/payout
+              - POST /solana/sponsor
+              - POST /solana/escrow/release
         methods:
           type: array
           items:

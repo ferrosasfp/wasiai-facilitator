@@ -39,7 +39,9 @@ import type { FastifyInstance } from 'fastify';
 import type { EnvConfig } from '../../infra/env.js';
 import { HTTP_BY_CODE } from '../../core/errors.js';
 import type { X402ErrorCode } from '../../core/types.js';
+import { asChainId } from '../../core/types.js';
 import { SPL_TOKEN_TRANSFER_FINALIZED } from '../../chains/types.js';
+import type { SettlementAdapter } from '../../chains/types.js';
 
 // ─── core/audit.js mock (WFAC-33 W4) ───────────────────────────────────────
 vi.mock('../../core/audit.js', () => {
@@ -82,6 +84,31 @@ function makeEnv(overrides: Partial<EnvConfig> = {}): EnvConfig {
 async function buildTestApp(): Promise<FastifyInstance> {
   const { buildApp } = await import('../../app.js');
   return buildApp({ env: makeEnv(), skipDomainCheck: true }); // WFAC-53 CD-16
+}
+
+/**
+ * AR BLQ-BAJO-2 — testigo mínimo para derivar `ChainSupportedItem` del código real.
+ *
+ * Deliberadamente SIN `getBreakerState` (como el adaptador Solana real), así que la entrada
+ * que produce el serializador trae `breakerStateAbsentReason` y NO `breakerState` — que es
+ * la mitad del invariante XOR que este test puede medir con un solo testigo.
+ * CD-15/CD-16 observado: no importa `src/chains/kite.ts` ni `avalanche.ts`.
+ */
+function makeOpenapiFakeAdapter(): SettlementAdapter {
+  return {
+    metadata: {
+      chainId: asChainId(2368),
+      name: 'Kite Testnet',
+      network: 'testnet',
+      networkId: 'eip155:2368',
+      rpcUrl: 'http://localhost',
+      nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+      tokens: [],
+    },
+    verify: vi.fn() as unknown as SettlementAdapter['verify'],
+    settle: vi.fn() as unknown as SettlementAdapter['settle'],
+    probeRpc: vi.fn() as unknown as SettlementAdapter['probeRpc'],
+  };
 }
 
 describe('GET /openapi.json', () => {
@@ -207,22 +234,85 @@ describe('GET /openapi.json', () => {
 
   // ─── AC-6 ────────────────────────────────────────────────────────────────
 
-  it('T-O6 / AC-6: SupportedResponse shape matches src/core/supported.ts', () => {
+  // ⚠️ AR BLQ-BAJO-2 — ESTE TEST SE COMPARABA CONTRA EL SPEC, NO CONTRA EL TIPO.
+  //
+  // Su nombre dice "matches src/core/supported.ts" y lo que hacía era leer
+  // `spec.…required` y compararlo con una lista escrita a mano EN EL MISMO TEST. O sea:
+  // el guard se aplaudía solo. Consecuencia medida: WKH-342 agregó `dedicatedRoutes` al
+  // tipo y a la respuesta, el spec quedó con `additionalProperties: false` y
+  // `properties [chains, methods]`, y `GET /supported` pasó a servir en TODO 200 un cuerpo
+  // que su propio contrato publicado rechaza (`ajv`: "should NOT have additional
+  // properties: dedicatedRoutes") — con este test en VERDE. Y peor: documentar el campo
+  // ponía este test en rojo, o sea que el guard bloqueaba su propio arreglo.
+  //
+  // Ahora el lado izquierdo de la comparación se DERIVA del código: se llama a la función
+  // real y se leen las claves que emite. No hay lista escrita a mano de la que el spec
+  // pueda divergir.
+  it('T-O6 / AC-6: SupportedResponse shape matches src/core/supported.ts (derivado del tipo, no del spec)', async () => {
+    const { getSupportedResponse } = await import('../../core/supported.js');
+    const { chainRegistry } = await import('../../chains/registry.js');
+
     const supported = spec.components.schemas.SupportedResponse;
     expect(supported).toBeDefined();
-
-    const required = supported!.required as string[];
-    expect([...required].sort()).toEqual(['chains', 'methods']);
-
     const props = supported!.properties as Record<string, Record<string, unknown>>;
+    const required = supported!.required as string[];
+
+    // ── Testigo REAL del cuerpo de nivel superior. Con el registry vacío las claves de
+    //    `SupportedResponse` son igual las tres: ninguna es opcional en el tipo.
+    chainRegistry._resetForTesting();
+    const witness = getSupportedResponse(['POST /solana/payout']) as unknown as Record<
+      string,
+      unknown
+    >;
+    const emitted = Object.keys(witness).sort();
+
+    // (1) Todo lo que el código EMITE está declarado. Es exactamente lo que
+    //     `additionalProperties: false` hace cumplir en un validador, y es la dirección
+    //     que estaba rota.
+    expect(Object.keys(props).sort()).toEqual(emitted);
+    // (2) Y todo lo que el spec exige, el código lo manda. Sin esto, el spec podría pedir
+    //     un campo que nunca sale.
+    expect([...required].sort()).toEqual(emitted);
+    // (3) El control que impide que (1) y (2) pasen por vacío o por tautología: el campo
+    //     de WKH-342 tiene que estar en las tres partes.
+    expect(emitted).toContain('dedicatedRoutes');
+    expect(required).toContain('dedicatedRoutes');
     expect(props.chains!.type).toBe('array');
     expect(props.methods!.type).toBe('array');
+    expect(props.dedicatedRoutes!.type).toBe('array');
 
-    // Each chain entry → { network, name, methods }.
+    // ── Misma disciplina un nivel adentro: `ChainSupportedItem`, con un testigo real.
     const chainItem = spec.components.schemas.ChainSupportedItem!;
-    const chainRequired = chainItem.required as string[];
-    expect([...chainRequired].sort()).toEqual(['methods', 'name', 'network']);
     const chainProps = chainItem.properties as Record<string, Record<string, unknown>>;
+    const chainRequired = chainItem.required as string[];
+
+    chainRegistry._resetForTesting();
+    try {
+      chainRegistry.register(makeOpenapiFakeAdapter());
+      const entry = (
+        getSupportedResponse([]) as unknown as {
+          chains: Array<Record<string, unknown>>;
+        }
+      ).chains[0];
+      expect(entry).toBeDefined();
+      const entryKeys = Object.keys(entry!).sort();
+
+      // Toda clave emitida por una entrada está declarada en el spec.
+      for (const key of entryKeys) expect(Object.keys(chainProps)).toContain(key);
+      // Y toda clave `required` del spec sale en la entrada. `breakerState` /
+      // `breakerStateAbsentReason` NO son required (exactamente-uno-de-los-dos, y el tipo
+      // los declara opcionales), así que este testigo alcanza para las tres constantes.
+      for (const key of chainRequired) expect(entryKeys).toContain(key);
+      expect([...chainRequired].sort()).toEqual(['methods', 'name', 'network']);
+      // El invariante XOR sigue vivo en el testigo, y el spec declara las dos mitades.
+      expect(Object.keys(chainProps)).toContain('breakerState');
+      expect(Object.keys(chainProps)).toContain('breakerStateAbsentReason');
+      expect(entryKeys).toContain('breakerStateAbsentReason');
+      expect(entryKeys).not.toContain('breakerState');
+    } finally {
+      chainRegistry._resetForTesting();
+    }
+
     expect(chainProps.network!.type).toBe('string');
     expect(chainProps.name!.type).toBe('string');
     expect(chainProps.methods!.type).toBe('array');
