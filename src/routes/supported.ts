@@ -47,16 +47,24 @@ import type { DedicatedRouteId } from '../core/supported.js';
  * (`routes/solana-payout.ts:259`, `routes/solana-sponsor.ts:216`,
  * `routes/solana-escrow.ts:200`). Si divergen, `hasRoute` devuelve `false` para una
  * ruta que sí está registrada y `T-A1` se pone rojo.
+ *
+ * ⚠️ CR MNR-1 — ES UN `Record` SOBRE EL UNION, NO UN ARRAY, y eso es lo que lo hace
+ * EXHAUSTIVO: `Record<DedicatedRouteId, …>` obliga a que exista una entrada por cada id
+ * de `DEDICATED_ROUTE_IDS`. Con el array anterior, agregar un cuarto id al tipo compilaba
+ * igual y la ruta nueva simplemente nunca se preguntaba: `/supported` no la publicaba
+ * nunca y nada se ponía rojo. Mutante de una línea que devuelve ese agujero: cambiar el
+ * tipo a `Partial<Record<…>>`.
  */
-const DEDICATED_ROUTES: readonly {
-  readonly id: DedicatedRouteId;
-  readonly method: 'POST';
-  readonly url: string;
-}[] = [
-  { id: 'POST /solana/payout', method: 'POST', url: '/solana/payout' },
-  { id: 'POST /solana/sponsor', method: 'POST', url: '/solana/sponsor' },
-  { id: 'POST /solana/escrow/release', method: 'POST', url: '/solana/escrow/release' },
-];
+const DEDICATED_ROUTE_PROBES: Readonly<
+  Record<DedicatedRouteId, { readonly method: 'POST'; readonly url: string }>
+> = {
+  'POST /solana/payout': { method: 'POST', url: '/solana/payout' },
+  'POST /solana/sponsor': { method: 'POST', url: '/solana/sponsor' },
+  'POST /solana/escrow/release': {
+    method: 'POST',
+    url: '/solana/escrow/release',
+  },
+};
 
 export const supportedRoute: FastifyPluginAsync = async (app) => {
   // WFAC-40 — per-route rate-limit config (DT-6 + DT-13 SDD).
@@ -86,9 +94,17 @@ export const supportedRoute: FastifyPluginAsync = async (app) => {
       // la instancia creada una vez), así que este handler ve rutas registradas en
       // scopes hermanos. T-A2b lo verifica de punta a punta contra la app real (antes de
       // ese test la afirmación era DERIVADA de leer find-my-way, no medida).
-      const dedicatedRoutes: readonly DedicatedRouteId[] = DEDICATED_ROUTES.filter((route) =>
-        app.hasRoute({ method: route.method, url: route.url }),
-      ).map((route) => route.id);
+      // `Object.entries` y NO `DEDICATED_ROUTE_PROBES[id]`: el índice dinámico dispara
+      // `security/detect-object-injection`, que `eslint --max-warnings 0` trata como error.
+      // El orden publicado es el de las claves del literal del `Record` (JS preserva el
+      // orden de inserción de claves string), que se mantiene alineado con la tupla.
+      const dedicatedRoutes: readonly DedicatedRouteId[] = (
+        Object.entries(DEDICATED_ROUTE_PROBES) as ReadonlyArray<
+          [DedicatedRouteId, { readonly method: 'POST'; readonly url: string }]
+        >
+      )
+        .filter(([, probe]) => app.hasRoute({ method: probe.method, url: probe.url }))
+        .map(([id]) => id);
 
       const response = getSupportedResponse(dedicatedRoutes);
 

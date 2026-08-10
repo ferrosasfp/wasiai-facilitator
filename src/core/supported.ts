@@ -131,11 +131,28 @@ export interface ChainSupportedItem {
  * de la entrada Solana es `spl-token-transfer-finalized` (`chains/solana-adapter.ts`),
  * que es el riel testigo de `/verify`+`/settle` y sí existe—, así que acá no había
  * nada que corregir: hay un campo nuevo donde antes no había información.
+ *
+ * ⚠️ CR MNR-1 — POR QUÉ ESTO ES UN ARRAY EN RUNTIME Y EL TIPO SE DERIVA DE ÉL.
+ *
+ * Antes esto era un union de literales y nada más, o sea que sólo existía en tiempo de
+ * compilación. Consecuencia MEDIDA: agregar un cuarto miembro dejaba
+ * `routes.openapi.test.ts` en **14 passed** y `tsc` en **0**, mientras `ajv` rechazaba el
+ * cuerpo real contra el `enum` de `doc/openapi.yaml` — el spec no tenía de dónde derivar
+ * la lista, así que la repetía a mano y divergía en silencio. Es el mismo defecto que
+ * BLQ-BAJO-2, un nivel más abajo: no en el eje de las CLAVES, en el de los VALORES.
+ *
+ * Con la tupla `as const` hay UN solo lugar donde se agregan ids, el tipo sale de ella
+ * (`(typeof …)[number]`) y `T-O6` compara el `enum` del yaml contra ESTE array. Mutante
+ * de una línea que restaura la divergencia: volver a escribir el union a mano en vez de
+ * derivarlo de la tupla.
  */
-export type DedicatedRouteId =
-  | 'POST /solana/payout'
-  | 'POST /solana/sponsor'
-  | 'POST /solana/escrow/release';
+export const DEDICATED_ROUTE_IDS = [
+  'POST /solana/payout',
+  'POST /solana/sponsor',
+  'POST /solana/escrow/release',
+] as const;
+
+export type DedicatedRouteId = (typeof DEDICATED_ROUTE_IDS)[number];
 
 export interface SupportedResponse {
   readonly chains: readonly ChainSupportedItem[];

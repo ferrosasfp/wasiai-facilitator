@@ -249,7 +249,7 @@ describe('GET /openapi.json', () => {
   // real y se leen las claves que emite. No hay lista escrita a mano de la que el spec
   // pueda divergir.
   it('T-O6 / AC-6: SupportedResponse shape matches src/core/supported.ts (derivado del tipo, no del spec)', async () => {
-    const { getSupportedResponse } = await import('../../core/supported.js');
+    const { getSupportedResponse, DEDICATED_ROUTE_IDS } = await import('../../core/supported.js');
     const { chainRegistry } = await import('../../chains/registry.js');
 
     const supported = spec.components.schemas.SupportedResponse;
@@ -280,6 +280,25 @@ describe('GET /openapi.json', () => {
     expect(props.chains!.type).toBe('array');
     expect(props.methods!.type).toBe('array');
     expect(props.dedicatedRoutes!.type).toBe('array');
+
+    // ── CR MNR-1 — LA COMPARACIÓN BAJA HASTA `items`, que era el residuo.
+    //
+    // Con las claves derivadas pero el `items` escrito a mano, dos inputs MEDIDOS dejaban
+    // este test en 14 passed y `tsc` en 0 mientras `ajv` rechazaba el cuerpo real:
+    //   (a) `items.type: string` → `integer` en el yaml;
+    //   (b) un cuarto `DedicatedRouteId` en `core/supported.ts` (el `enum` del yaml no lo
+    //       tenía, así que el 200 real quedaba fuera de su propio contrato).
+    // Ahora los dos lados salen del MISMO array de runtime.
+    const items = props.dedicatedRoutes!.items as Record<string, unknown>;
+    expect([...(items.enum as string[])].sort()).toEqual([...DEDICATED_ROUTE_IDS].sort());
+    // `items.type` también se DERIVA: es el `typeof` real de los valores publicados, no un
+    // literal escrito acá. Si el union pasara a ser de otro tipo, esto se mueve solo.
+    const idTypes = [...new Set(DEDICATED_ROUTE_IDS.map((id) => typeof id))];
+    expect(idTypes).toEqual(['string']);
+    expect(items.type).toBe(idTypes[0]);
+    // Control de que (b) no pase por vacío: el enum no está vacío y trae la ruta de dinero.
+    expect((items.enum as string[]).length).toBe(DEDICATED_ROUTE_IDS.length);
+    expect(items.enum as string[]).toContain('POST /solana/payout');
 
     // ── Misma disciplina un nivel adentro: `ChainSupportedItem`, con un testigo real.
     const chainItem = spec.components.schemas.ChainSupportedItem!;
