@@ -217,9 +217,19 @@ paths:
       tags: [ops]
       summary: Liveness probe.
       description: |
-        Basic health check with version metadata. Exempted from the global
-        rate-limit plugin. Returns 200 as long as the Fastify instance is
-        alive — does NOT probe Redis, RPC, or downstream dependencies.
+        Liveness probe. Always answers 200 while the process is up: a degraded
+        dependency is reported in the body (`degraded` + `details`), never as a
+        non-2xx, so a Redis or RPC blip does not get the container killed.
+        Exempted from the global rate-limit plugin.
+
+        The request never awaits a dependency probe. `details` is a
+        process-cached snapshot: the probes behind it (a Redis PING and each
+        adapter's own RPC probe) run in a background refresh that the request
+        does not wait for, so response time does not depend on Redis or RPC
+        latency. Two consequences a consumer has to read: `details.probedAt`
+        may be up to 5000 ms stale, and it is `0` before the first probe
+        completes, in which case the `chains` entries are optimistic rather
+        than measured.
       operationId: getHealth
       responses:
         "200":
@@ -570,11 +580,18 @@ components:
       description: |
         Liveness response. Matches `HealthResponse` in
         `src/routes/health.ts`.
-      required: [status, version, uptime, timestamp]
+      required: [status, degraded, version, uptime, timestamp, details]
       additionalProperties: false
       properties:
         status:
           const: ok
+        degraded:
+          type: boolean
+          description: |
+            OP-05. True when any tracked dependency is not in its healthy state.
+            This is a summary of `details.degraded`, not an independent signal.
+            A `true` here does NOT mean the process is unhealthy: this endpoint
+            answers 200 either way (see the endpoint description).
         version:
           type: string
           description: Server version (from `package.json#version`).
@@ -586,6 +603,99 @@ components:
           type: string
           format: date-time
           description: ISO-8601 timestamp of the response.
+        details:
+          $ref: "#/components/schemas/HealthDetail"
+
+    HealthDetail:
+      type: object
+      description: |
+        OP-05. Per-dependency detail. Matches `HealthStatusDetail` in
+        `src/core/health-status.ts`. Carries no secret value: the wallet entry
+        is a presence boolean, never the key.
+      required: [degraded, redis, wallet, chains, probedAt]
+      additionalProperties: false
+      properties:
+        degraded:
+          type: boolean
+          description: True when ANY tracked dependency is not in its healthy state.
+        redis:
+          type: object
+          required: [configured, status]
+          additionalProperties: false
+          properties:
+            configured:
+              type: boolean
+              description: Whether a REDIS_URL is configured (false in in-memory mode).
+            status:
+              type: string
+              enum: [ok, unreachable, disabled]
+              description: |
+                `ok` (PING succeeded), `unreachable` (PING failed) or `disabled`
+                (no REDIS_URL). `disabled` is NOT degraded; only a
+                configured-but-unreachable Redis is.
+        wallet:
+          type: object
+          required: [present]
+          additionalProperties: false
+          properties:
+            present:
+              type: boolean
+              description: |
+                Whether the operator signing key is present in the environment.
+                Presence only: the value is never read into the response.
+                Absence IS degraded, because the facilitator cannot settle
+                without a signer.
+        chains:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChainHealthItem"
+        probedAt:
+          type: integer
+          minimum: 0
+          description: |
+            Epoch ms when this snapshot's probes completed. `0` means no probe
+            has completed yet and the `chains` entries are the optimistic
+            initial snapshot. It does not mean "probed at the epoch".
+
+    ChainHealthItem:
+      type: object
+      description: |
+        One entry per registered chain adapter, as probed for the current
+        snapshot. Matches `ChainHealth` in `src/core/health-status.ts`.
+      required: [chainId, name, network, rpc]
+      additionalProperties: false
+      properties:
+        chainId:
+          type: integer
+        name:
+          type: string
+          description: Human-readable chain name, e.g. `Kite Testnet`.
+        network:
+          type: string
+          description: CAIP-2 network identifier, e.g. `eip155:2368`, `solana:devnet`.
+        rpc:
+          type: string
+          enum: [ok, unreachable]
+          description: |
+            `ok` means the adapter's own probe answered, OR that a transient
+            failure is still being tolerated. `unreachable` means a hard
+            failure, or a transient one at or over the tolerated threshold.
+            Read it together with `consecutiveFailures`: `ok` WITH that field
+            present is a tolerated blip, not a clean probe.
+        consecutiveFailures:
+          type: integer
+          minimum: 1
+          description: |
+            OPTIONAL, omitted entirely on a clean probe. Consecutive failed
+            probes for this chain. Its absence means the last probe succeeded.
+        lastFailureKind:
+          type: string
+          enum: [transient, connection]
+          description: |
+            OPTIONAL, omitted entirely on a clean probe. Classification of the
+            last failed probe. `transient` (rate limit, timeout, gateway 5xx,
+            socket reset) is tolerated below the threshold; `connection`
+            (refused, DNS, TLS, or a malformed adapter) is reported at once.
 
     # ─── Error envelope ───────────────────────────────────────────────────
 
