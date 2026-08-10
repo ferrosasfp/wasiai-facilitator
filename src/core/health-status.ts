@@ -26,22 +26,31 @@
  * so a rate-limited refresh surfaces here as a probe timeout. Flipping
  * `degraded` on every such blip would replace a health that lies in red with one
  * that flaps. So probe failures are CLASSIFIED:
- *   - 'connection' (ECONNREFUSED / DNS / TLS / bad adapter) → unambiguous:
+ *   - 'connection' (ECONNREFUSED / ENOTFOUND / TLS / bad adapter) → unambiguous:
  *     `unreachable` on the FIRST failure, exactly as before.
- *   - 'transient' (429 / rate limit / timeout / 502-504 / socket reset) →
- *     tolerated while `consecutiveFailures < TRANSIENT_FAILURE_THRESHOLD`; the
- *     chain keeps `rpc: 'ok'` but the (additive) `consecutiveFailures` +
- *     `lastFailureKind` fields expose the blip, so tolerating is never silent.
- *     A real outage still lands as `unreachable` on the next refresh (~1 TTL).
+ *   - 'transient' (429 / rate limit / timeout / 502-504 / socket reset /
+ *     EAI_AGAIN) → tolerated while
+ *     `consecutiveFailures < TRANSIENT_FAILURE_THRESHOLD`; the chain keeps
+ *     `rpc: 'ok'` but the (additive) `consecutiveFailures` + `lastFailureKind`
+ *     fields expose the blip, so tolerating is never silent. A real outage lands
+ *     as `unreachable` on the next refresh, and "next refresh" means the next
+ *     REQUEST that finds the snapshot stale, not a fixed TTL later.
+ * Name resolution is split across BOTH classes on purpose: EAI_AGAIN (temporary)
+ * is transient, ENOTFOUND (permanent) is a connection failure. Writing "DNS" on
+ * one side only is the drift WKH-344 AR BLQ-BAJO-2 found in the published
+ * contract; `health.probe-non-evm.test.ts` HP-9 measures both.
  * Any successful probe resets that chain's counter.
  *
  * DESIGN (why a cache): probing a live Redis/RPC on every `/health` request
  * couples the liveness probe to dependency latency — a dead RPC would make
  * `/health` slow or hang, which is exactly what a liveness probe must NOT do.
- * Instead we keep a process-cached snapshot refreshed in the BACKGROUND on a
- * TTL. `getHealthStatus()` returns the last-known snapshot INSTANTLY and kicks
- * off a non-awaited refresh when the snapshot is stale. So `/health` stays a
- * fast 200 while still reporting accurate (near-real-time) dependency state.
+ * Instead we keep a process-cached snapshot refreshed in the BACKGROUND.
+ * `getHealthStatus()` returns the last-known snapshot INSTANTLY and kicks off a
+ * non-awaited refresh when the snapshot is stale. So `/health` stays a fast 200.
+ * What it does NOT buy is freshness: the refresh is only ever kicked BY a request
+ * (no timer in `src/`), and the kicking request is answered from the PREVIOUS
+ * snapshot, so how stale the body is follows the request cadence, not
+ * `SNAPSHOT_TTL_MS`. A rarely-called `/health` reports old dependency state.
  *
  * Boundaries (OWNERS.md row `src/core/`):
  *   - MAY import: `../chains/registry.js` (registry singleton — allowed "salvo
@@ -62,13 +71,21 @@ import { isRedisConfigured, isRedisReachable } from './idempotency.js';
 const RPC_PROBE_TIMEOUT_MS = 1500;
 
 /**
- * How long a cached snapshot is served before a background refresh is kicked.
+ * Age at which an incoming request KICKS a background refresh.
  *
- * EXPORTED (WKH-344) because the published `description` of `GET /health` states this
- * staleness bound in milliseconds, and a number copied into prose drifts in silence:
- * `T-O-DRIFT-3` compares the text against THIS constant, so the one-line mutant
- * `SNAPSHOT_TTL_MS = 30000` turns that test red instead of leaving a false sentence
- * published. Nothing in `src/` reads it through the export.
+ * ⚠️ NOT a ceiling on the age of what is served, and the published contract used to say
+ * it was ("`details.probedAt` may be up to 5000 ms stale" — WKH-344 AR BLQ-MED-1). The
+ * request that crosses this threshold is answered from the PREVIOUS snapshot
+ * (`getHealthStatus` below), and nothing refreshes outside a request, so the age served
+ * follows the request cadence. Measured on this module with `tsx`: calls 7000 ms apart
+ * served 7308 / 7005 / 7007 ms; calls 15000 ms apart served 15307 / 15016 / 15015 ms.
+ *
+ * EXPORTED (WKH-344) because the published `description` of `GET /health` names this
+ * number, and a number copied into prose drifts in silence: `T-O-DRIFT-3` compares the
+ * text against THIS constant, so the one-line mutant `SNAPSHOT_TTL_MS = 30000` turns
+ * that test red instead of leaving a false sentence published. That guard pins the
+ * NUMBER; the SHAPE of the claim around it is pinned by the negative assert next to it.
+ * Nothing in `src/` reads it through the export.
  */
 export const SNAPSHOT_TTL_MS = 5000;
 
@@ -94,8 +111,12 @@ export type ProbeFailureKind = (typeof PROBE_FAILURE_KINDS)[number];
 /**
  * Errors that mean "the RPC is there but did not answer THIS time": rate limits
  * (the public Solana devnet RPC 429s aggressively), our own probe timeout,
- * gateway 5xx and socket resets. Everything else is treated as a hard
- * 'connection' failure (ECONNREFUSED, DNS/TLS, or a malformed adapter).
+ * gateway 5xx, socket resets, and `EAI_AGAIN` — Node's TEMPORARY name-resolution
+ * failure, which is in the pattern below and therefore NOT a connection failure.
+ * Everything else is treated as a hard 'connection' failure (ECONNREFUSED, a
+ * PERMANENT resolution failure like ENOTFOUND, TLS, or a malformed adapter).
+ * This comment used to say "DNS/TLS" on the connection side while the pattern
+ * four lines down matched EAI_AGAIN: the code was right, the sentence was not.
  */
 const TRANSIENT_PROBE_ERROR_RE =
   /\b429\b|too many requests|rate limit|rate-limit|timeout|timed out|ETIMEDOUT|EAI_AGAIN|ECONNRESET|socket hang up|\b50[234]\b/i;
@@ -127,7 +148,11 @@ export interface ChainHealth {
 }
 
 /**
- * 'ok' (PING succeeded), 'unreachable' (PING failed), or 'disabled' (no REDIS_URL).
+ * 'ok' = the last COMPLETED PING succeeded, OR none has completed yet (see
+ * `initialSnapshot()` below: with a client configured it reports 'ok' at `probedAt: 0`
+ * without a PING result behind it); 'unreachable' = a completed PING failed;
+ * 'disabled' = no REDIS_URL. This comment used to say plain "'ok' (PING succeeded)",
+ * which is the same over-claim the published contract carried (WKH-344 AR BLQ-BAJO-1).
  *
  * Runtime tuple for the same reason as `PROBE_FAILURE_KINDS`: `HealthDetail.redis.status`
  * is published as an `enum` in `doc/openapi.yaml` and `T-O11-DETAIL` derives it from here.
@@ -136,12 +161,27 @@ export const REDIS_HEALTH_STATUSES = ['ok', 'unreachable', 'disabled'] as const;
 export type RedisHealthStatus = (typeof REDIS_HEALTH_STATUSES)[number];
 
 export interface HealthStatusDetail {
-  /** Overall: true when ANY tracked dependency is not in its healthy state. */
+  /**
+   * Overall degradation AS OF `probedAt`: the OR of a configured-but-unreachable Redis, an
+   * absent wallet, and any chain with `rpc: 'unreachable'` (see `probeAll()` below).
+   *
+   * ⚠️ At `probedAt: 0` it is `!wallet.present` ALONE — `initialSnapshot()` runs no PING and
+   * no RPC probe — so a `false` there says a signer is present and says NOTHING about Redis
+   * or the chains. This comment used to be the bare universal claim, which is the same
+   * over-claim the published contract carried on BOTH `degraded` fields (WKH-344 AR-2
+   * BLQ-BAJO-3). Measured with `tsx` on this module: Redis configured-but-dead + a chain
+   * rejecting `connect ECONNREFUSED` + wallet present served
+   * `{"degraded":false,...,"redis":{"configured":true,"status":"ok"},"probedAt":0}` first and
+   * `{"degraded":true,...,"status":"unreachable"}` only after the probe landed.
+   *
+   * The TWIN sentence on `HealthResponse.degraded` in `src/routes/health.ts` is deliberately
+   * NOT touched: that file stays absent from this HU's diff by design.
+   */
   readonly degraded: boolean;
   readonly redis: {
     /** Whether a REDIS_URL is configured (false in test/in-memory mode). */
     readonly configured: boolean;
-    /** 'ok' (PING succeeded), 'unreachable' (PING failed), or 'disabled'. */
+    /** 'ok' = last COMPLETED PING ok, or none completed yet; 'unreachable' = it failed. */
     readonly status: RedisHealthStatus;
   };
   readonly wallet: {
@@ -275,8 +315,14 @@ function initialSnapshot(): HealthStatusDetail {
     rpc: 'ok' as const, // optimistic until the first probe completes
   }));
   return {
-    // Wallet absence is known synchronously and IS a real degraded signal.
+    // Wallet absence is known synchronously and IS a real degraded signal — and it is the ONLY
+    // axis evaluated here: no PING, no RPC probe. So `degraded: false` in this snapshot means
+    // "a signer is present", NOT "every dependency answered" (WKH-344 AR-2 BLQ-BAJO-3), and
+    // that is what `probedAt: 0` warns the consumer about.
     degraded: !walletPresent,
+    // Optimistic exactly like `chains` above: a configured Redis reports 'ok' with NO PING
+    // behind it (`isRedisReachable()` is called only from `probeAll`). `probedAt: 0` is the
+    // only signal a consumer has, which is why the published description says so.
     redis: { configured: redisConfigured, status: redisConfigured ? 'ok' : 'disabled' },
     wallet: { present: walletPresent },
     chains,

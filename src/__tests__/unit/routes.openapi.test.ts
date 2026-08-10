@@ -662,8 +662,15 @@ describe('GET /openapi.json', () => {
     // el error simétrico y también falso: el sondeo corre en un refresco de fondo que la
     // request no awaitea. Este guard exige las DOS mitades a la vez.
     const { SNAPSHOT_TTL_MS } = await import('../../core/health-status.js');
-    const desc = (spec.paths['/health']!.get as { description?: string }).description;
-    expect(typeof desc).toBe('string');
+    const raw = (spec.paths['/health']!.get as { description?: string }).description;
+    expect(typeof raw).toBe('string');
+    // ⚠️ APLANAR ANTES DE MATCHEAR, y no es cosmético: `description: |` es un block scalar
+    // LITERAL, así que los saltos de línea del YAML sobreviven al parseo. La primera versión
+    // de este guard matcheaba contra el texto crudo y el experimento de mutación lo pasó en
+    // verde: la frase falsa reinsertada quedó cortada como `up\nto 5000 ms stale`, y
+    // `/up to /` no matchea a través del salto. Un re-wrap del párrafo alcanzaba para
+    // desarmar el assert sin cambiar una palabra.
+    const desc = raw!.replace(/\s+/g, ' ');
     // la afirmación falsa que esta HU saca.
     expect(desc).not.toMatch(/does\s+not\s+probe/i);
     // y el error simétrico: tiene que quedar claro que es de fondo y no awaiteado.
@@ -674,8 +681,308 @@ describe('GET /openapi.json', () => {
     // falsa sin poner nada rojo.
     expect(desc).toContain(`${SNAPSHOT_TTL_MS} ms`);
     expect(desc).toMatch(/probedAt/);
+    // ⚠️ EL EJE CUANTITATIVO — el que este guard NO miraba (AR BLQ-MED-1).
+    //
+    // Tener el número no dice NADA sobre qué se afirma con él, y lo que se afirmaba era
+    // falso: "`details.probedAt` may be up to 5000 ms stale". `SNAPSHOT_TTL_MS` no es un
+    // techo: es el umbral a partir del cual una request DISPARA el refresco de fondo, y esa
+    // misma request se contesta con el snapshot anterior: el `if (… > SNAPSHOT_TTL_MS) {
+    // kickRefresh(); }` seguido de `return _snapshot` dentro de `getHealthStatus()`
+    // (`health-status.ts:359-362`). No hay `setInterval` en `src/` y `getHealthStatus()`
+    // tiene un solo llamador de producción (`src/routes/health.ts:53`), así que la antigüedad
+    // servida la fija la CADENCIA de requests. Medido con `tsx` sobre el módulo real, dos
+    // cadencias: con llamadas cada 7000 ms se sirvieron 7308/7005/7007 ms; cada 15000 ms,
+    // 15307/15016/15015 ms. La edad sigue al hueco entre llamadas, no al TTL.
+    //
+    // ⚠️ ALCANCE REAL DEL ASSERT DE ABAJO — leelo antes de apoyarte en su verde.
+    //
+    // Es una LISTA NEGRA ENUMERADA de 10 redacciones, NO un detector de "la forma techo".
+    // Cualquier sinónimo que no esté en la lista pasa en verde. La versión anterior de este
+    // comentario decía lo contrario ("prohíbe la FORMA «techo»; cualquier redacción con la que
+    // un lector pueda calcular una antigüedad máxima lo pone rojo") y era falsa con cuatro
+    // inputs que el AR-2 midió sobrevivientes: "at worst 5000 ms old", "never more than
+    // 5000 ms old", "bounded by 5000 ms and cannot exceed it", "capped at 5 seconds". Las
+    // cuatro publicaban de vuelta el techo que esta HU saca, con la suite en verde. Un
+    // comentario que promete exhaustividad es el mecanismo exacto por el que el bloqueante
+    // original pasó el gate: tranquiliza al revisor sobre una cobertura que no existe.
+    //
+    // Las 10 que hoy prohíbe, y nada más:
+    //   1. `up to … stale`   2. `never stale`      3. `at most`
+    //   4. `no older than`   5. `maximum age` / `maximum staleness`
+    //   6. `bounded by`      7. `cannot` / `can't exceed`
+    //   8. `capped at`       9. `at worst`        10. `never more than`
+    // Las 1-5 venían del fix-pack 1; las 6-10 son exactamente las que el AR-2 nombró. Cerrar
+    // la CLASE entera con una regex no se puede: lo que este assert compra es que una
+    // redacción YA VISTA no vuelva. Una nueva la tiene que cazar un humano en el CR.
+    //
+    // Control de falso positivo: medido contra el texto honesto actual, que dice "it is not a
+    // ceiling", "no upper bound in the code" y "older than 5000 ms" — ninguna de las 10
+    // matchea, así que la lista no está en verde por vacuidad ni pelea con la prosa buena.
+    expect(desc).not.toMatch(
+      /up to .{0,40}stale|never stale|at\s+most|no\s+older\s+than|maximum\s+(age|staleness)|bounded\s+by|can(?:not|'t)\s+exceed|capped\s+at|at\s+worst|never\s+more\s+than/i,
+    );
     // CD-9: sin imperativos al integrador.
     expect(desc).not.toMatch(/\b(send|submit|set|pass)\b/i);
+  });
+
+  it('T-O-DRIFT-4: las descripciones optimistas de `details` (`redis.status`, `lastFailureKind`, `degraded`, `rpc`, `consecutiveFailures`) publican el descargo del snapshot pre-probe', () => {
+    // AR-1 BLQ-BAJO-1/BLQ-BAJO-2 + AR-2 BLQ-BAJO-3: tres frases de campo que afirmaban de
+    // más, y que el descargo de `probedAt` NO cubría (ese párrafo acotaba lo "optimista" a
+    // las entradas de `chains`, y ninguna de las tres frases es sobre `chains`). Son CINCO:
+    // las dos aditivas de `ChainHealthItem` salieron al escribir el bloque (4) y no las había
+    // listado ningún AR (ver (5)).
+    //
+    // ⚠️ QUÉ MIRA ESTE TEST, para que el título no prometa más de lo que hace: mira TEXTO
+    // PUBLICADO. Ningún assert de acá ejecuta `health-status.ts`, así que ninguno prueba por
+    // sí mismo que el comportamiento descrito sea el real; exige que el descargo esté
+    // escrito. El comportamiento lo miden otros: `HP-9` en `health.probe-non-evm.test.ts`
+    // (clasificación real de EAI_AGAIN vs ENOTFOUND, con el módulo corriendo) y las
+    // mediciones con `tsx` citadas abajo. El título anterior decía "no afirman una medición
+    // que no ocurrió", que se lee como si ACÁ se midiera algo: no se mide nada acá.
+    //
+    // Y el alcance de cada assert es PRESENCIA/AUSENCIA de tokens, no corrección de la
+    // frase: un texto que conserve los tokens exigidos y afirme de más en otra oración pasa
+    // en verde. Es el mismo límite que el guard de la lista negra de T-O-DRIFT-3.
+    const detail = spec.components.schemas.HealthDetail!;
+    const dProps = detail.properties as Record<string, Record<string, unknown>>;
+    const redisStatusDesc = (
+      (dProps.redis!.properties as Record<string, Record<string, unknown>>).status!
+        .description as string
+    ).replace(/\s+/g, ' ');
+
+    // (1) `redis.status: 'ok'` se sirve SIN PING en el snapshot pre-probe:
+    //     `initialSnapshot()` hace `status: redisConfigured ? 'ok' : 'disabled'`
+    //     (`health-status.ts:326`) y NO llama a `isRedisReachable()` — ese llamado existe
+    //     una sola vez, en `probeAll()` (`health-status.ts:279`). Medido con el mock de
+    //     `getRedisClient`:
+    //     `{configured:true,status:"ok"}` con `probedAt: 0`. El PING del refresco de fondo
+    //     puede estar EN VUELO (se lo vio llamado 1 vez), pero su resultado no está en el
+    //     cuerpo servido: de ahí que lo exigido sea "completado", no "ocurrió".
+    expect(redisStatusDesc).toMatch(/completed/i);
+    expect(redisStatusDesc).toMatch(/probedAt/);
+    // ⚠️ EL ASSERT QUE HACE EL TRABAJO (AR-2 BLQ-BAJO-2). Con sólo `completed` + `probedAt` +
+    // el negativo de abajo, el mutante "``ok`` means the PING completed successfully, …, read
+    // together with `probedAt`" sobrevive en VERDE: conserva los dos tokens, no usa la forma
+    // exacta que el negativo prohíbe, y publica igual el PING como hecho consumado. Lo que
+    // distingue al texto honesto es que dice el caso SIN PING, así que eso es lo que se exige.
+    expect(redisStatusDesc).toMatch(/no PING/i);
+    // la forma que afirmaba el PING como hecho consumado, sin calificar.
+    expect(redisStatusDesc).not.toMatch(/`ok` \(PING succeeded\)/i);
+
+    // (2) DNS no se reporta "at once": `EAI_AGAIN` (fallo TEMPORAL de resolución en Node)
+    //     está en `TRANSIENT_PROBE_ERROR_RE` (`health-status.ts:121-122`), así que se tolera por
+    //     debajo del umbral. La clasificación real de los dos códigos se MIDE en
+    //     `health.probe-non-evm.test.ts` (HP-9); acá se exige que el contrato no vuelva a
+    //     meter "DNS" entero bajo `connection`.
+    const kindDesc = (
+      (
+        spec.components.schemas.ChainHealthItem!.properties as Record<
+          string,
+          Record<string, unknown>
+        >
+      ).lastFailureKind!.description as string
+    ).replace(/\s+/g, ' ');
+    expect(kindDesc).not.toMatch(/reported at once/i);
+    expect(kindDesc).toMatch(/EAI_AGAIN/);
+    expect(kindDesc).toMatch(/ENOTFOUND/);
+
+    // (3) `degraded` es la TERCERA descripción optimista (AR-2 BLQ-BAJO-3) y la única con
+    //     consumidor productivo: es el campo que lee el monitor. `initialSnapshot()` lo
+    //     calcula como `degraded: !walletPresent` (`health-status.ts:322`) — no mira Redis ni
+    //     las chains.
+    //     MEDIDO con `tsx` sobre el módulo real (REDIS_URL a un puerto muerto → configured
+    //     true / PING falla, un adapter que rechaza `connect ECONNREFUSED`, wallet presente):
+    //       PRE-PROBE : {"degraded":false,"redis":{"configured":true,"status":"ok"},
+    //                    "chains":[{...,"rpc":"ok"}],"probedAt":0}
+    //       POST-PROBE: {"degraded":true, "redis":{...,"status":"unreachable"},
+    //                    "chains":[{...,"rpc":"unreachable"}]}
+    //     O sea que a `probedAt: 0` la frase publicada ("True when ANY tracked dependency is
+    //     not in its healthy state") era falsa en los DOS `degraded` (el de `HealthResponse` y
+    //     el de `HealthDetail`), que es donde estaba escrita. Contraprueba del otro lado: sin
+    //     OPERATOR_PRIVATE_KEY el pre-probe ya da `degraded:true`, así que el eje del wallet SÍ
+    //     se evalúa y el campo no es una constante. Y con todo sano y Redis 'disabled', el
+    //     cuerpo pre-probe y el post-probe salieron IDÉNTICOS salvo `probedAt` (medido en esa
+    //     configuración): de ahí que el descargo mande a leer `probedAt`.
+    const hrProps = spec.components.schemas.HealthResponse!.properties as Record<
+      string,
+      Record<string, unknown>
+    >;
+    const flat = (s: unknown): string => String(s).replace(/\s+/g, ' ');
+    const degradedDescs: ReadonlyArray<readonly [string, string]> = [
+      ['HealthResponse.degraded', flat(hrProps.degraded!.description)],
+      ['HealthDetail.degraded', flat(dProps.degraded!.description)],
+    ];
+    // Cuatro tokens, en las DOS descripciones. El mutante que las devuelve a la frase
+    // universal de una línea pierde los cuatro. Un mutante que los conserve y afirme de más
+    // en otra oración NO lo caza esto (ver el aviso de alcance arriba).
+    for (const [where, text] of degradedDescs) {
+      expect(text, `${where}: sin el descargo de probedAt`).toMatch(/probedAt/);
+      expect(text, `${where}: sin la condición pre-probe`).toMatch(/before the first probe/i);
+      expect(text, `${where}: no dice de qué depende a probedAt: 0`).toMatch(/wallet\.present/);
+      expect(text, `${where}: no dice que ese eje es el ÚNICO`).toMatch(/\balone\b/i);
+    }
+
+    // (4) COHERENCIA de la enumeración de "lo no medido a `probedAt: 0`". Estaba partida en
+    //     tres versiones distintas (AR-2 BLQ-BAJO-3): el endpoint decía "`chains` y
+    //     `redis.status`", `probedAt` decía sólo "`chains`", y `degraded` no figuraba en
+    //     ninguna de las dos.
+    //
+    //     La comparación es contra una cadena CANÓNICA literal, no "que aparezcan los tres
+    //     nombres en algún lado". La versión por tokens la medí y era falsa: el mutante que
+    //     saca `degraded` de la lista del endpoint pasaba en VERDE, porque la oración
+    //     siguiente dice `degraded` por otro motivo ("so `degraded` there is
+    //     `!details.wallet.present` ALONE") y el token seguía presente. Comparar la cadena
+    //     entera además es lo que la HU necesita: el defecto era que los dos lugares
+    //     enumeraran DISTINTO, así que re-redactar uno solo tiene que ponerse rojo aunque la
+    //     redacción nueva sea correcta.
+    const CANONICAL_OPTIMISTIC = "`degraded`, `redis.status`, and the `chains` entries' `rpc`";
+    // Segunda cadena canónica, por el eje que se me pasó al escribir la primera: la lista de
+    // arriba decía "THREE fields" y era una afirmación de EXHAUSTIVIDAD falsa. A `probedAt: 0`
+    // los dos campos aditivos de cada chain están AUSENTES igual que en una sonda limpia, así
+    // que también son optimistas. Ver (5).
+    const CANONICAL_ADDITIVE =
+      '`consecutiveFailures` and `lastFailureKind` are absent then too, exactly as on a ' +
+      'clean probe, so their absence does not mean a probe succeeded.';
+    const ANCHOR = /before the first probe completes/i;
+    const enumerating: ReadonlyArray<readonly [string, string]> = [
+      [
+        'GET /health description',
+        flat((spec.paths['/health']!.get as { description?: string }).description),
+      ],
+      ['HealthDetail.probedAt', flat(dProps.probedAt!.description)],
+    ];
+    for (const [where, text] of enumerating) {
+      expect(
+        text.search(ANCHOR),
+        `${where}: no dice qué pasa antes de la primera sonda`,
+      ).toBeGreaterThanOrEqual(0);
+      expect(text, `${where}: la enumeración no es la canónica`).toContain(CANONICAL_OPTIMISTIC);
+      expect(text, `${where}: falta la aclaración canónica de los campos aditivos`).toContain(
+        CANONICAL_ADDITIVE,
+      );
+    }
+
+    // (5) LOS DOS CAMPOS ADITIVOS — el eje que se me pasó escribiendo (4), y que ningún AR
+    //     había listado. A `probedAt: 0` `consecutiveFailures` y `lastFailureKind` están
+    //     ausentes exactamente como en una sonda limpia, así que lo que publicaba
+    //     `consecutiveFailures` ("Its absence means the last probe succeeded.") era falso
+    //     cuando NO hubo ninguna sonda: misma clase que BLQ-BAJO-3, en dos descripciones más.
+    //     `rpc` tenía el mismo defecto local ("`ok` means the adapter's own probe answered"),
+    //     aunque la enumeración de `probedAt` ya lo marcaba como optimista.
+    //     Medido (mismo `tsx` que en (3)): el cuerpo pre-probe con una chain que rechaza
+    //     ECONNREFUSED fue `{"chainId":103,...,"rpc":"ok"}` — sin las dos aditivas — y el
+    //     post-probe `{...,"rpc":"unreachable","consecutiveFailures":2,"lastFailureKind":
+    //     "connection"}`.
+    //     `Map` y no indexado por variable: `props[field]` dispara
+    //     `security/detect-object-injection` y `npm run lint` corre con `--max-warnings 0`
+    //     (mismo footgun que ya está anotado en `T-O11-TREE`).
+    const chainItemProps = new Map(
+      Object.entries(
+        spec.components.schemas.ChainHealthItem!.properties as Record<
+          string,
+          Record<string, unknown>
+        >,
+      ),
+    );
+    for (const field of ['rpc', 'consecutiveFailures', 'lastFailureKind'] as const) {
+      expect(
+        flat(chainItemProps.get(field)!.description),
+        `ChainHealthItem.${field}: sin el descargo del snapshot pre-probe`,
+      ).toMatch(/before the first probe completes|no probe has completed yet/i);
+    }
+    // el que mata la vuelta a la frase falsa concreta.
+    expect(
+      flat(chainItemProps.get('consecutiveFailures')!.description),
+      'consecutiveFailures: su ausencia sigue publicada como prueba de una sonda exitosa',
+    ).toMatch(/no probe has completed yet/i);
+  });
+
+  it('T-O11-TREE: TODO nodo objeto del subárbol de /health es cerrado (`additionalProperties: false` + `properties` no vacío)', () => {
+    // AR MNR-1. `T-O11-DETAIL` chequea `additionalProperties === false` en CUATRO nodos
+    // nombrados a mano, así que un QUINTO objeto —un nivel de anidamiento que no existía
+    // cuando se escribió ese test— no tiene quién lo mire: el AR lo midió publicando un
+    // objeto nuevo opaco y los cuatro gates quedaron verdes. Este assert recorre el
+    // subárbol en vez de enumerarlo, así que un objeto ANIDADO nuevo bajo estos tres roots
+    // ya no queda sin dueño.
+    //
+    // ⚠️ DOS PUNTOS CIEGOS MEDIDOS (AR-2 MNR-1), porque el título dice "TODO nodo objeto" y
+    // el filtro no lo es:
+    //   (a) una bolsa sin `type` ni `properties` — p. ej. `{additionalProperties: true}` —
+    //       no entra a `isObjectNode` y pasa en VERDE, aunque sea justamente un objeto
+    //       abierto;
+    //   (b) `type: ['object', 'null']` tampoco entra, porque la comparación es
+    //       `rec.type === 'object'`; y esa forma es legal en 3.1.0, que es la versión que
+    //       este documento declara (`openapi: 3.1.0`).
+    // Ninguna de las dos formas existe hoy en el documento. Cuando aparezca alguna, este
+    // test NO va a avisar: hay que extender el filtro a mano.
+    //
+    // "Objeto" acá es `type: object` **O** "tiene `properties`": un nodo anidado sin
+    // `type` explícito es igual de opaco si no cierra sus claves, y el filtro estrecho
+    // (`type === 'object'`) lo dejaría pasar.
+    // `Map` y no el objeto crudo: `schemas[name]` con `name` dinámico dispara
+    // `security/detect-object-injection` y `npm run lint` corre con `--max-warnings 0`.
+    const schemas = new Map(Object.entries(spec.components.schemas));
+    const seen = new Set<string>();
+    const objectNodes: Array<{ path: string; node: Record<string, unknown> }> = [];
+
+    const walk = (node: unknown, path: string): void => {
+      if (Array.isArray(node)) {
+        node.forEach((item, i) => walk(item, `${path}[${i}]`));
+        return;
+      }
+      if (node === null || typeof node !== 'object') return;
+      const rec = node as Record<string, unknown>;
+      const ref = rec.$ref;
+      if (typeof ref === 'string') {
+        const name = ref.split('/').pop()!;
+        if (seen.has(name)) return;
+        seen.add(name);
+        const target = schemas.get(name);
+        // Un `$ref` roto tiene que ser ruidoso, no un subárbol que nadie recorre.
+        expect(target, `$ref sin destino: ${ref}`).toBeDefined();
+        walk(target, `${path}→${name}`);
+        return;
+      }
+      const isObjectNode = rec.type === 'object' || typeof rec.properties === 'object';
+      if (isObjectNode) objectNodes.push({ path, node: rec });
+      for (const [key, value] of Object.entries(rec)) {
+        if (key === 'description' || key === 'enum' || key === 'required') continue;
+        walk(value, `${path}/${key}`);
+      }
+    };
+
+    for (const root of ['HealthResponse', 'HealthDetail', 'ChainHealthItem'] as const) {
+      if (seen.has(root)) continue;
+      seen.add(root);
+      walk(schemas.get(root), root);
+    }
+
+    // El invariante, nodo por nodo. Reemplaza el "12 de 12" de DT-1 (una foto) por algo que
+    // se recalcula en cada corrida.
+    for (const { path, node } of objectNodes) {
+      expect(node.additionalProperties, `${path}: objeto abierto`).toBe(false);
+      expect(
+        Object.keys((node.properties ?? {}) as object).length,
+        `${path}: objeto sin claves declaradas (opaco)`,
+      ).toBeGreaterThan(0);
+    }
+
+    // Controles anti-vacío: que el recorrido HAYA recorrido. Los dos primeros salen de
+    // tablas atadas por `tsc`, no de listas escritas acá, y son los que prueban que el walk
+    // entró de verdad (el segundo, además, que siguió el `$ref`).
+    //
+    // El `>= 5` de abajo NO sale de ninguna tabla: es un PISO escrito a mano, y hoy coincide
+    // exactamente con la cuenta del árbol. Medido: 5 nodos — `HealthResponse`, `HealthDetail`
+    // (vía `$ref`), `details.redis`, `details.wallet` y `ChainHealthItem` (vía
+    // `chains.items.$ref`). O sea que agregar un objeto lo deja igual de verde y sacar uno lo
+    // pone rojo: sirve para que el bucle de arriba no pase por vacío, no para fijar la forma
+    // del árbol. La forma la fijan los dos `toContain`.
+    const keysOf = (n: Record<string, unknown>): string[] =>
+      Object.keys((n.properties ?? {}) as object).sort();
+    const shapes = objectNodes.map(({ node }) => keysOf(node).join(','));
+    expect(shapes).toContain([...HEALTH_RESPONSE_FIELDS].sort().join(','));
+    expect(shapes).toContain([...CHAIN_HEALTH_FIELDS].sort().join(',')); // probó que siguió el `$ref`
+    expect(objectNodes.length).toBeGreaterThanOrEqual(5);
   });
 });
 
