@@ -30,6 +30,12 @@ import {
   resetHealthStatusForTesting,
   type ChainHealth,
 } from '../../core/health-status.js';
+import {
+  CHAIN_HEALTH_REQUIRED_FIELDS,
+  HEALTH_DETAIL_FIELDS,
+  compileHealthDetailValidator,
+  loadOpenApiSpec,
+} from '../helpers/health-shape.js';
 
 // ─── fixtures ──────────────────────────────────────────────────────────────
 
@@ -410,9 +416,64 @@ describe('fix/health-probe-non-evm — probeChain is chain-family-agnostic', () 
 
     const snap = await refreshHealthStatusNow();
 
-    expect(Object.keys(snap).sort()).toEqual(['chains', 'degraded', 'probedAt', 'redis', 'wallet']);
+    // WKH-344 — las dos listas se DERIVAN del tipo (`../helpers/health-shape.ts`), no se
+    // escriben acá: era el mismo defecto que dejó al contrato de `/health` divergir.
+    // La segunda va contra `CHAIN_HEALTH_REQUIRED_FIELDS` y NO contra `CHAIN_HEALTH_FIELDS`:
+    // lo que este assert mide es que una entrada SANA omite las dos aditivas, o sea el
+    // SUBCONJUNTO no-opcional del tipo. Con las 6 claves se pondría rojo por el motivo
+    // equivocado.
+    expect(Object.keys(snap).sort()).toEqual([...HEALTH_DETAIL_FIELDS].sort());
     for (const chain of snap.chains) {
-      expect(Object.keys(chain).sort()).toEqual(['chainId', 'name', 'network', 'rpc']);
+      expect(Object.keys(chain).sort()).toEqual([...CHAIN_HEALTH_REQUIRED_FIELDS].sort());
     }
+  });
+
+  // ─── WKH-344: el subárbol `details` DEGRADADO contra su contrato publicado ─
+
+  it('T-H-CONF-2 / AC-1+AC-3: un detail DEGRADADO, con los campos aditivos presentes, valida contra HealthDetail', async () => {
+    // Este es el nivel que ningún testigo sano alcanza: `T-H-CONF-1` valida el cuerpo de
+    // nivel superior con un inject real, pero con las chains en estado limpio, así que
+    // `consecutiveFailures` / `lastFailureKind` nunca aparecen ahí. Armar el cuerpo de 6
+    // campos a mano acá reintroduciría un espejo de `src/routes/health.ts:54-61`, que es la
+    // clase de defecto de esta HU, así que este test valida `HealthDetail` a secas.
+    //
+    // (a) falla de conexión: unreachable + las dos aditivas.
+    const dura = makeNonEvmFake({
+      chainId: 103,
+      name: 'Solana Devnet',
+      networkId: 'solana:devnet',
+      probe: async () => {
+        throw new Error('connect ECONNREFUSED 127.0.0.1:8899');
+      },
+    });
+    expect(chainRegistry.register(dura.adapter).ok).toBe(true);
+    // (b) 429 transitorio tolerado: rpc 'ok' CON las dos aditivas (la combinación que un
+    //     testigo sano nunca produce). Sin sonda que cuelgue, así que no hace falta timeout.
+    const blip = makeNonEvmFake({
+      chainId: 104,
+      name: 'Otra',
+      networkId: 'solana:otra',
+      probe: async () => {
+        throw new Error('429 Too Many Requests');
+      },
+    });
+    expect(chainRegistry.register(blip.adapter).ok).toBe(true);
+
+    const snap = await refreshHealthStatusNow();
+
+    // controles anti-vacío: el testigo TIENE lo que se quiere cubrir.
+    const e1 = chainOf(snap.chains, 103);
+    expect(e1?.rpc).toBe('unreachable');
+    expect(e1?.consecutiveFailures).toBe(1);
+    expect(e1?.lastFailureKind).toBe('connection');
+    const e2 = chainOf(snap.chains, 104);
+    expect(e2?.rpc).toBe('ok'); // tolerado: TRANSIENT_FAILURE_THRESHOLD es 2
+    expect(e2?.lastFailureKind).toBe('transient');
+    expect(e2?.consecutiveFailures).toBe(1);
+
+    const validate = compileHealthDetailValidator(loadOpenApiSpec());
+    const ok = validate(snap);
+    expect(validate.errors ?? []).toEqual([]);
+    expect(ok).toBe(true);
   });
 });
