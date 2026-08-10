@@ -24,12 +24,51 @@ import { chainRegistry } from '../../chains/registry.js';
 import { SolanaAdapter } from '../../chains/solana-adapter.js';
 import { kiteTestnetAdapter } from '../../chains/kite.js';
 import type { ChainAdapter, ChainMetadata, SettlementAdapter } from '../../chains/types.js';
+// `import type` (no `typeof import(...)` inline): `@typescript-eslint/consistent-type-imports`
+// prohíbe la anotación inline, y el import de tipo se borra en runtime — no pelea con el mock.
+import type * as RedisModule from '../../infra/redis.js';
 import { asChainId } from '../../core/types.js';
 import {
+  getHealthStatus,
   refreshHealthStatusNow,
   resetHealthStatusForTesting,
   type ChainHealth,
+  type HealthStatusDetail,
 } from '../../core/health-status.js';
+import {
+  CHAIN_HEALTH_REQUIRED_FIELDS,
+  HEALTH_DETAIL_FIELDS,
+  compileHealthDetailValidator,
+  loadOpenApiSpec,
+} from '../helpers/health-shape.js';
+
+/**
+ * Cliente Redis falso, inyectado por `vi.hoisted` (no por una variable de módulo: el factory
+ * del `vi.mock` se evalúa durante la fase de imports, antes del cuerpo de este archivo, y una
+ * `let` normal estaría en TDZ si algún módulo llamara a `getRedisClient()` al importarse).
+ *
+ * Arranca en `null`, que es EXACTAMENTE lo que devuelve el real en el entorno de test (no hay
+ * `REDIS_URL` en `vitest.config.ts` y `initRedis` no se llama), así que HP-1..HP-9 y
+ * `T-H-CONF-2` corren igual que antes de este mock. Sólo HP-10 lo pone en no-nulo, y el
+ * `afterEach` lo devuelve a `null`.
+ *
+ * Hace falta porque HP-10 necesita un Redis CONFIGURADO y CAÍDO: con `getRedisClient() === null`
+ * el estado es 'disabled' en los dos snapshots y `redis.status` desaparecería del conjunto
+ * derivado — el campo del AR-1 BLQ-BAJO-1 justamente. Un `new Redis()` real contra un puerto
+ * muerto también serviría, pero rompería el invariante "ningún test de este archivo abre un
+ * socket" del docblock de arriba.
+ */
+const redisFake = vi.hoisted(() => ({
+  client: null as { ping: () => Promise<string> } | null,
+}));
+
+vi.mock('../../infra/redis.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof RedisModule>();
+  return {
+    ...actual,
+    getRedisClient: (): { ping: () => Promise<string> } | null => redisFake.client,
+  };
+});
 
 // ─── fixtures ──────────────────────────────────────────────────────────────
 
@@ -151,6 +190,7 @@ describe('fix/health-probe-non-evm — probeChain is chain-family-agnostic', () 
   afterEach(() => {
     chainRegistry._resetForTesting();
     resetHealthStatusForTesting();
+    redisFake.client = null; // `vi.restoreAllMocks()` NO revierte un `vi.mock` de módulo.
     vi.restoreAllMocks();
   });
 
@@ -410,9 +450,341 @@ describe('fix/health-probe-non-evm — probeChain is chain-family-agnostic', () 
 
     const snap = await refreshHealthStatusNow();
 
-    expect(Object.keys(snap).sort()).toEqual(['chains', 'degraded', 'probedAt', 'redis', 'wallet']);
+    // WKH-344 — las dos listas se DERIVAN del tipo (`../helpers/health-shape.ts`), no se
+    // escriben acá: era el mismo defecto que dejó al contrato de `/health` divergir.
+    // La segunda va contra `CHAIN_HEALTH_REQUIRED_FIELDS` y NO contra `CHAIN_HEALTH_FIELDS`:
+    // lo que este assert mide es que una entrada SANA omite las dos aditivas, o sea el
+    // SUBCONJUNTO no-opcional del tipo. Con las 6 claves se pondría rojo por el motivo
+    // equivocado.
+    expect(Object.keys(snap).sort()).toEqual([...HEALTH_DETAIL_FIELDS].sort());
     for (const chain of snap.chains) {
-      expect(Object.keys(chain).sort()).toEqual(['chainId', 'name', 'network', 'rpc']);
+      expect(Object.keys(chain).sort()).toEqual([...CHAIN_HEALTH_REQUIRED_FIELDS].sort());
     }
+  });
+
+  // ─── HP-9: DNS no es UN caso, son DOS, y el contrato publicaba uno solo ───
+
+  it('HP-9: un fallo TEMPORAL de resolución (EAI_AGAIN) se clasifica `transient` y conserva `rpc: ok`; uno PERMANENTE (ENOTFOUND) es `connection` en la primera sonda', async () => {
+    // AR BLQ-BAJO-2. El contrato decía: "`connection` (refused, DNS, TLS, or a malformed
+    // adapter) is reported at once". Falso para la mitad temporal del DNS: `EAI_AGAIN` —el
+    // fallo de resolución RECUPERABLE de Node— está dentro de `TRANSIENT_PROBE_ERROR_RE`
+    // (`src/core/health-status.ts:121-122`), así que `classifyProbeError`
+    // (`src/core/health-status.ts:208-211`) lo devuelve
+    // 'transient' y la histéresis lo tolera por debajo del umbral de 2: la chain sigue
+    // publicando `rpc: 'ok'`.
+    //
+    // Antes de este test, `grep -rn "EAI_AGAIN\|ENOTFOUND\|getaddrinfo" src/__tests__/` daba
+    // UN hit, y era de otro módulo (`chains/error-classifier.test.ts:65`): ningún test del
+    // camino de `/health` afirmaba la clasificación que el contrato publica para DNS.
+    //
+    // Los mensajes son los que emite Node de verdad para cada caso, no una paráfrasis.
+    const temporal = makeNonEvmFake({
+      chainId: 103,
+      name: 'Solana Devnet',
+      networkId: 'solana:devnet',
+      probe: async () => {
+        throw new Error('getaddrinfo EAI_AGAIN api.devnet.solana.example');
+      },
+    });
+    const permanente = makeNonEvmFake({
+      chainId: 104,
+      name: 'Otra',
+      networkId: 'solana:otra',
+      probe: async () => {
+        throw new Error('getaddrinfo ENOTFOUND api.devnet.solana.example');
+      },
+    });
+    expect(chainRegistry.register(temporal.adapter).ok).toBe(true);
+    expect(chainRegistry.register(permanente.adapter).ok).toBe(true);
+
+    const snap = await refreshHealthStatusNow();
+
+    // (a) el caso que el contrato ponía en la casilla equivocada.
+    const t = chainOf(snap.chains, 103);
+    expect(t?.lastFailureKind).toBe('transient');
+    expect(t?.rpc).toBe('ok'); // tolerado: NO se reporta "at once"
+    expect(t?.consecutiveFailures).toBe(1);
+    // (b) el caso que sí es inmediato, para que (a) no se lea como "DNS nunca es connection".
+    const p = chainOf(snap.chains, 104);
+    expect(p?.lastFailureKind).toBe('connection');
+    expect(p?.rpc).toBe('unreachable');
+    expect(p?.consecutiveFailures).toBe(1);
+    // control anti-tautología: los dos códigos van a la MISMA función y salen distintos.
+    expect(t?.lastFailureKind).not.toBe(p?.lastFailureKind);
+
+    // (c) y el lazo con la prosa publicada: cada código tiene que estar del lado del valor
+    //     que acaba de medirse. Posicional a propósito — que `EAI_AGAIN` aparezca en el
+    //     documento no alcanza si aparece dentro de la oración de `connection`.
+    const kindDesc = (
+      (
+        loadOpenApiSpec().components.schemas.ChainHealthItem!.properties as Record<
+          string,
+          Record<string, unknown>
+        >
+      ).lastFailureKind!.description as string
+    ).replace(/\s+/g, ' ');
+    //
+    // ⚠️ SE CUENTAN TODAS LAS APARICIONES, no `indexOf` (AR-2 BLQ-BAJO-2). Con `indexOf` el
+    // mutante que suma el código a la casilla equivocada SIN sacarlo de la buena sobrevive en
+    // verde: "`connection` covers … any name-resolution failure (`EAI_AGAIN` as well as
+    // `ENOTFOUND`)" deja el primer hit de EAI_AGAIN donde estaba (lado `transient`), y
+    // `indexOf` no ve el segundo. Un duplicado en la casilla equivocada es invisible para el
+    // primer hit; por eso el invariante es sobre CADA aparición.
+    const allIndexesOf = (needle: string): number[] => {
+      const out: number[] = [];
+      for (let i = kindDesc.indexOf(needle); i !== -1; i = kindDesc.indexOf(needle, i + 1)) {
+        out.push(i);
+      }
+      return out;
+    };
+    // El razonamiento posicional sólo cierra si cada etiqueta parte el texto UNA vez: con dos
+    // `\`connection\`` no hay "después de connection" bien definido. Medido sobre el texto
+    // publicado hoy: 1 y 1.
+    const transientMarks = allIndexesOf('`transient`');
+    const connectionMarks = allIndexesOf('`connection`');
+    expect(transientMarks).toHaveLength(1);
+    expect(connectionMarks).toHaveLength(1);
+    const iTransient = transientMarks[0]!;
+    const iConnection = connectionMarks[0]!;
+    expect(iConnection).toBeGreaterThan(iTransient);
+    const eaiAgainAt = allIndexesOf('EAI_AGAIN');
+    const enotFoundAt = allIndexesOf('ENOTFOUND');
+    expect(eaiAgainAt.length).toBeGreaterThanOrEqual(1);
+    expect(enotFoundAt.length).toBeGreaterThanOrEqual(1);
+    for (const i of eaiAgainAt) {
+      expect(i, `EAI_AGAIN fuera de la oración de \`transient\` (offset ${i})`).toBeGreaterThan(
+        iTransient,
+      );
+      expect(i, `EAI_AGAIN dentro de la oración de \`connection\` (offset ${i})`).toBeLessThan(
+        iConnection,
+      );
+    }
+    for (const i of enotFoundAt) {
+      expect(i, `ENOTFOUND fuera de la oración de \`connection\` (offset ${i})`).toBeGreaterThan(
+        iConnection,
+      );
+    }
+  });
+
+  // ─── HP-10: el conjunto de campos OPTIMISTAS se DERIVA del módulo corriendo ──
+
+  it('HP-10 / AC-8: todo campo que el cuerpo pre-sonda reporta SIN medir está documentado con su descargo, y el conjunto se DERIVA de `initialSnapshot()`, no de una lista escrita a mano', async () => {
+    // POR QUÉ EXISTE, y no es "un guard más": esta HU lleva cuatro rondas y CADA una encontró
+    // una descripción optimista nueva (AR-1 dos, AR-2 la tercera, el fix-pack 2 la cuarta y la
+    // quinta, `consecutiveFailures` y `lastFailureKind`). El problema no era la vista de nadie:
+    // era que el conjunto se cazaba DE A UNO cuando es una CONSECUENCIA de una función.
+    // `initialSnapshot()` es el único productor del cuerpo pre-sonda, así que "qué se reporta
+    // sin haberlo medido" se puede derivar en vez de enumerar.
+    //
+    // CÓMO SE DERIVA, sin leer el fuente ni mantener una lista: se arma el escenario en el que
+    // TODA dependencia sondeable está caída y se comparan los dos cuerpos que el módulo emite,
+    // el pre-sonda y el post-sonda. Todo camino cuyo valor CAMBIA es, por definición, un campo
+    // que el pre-sonda reportaba sin medirlo. Los que NO cambian se caen solos y por el motivo
+    // correcto: `redis.configured`, `wallet.present` y `chains[].chainId|name|network` se leen
+    // síncronos y son exactos a `probedAt: 0`. No hay lista de exclusión que mantener.
+    //
+    // ✅ EL CRITERIO QUE ESTE TEST COMPRA: agregar un campo optimista nuevo a
+    //    `initialSnapshot()` sin documentarlo pone ESTO en rojo, sin que nadie toque el test.
+    //    Medido con dos mutantes (ver el auto-blindaje de la HU): un `redisPingMs` optimista
+    //    publicado CON descripción pero SIN el descargo → rojo acá y en ningún otro test; y el
+    //    mismo campo sin declararlo en el schema → rojo acá (no resuelve) y en `T-H-CONF-1`.
+    //
+    // ⚠️ LO QUE NO ALCANZA, medido y declarado (tres residuos, ninguno silencioso):
+    //   (a) un campo optimista cuyo valor COINCIDA en el escenario caído es invisible: p. ej.
+    //       un `pingMs: 0` optimista que el post-sonda también deje en 0. La derivación mide
+    //       "cambia cuando todo está caído", que es una APROXIMACIÓN de "no se midió", no la
+    //       cosa misma. Cerrar eso exigiría instrumentar `initialSnapshot()` (no está exportada)
+    //       o parsear el AST del módulo; con el escenario caído se cubren los 5 campos reales.
+    //   (b) el `degraded` de NIVEL SUPERIOR (`HealthResponse`) queda afuera por construcción:
+    //       la derivación recorre `details`. Lo cubre `T-O-DRIFT-4` (3), que exige el descargo
+    //       en las DOS descripciones, con su mutante M-13.
+    //   (c) el descargo se reconoce por una lista de TRES redacciones aceptadas (abajo). Un
+    //       campo documentado con otra redacción da un FALSO ROJO, no un falso verde: la
+    //       dirección segura. El arreglo es usar la redacción canónica o extender la lista a
+    //       conciencia, no borrar el assert.
+    const chainCaida = makeNonEvmFake({
+      chainId: 103,
+      name: 'Solana Devnet',
+      networkId: 'solana:devnet',
+      probe: async () => {
+        throw new Error('connect ECONNREFUSED 127.0.0.1:1');
+      },
+    });
+    expect(chainRegistry.register(chainCaida.adapter).ok).toBe(true);
+    // Redis CONFIGURADO y caído (ver el docblock de `redisFake`): sin esto `redis.status` es
+    // 'disabled' en los dos cuerpos y se caería del conjunto derivado.
+    redisFake.client = {
+      ping: async (): Promise<string> => {
+        throw new Error('connect ECONNREFUSED 127.0.0.1:6379');
+      },
+    };
+    // PRECONDICIÓN, y no es decorativa: sin `OPERATOR_PRIVATE_KEY` el wallet falta en los DOS
+    // cuerpos, `degraded` vale `true` en ambos y DESAPARECE del conjunto derivado — que es
+    // justo el campo del AR-2 BLQ-BAJO-3. Lo pone `vitest.config.ts`; si algún día se va, esto
+    // se pone rojo acá en vez de vaciar la derivación en silencio.
+    expect(typeof process.env['OPERATOR_PRIVATE_KEY']).toBe('string');
+
+    const pre = await getHealthStatus();
+    expect(pre.probedAt).toBe(0); // es el cuerpo pre-sonda, no otro
+    const post = await refreshHealthStatusNow();
+    expect(post.probedAt).toBeGreaterThan(0);
+
+    // Hojas por camino. El índice del array se normaliza a `[]`: lo que se deriva es la FORMA
+    // del cuerpo, no la instancia (hay una sola chain, así que no hay ambigüedad de valores).
+    const leaves = (
+      value: unknown,
+      prefix: string,
+      out: Map<string, string>,
+    ): Map<string, string> => {
+      if (Array.isArray(value)) {
+        for (const item of value) leaves(item, `${prefix}[]`, out);
+        return out;
+      }
+      if (value !== null && typeof value === 'object') {
+        for (const [k, v] of Object.entries(value)) {
+          leaves(v, prefix === '' ? k : `${prefix}.${k}`, out);
+        }
+        return out;
+      }
+      out.set(prefix, JSON.stringify(value));
+      return out;
+    };
+    const preLeaves = leaves(pre, '', new Map());
+    const postLeaves = leaves(post, '', new Map());
+    // `undefined` como valor de un `Map.get` de clave ausente ES la señal de "campo omitido",
+    // y por eso las dos aditivas (ausentes pre-sonda, presentes post-sonda) entran al conjunto.
+    const derived = [...new Set([...preLeaves.keys(), ...postLeaves.keys()])]
+      .filter((path) => preLeaves.get(path) !== postLeaves.get(path))
+      .sort();
+
+    // Resolución camino → nodo del schema publicado. También mecánica: un campo nuevo se
+    // resuelve solo, y si el schema no lo declara el `expect` de abajo dice cuál falta.
+    const spec = loadOpenApiSpec();
+    const schemas = new Map(Object.entries(spec.components.schemas));
+    const deref = (node: Record<string, unknown>): Record<string, unknown> => {
+      const ref = node.$ref;
+      if (typeof ref !== 'string') return node;
+      const target = schemas.get(ref.split('/').pop() ?? '');
+      expect(target, `doc/openapi.yaml: \`$ref\` sin destino (${ref})`).toBeDefined();
+      return target as Record<string, unknown>;
+    };
+    const resolveDoc = (path: string): Record<string, unknown> => {
+      let node = deref(schemas.get('HealthDetail') as Record<string, unknown>);
+      for (const rawSegment of path.split('.')) {
+        const isArray = rawSegment.endsWith('[]');
+        const segment = isArray ? rawSegment.slice(0, -2) : rawSegment;
+        // `Map` y no `props[segment]`: indexar con variable dispara
+        // `security/detect-object-injection` y `npm run lint` corre con `--max-warnings 0`.
+        const props = new Map(
+          Object.entries((node.properties ?? {}) as Record<string, Record<string, unknown>>),
+        );
+        const child = props.get(segment);
+        expect(
+          child,
+          `doc/openapi.yaml no declara la propiedad \`${segment}\` del camino derivado \`${path}\`: el módulo emite un campo que el contrato no publica`,
+        ).toBeDefined();
+        node = deref(child as Record<string, unknown>);
+        if (isArray) node = deref((node.items ?? {}) as Record<string, unknown>);
+      }
+      return node;
+    };
+
+    // Las TRES redacciones que cuentan como descargo. Es una lista ENUMERADA (residuo (c)), y
+    // las tres están en uso hoy: `redis.status` dice "no PING has completed yet", `probedAt`
+    // dice "no probe has completed yet", y el resto "before the first probe completes".
+    const DESCARGO =
+      /before the first probe completes|no probe has completed yet|no PING has completed yet/i;
+    for (const path of derived) {
+      const description = String(resolveDoc(path).description ?? '').replace(/\s+/g, ' ');
+      expect(
+        description,
+        `\`${path}\` es optimista a \`probedAt: 0\` (derivado del módulo) y su descripción publicada no manda a leer \`probedAt\``,
+      ).toMatch(/probedAt/);
+      expect(
+        description,
+        `\`${path}\` es optimista a \`probedAt: 0\` (derivado del módulo) y su descripción publicada no trae el descargo del snapshot pre-sonda`,
+      ).toMatch(DESCARGO);
+    }
+
+    // Control anti-vacío, en la dirección que la derivación NO cubre: si el escenario deja de
+    // producir diferencia (un fake que no falla, el mock de Redis que vuelve a `null`, un
+    // `probeAll` que no mide), el bucle de arriba pasaría por vacío en verde. Este piso es una
+    // lista escrita a mano A PROPÓSITO, y es lo único de este test que lo es: NO es la
+    // enumeración normativa —esa sale de `derived`— sino el testigo de que la derivación
+    // derivó. Los 6 caminos son los medidos hoy; si aparece un séptimo, `derived` lo exige sin
+    // que nadie toque esta lista.
+    const PISO = [
+      'chains[].consecutiveFailures',
+      'chains[].lastFailureKind',
+      'chains[].rpc',
+      'degraded',
+      'probedAt',
+      'redis.status',
+    ] as const;
+    for (const path of PISO) {
+      expect(
+        derived,
+        `la derivación dejó de derivar \`${path}\`: el escenario no está caído`,
+      ).toContain(path);
+    }
+    // y que los campos síncronos sigan FUERA por el motivo correcto (no por un bug del walker).
+    for (const path of ['redis.configured', 'wallet.present', 'chains[].chainId'] as const) {
+      expect(
+        derived,
+        `\`${path}\` se lee síncrono: no puede estar en el conjunto optimista`,
+      ).not.toContain(path);
+    }
+    // el tipo se usa: si `HealthStatusDetail` deja de tener `probedAt`, esto no compila.
+    const _typed: HealthStatusDetail['probedAt'] = post.probedAt;
+    expect(_typed).toBe(post.probedAt);
+  });
+
+  // ─── WKH-344: el subárbol `details` DEGRADADO contra su contrato publicado ─
+
+  it('T-H-CONF-2 / AC-1+AC-3: un detail DEGRADADO, con los campos aditivos presentes, valida contra HealthDetail', async () => {
+    // Este es el nivel que ningún testigo sano alcanza: `T-H-CONF-1` valida el cuerpo de
+    // nivel superior con un inject real, pero con las chains en estado limpio, así que
+    // `consecutiveFailures` / `lastFailureKind` nunca aparecen ahí. Armar el cuerpo de 6
+    // campos a mano acá reintroduciría un espejo de `src/routes/health.ts:54-61`, que es la
+    // clase de defecto de esta HU, así que este test valida `HealthDetail` a secas.
+    //
+    // (a) falla de conexión: unreachable + las dos aditivas.
+    const dura = makeNonEvmFake({
+      chainId: 103,
+      name: 'Solana Devnet',
+      networkId: 'solana:devnet',
+      probe: async () => {
+        throw new Error('connect ECONNREFUSED 127.0.0.1:8899');
+      },
+    });
+    expect(chainRegistry.register(dura.adapter).ok).toBe(true);
+    // (b) 429 transitorio tolerado: rpc 'ok' CON las dos aditivas (la combinación que un
+    //     testigo sano nunca produce). Sin sonda que cuelgue, así que no hace falta timeout.
+    const blip = makeNonEvmFake({
+      chainId: 104,
+      name: 'Otra',
+      networkId: 'solana:otra',
+      probe: async () => {
+        throw new Error('429 Too Many Requests');
+      },
+    });
+    expect(chainRegistry.register(blip.adapter).ok).toBe(true);
+
+    const snap = await refreshHealthStatusNow();
+
+    // controles anti-vacío: el testigo TIENE lo que se quiere cubrir.
+    const e1 = chainOf(snap.chains, 103);
+    expect(e1?.rpc).toBe('unreachable');
+    expect(e1?.consecutiveFailures).toBe(1);
+    expect(e1?.lastFailureKind).toBe('connection');
+    const e2 = chainOf(snap.chains, 104);
+    expect(e2?.rpc).toBe('ok'); // tolerado: TRANSIENT_FAILURE_THRESHOLD es 2
+    expect(e2?.lastFailureKind).toBe('transient');
+    expect(e2?.consecutiveFailures).toBe(1);
+
+    const validate = compileHealthDetailValidator(loadOpenApiSpec());
+    const ok = validate(snap);
+    expect(validate.errors ?? []).toEqual([]);
+    expect(ok).toBe(true);
   });
 });

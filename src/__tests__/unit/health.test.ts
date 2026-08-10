@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
 import { buildApp } from '../../app.js';
 import { healthRoute } from '../../routes/health.js';
+import { HEALTH_RESPONSE_FIELDS } from '../helpers/health-shape.js';
 
 // ─── core/audit.js mock (WFAC-33 W4) ───────────────────────────────────────
 vi.mock('../../core/audit.js', () => {
@@ -175,14 +176,11 @@ describe('GET /health', () => {
     expect(res.headers['content-type']).toMatch(/^application\/json/);
 
     const body = JSON.parse(res.body) as Record<string, unknown>;
-    expect(Object.keys(body).sort()).toEqual([
-      'degraded',
-      'details',
-      'status',
-      'timestamp',
-      'uptime',
-      'version',
-    ]);
+    // WKH-344 — la lista se DERIVA del tipo `HealthResponse` vía
+    // `../helpers/health-shape.ts`, cuya tabla ata `npm run typecheck`. Escrita a mano acá,
+    // un campo nuevo en el cuerpo obligaba a editar N listas y el contrato publicado podía
+    // quedarse atrás sin que nada se pusiera rojo.
+    expect(Object.keys(body).sort()).toEqual([...HEALTH_RESPONSE_FIELDS].sort());
     expect(body.status).toBe('ok');
     expect(typeof body.degraded).toBe('boolean');
     expect(typeof body.version).toBe('string');

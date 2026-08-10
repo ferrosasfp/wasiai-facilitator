@@ -217,9 +217,37 @@ paths:
       tags: [ops]
       summary: Liveness probe.
       description: |
-        Basic health check with version metadata. Exempted from the global
-        rate-limit plugin. Returns 200 as long as the Fastify instance is
-        alive — does NOT probe Redis, RPC, or downstream dependencies.
+        Liveness probe. Always answers 200 while the process is up: a degraded
+        dependency is reported in the body (`degraded` + `details`), never as a
+        non-2xx, so a Redis or RPC blip does not get the container killed.
+        Exempted from the global rate-limit plugin.
+
+        The request never awaits a dependency probe. `details` is a
+        process-cached snapshot: the probes behind it (a Redis PING and each
+        adapter's own RPC probe) run in a background refresh that the request
+        does not wait for, so response time does not depend on Redis or RPC
+        latency.
+
+        How old `details.probedAt` can be. 5000 ms is the age at which an
+        incoming request TRIGGERS a background refresh; it is not a ceiling on
+        the age of the body you get back. The request that triggers the refresh
+        is answered from the PREVIOUS snapshot, and nothing outside a request
+        ever refreshes it, so `probedAt` can be older than 5000 ms with no upper
+        bound in the code. How much older follows from the call cadence, not
+        from the threshold: once the gap between calls exceeds the threshold,
+        the age of the body tracks that gap: a cron polling every four minutes
+        reads a snapshot roughly four minutes old.
+
+        What is optimistic before the first probe completes. `probedAt` is `0`
+        until then, and at that point these are optimistic rather than measured:
+        `degraded`, `redis.status`, and the `chains` entries' `rpc`.
+        `consecutiveFailures` and `lastFailureKind` are absent then too, exactly
+        as on a clean probe, so their absence does not mean a probe succeeded.
+        The pre-probe body is built without waiting for the Redis PING or for
+        any RPC probe, so `degraded` there is `!details.wallet.present` ALONE: a
+        `false` says a signer is configured, and says nothing about Redis or the
+        RPCs. `details.redis.configured` and `details.wallet.present` are read
+        synchronously, so those two hold at `probedAt: 0` as well.
       operationId: getHealth
       responses:
         "200":
@@ -570,11 +598,24 @@ components:
       description: |
         Liveness response. Matches `HealthResponse` in
         `src/routes/health.ts`.
-      required: [status, version, uptime, timestamp]
+      required: [status, degraded, version, uptime, timestamp, details]
       additionalProperties: false
       properties:
         status:
           const: ok
+        degraded:
+          type: boolean
+          description: |
+            OP-05. True when any tracked dependency is not in its healthy state
+            AS OF `details.probedAt`. The same value as `details.degraded` (the
+            route copies the field), not an independent signal. Before the first
+            probe completes (`details.probedAt` is `0`) it is
+            `!details.wallet.present` ALONE: the body served then is built
+            without waiting for the Redis PING or for any RPC probe, so a
+            `false` there means a signer is configured, NOT that Redis and the
+            RPCs answered. Read `details.probedAt` before alerting on this
+            field. A `true` here does NOT mean the process is unhealthy: this
+            endpoint answers 200 either way (see the endpoint description).
         version:
           type: string
           description: Server version (from `package.json#version`).
@@ -586,6 +627,126 @@ components:
           type: string
           format: date-time
           description: ISO-8601 timestamp of the response.
+        details:
+          $ref: "#/components/schemas/HealthDetail"
+
+    HealthDetail:
+      type: object
+      description: |
+        OP-05. Per-dependency detail. Matches `HealthStatusDetail` in
+        `src/core/health-status.ts`. Carries no secret value: the wallet entry
+        is a presence boolean, never the key.
+      required: [degraded, redis, wallet, chains, probedAt]
+      additionalProperties: false
+      properties:
+        degraded:
+          type: boolean
+          description: |
+            The OR of three conditions, as of `probedAt`: a configured Redis that
+            is unreachable, `wallet.present: false`, and any `chains` entry with
+            `rpc: unreachable`. A `disabled` Redis is NOT one of them. Before the
+            first probe completes (`probedAt: 0`) only the second condition has
+            been evaluated, because the pre-probe body is built without waiting
+            for the PING or for any RPC probe; so this field is
+            `!wallet.present` ALONE there, and a `false` does not mean the other
+            two were checked.
+        redis:
+          type: object
+          required: [configured, status]
+          additionalProperties: false
+          properties:
+            configured:
+              type: boolean
+              description: Whether a REDIS_URL is configured (false in in-memory mode).
+            status:
+              type: string
+              enum: [ok, unreachable, disabled]
+              description: |
+                `ok` means the last COMPLETED PING succeeded, or that no PING has
+                completed yet: the pre-probe snapshot reports a configured Redis
+                as `ok` with no PING result behind it, so read this field together
+                with `probedAt` (`0` = nothing measured yet). `unreachable` means
+                a completed PING failed. `disabled` (no REDIS_URL) is NOT
+                degraded; only a configured-but-unreachable Redis is.
+        wallet:
+          type: object
+          required: [present]
+          additionalProperties: false
+          properties:
+            present:
+              type: boolean
+              description: |
+                Whether the operator signing key is present in the environment.
+                Presence only: the value is never read into the response.
+                Absence IS degraded, because the facilitator cannot settle
+                without a signer.
+        chains:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChainHealthItem"
+        probedAt:
+          type: integer
+          minimum: 0
+          description: |
+            Epoch ms when this snapshot's probes completed. `0` means no probe
+            has completed yet. Before the first probe completes, these are the
+            optimistic initial snapshot rather than a measurement: `degraded`,
+            `redis.status`, and the `chains` entries' `rpc`. `consecutiveFailures`
+            and `lastFailureKind` are absent then too, exactly as on a clean
+            probe, so their absence does not mean a probe succeeded. See each of
+            those fields for what it reports meanwhile. `redis.configured` and
+            `wallet.present` are read synchronously, so those two hold at
+            `probedAt: 0` as well. It does not mean "probed at the epoch".
+
+    ChainHealthItem:
+      type: object
+      description: |
+        One entry per registered chain adapter, as probed for the current
+        snapshot. Matches `ChainHealth` in `src/core/health-status.ts`.
+      required: [chainId, name, network, rpc]
+      additionalProperties: false
+      properties:
+        chainId:
+          type: integer
+        name:
+          type: string
+          description: Human-readable chain name, e.g. `Kite Testnet`.
+        network:
+          type: string
+          description: CAIP-2 network identifier, e.g. `eip155:2368`, `solana:devnet`.
+        rpc:
+          type: string
+          enum: [ok, unreachable]
+          description: |
+            `ok` means the adapter's own probe answered, OR that a transient
+            failure is still being tolerated, OR that no probe has completed yet:
+            before the first probe completes (`probedAt: 0`) every entry reports
+            `ok` with no probe behind it. `unreachable` means a hard
+            failure, or a transient one at or over the tolerated threshold.
+            Read it together with `consecutiveFailures`: `ok` WITH that field
+            present is a tolerated blip, not a clean probe.
+        consecutiveFailures:
+          type: integer
+          minimum: 1
+          description: |
+            OPTIONAL, omitted on a clean probe and before the first probe
+            completes. Consecutive failed probes for this chain. Its absence
+            means the last probe succeeded, or that no probe has completed yet
+            (`probedAt: 0`).
+        lastFailureKind:
+          type: string
+          enum: [transient, connection]
+          description: |
+            OPTIONAL, omitted on a clean probe and before the first probe
+            completes (`probedAt: 0`). Classification of the last failed probe. `transient` covers a rate limit, a probe timeout,
+            a gateway 5xx, a socket reset, and a TEMPORARY name-resolution
+            failure (`EAI_AGAIN`); it is tolerated below the threshold, so a
+            chain can carry this field and still report `rpc: 'ok'`.
+            `connection` covers a refused connection, a PERMANENT
+            name-resolution failure (`ENOTFOUND`), TLS, and a malformed adapter;
+            it is reported on the first failed probe, with no tolerance. Name
+            resolution is therefore split across BOTH values: which one you get
+            depends on whether the resolver failed temporarily or permanently.
 
     # ─── Error envelope ───────────────────────────────────────────────────
 
