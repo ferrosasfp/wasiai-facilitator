@@ -19,8 +19,21 @@
  *   - AC-10 → T-O10 : every path in the spec corresponds to a registered
  *                     Fastify route (inject each path and assert statusCode
  *                     !== 404)
- *   - AC-11 → T-O11 : /health path documents 200 response with exact fields
- *                     status/version/uptime/timestamp
+ *   - AC-11 → T-O11 : /health 200 response schema declares EXACTLY the keys the
+ *                     route emits, derived from a real inject + the
+ *                     `tsc`-tied table in `../helpers/health-shape.ts` (WKH-344;
+ *                     it used to compare against a list written inside this
+ *                     file, see the comment on the test)
+ *
+ * WKH-344 — `/health` contract guards (the `/supported` defect, one endpoint over):
+ *   - T-O11-DETAIL : `HealthDetail` / `redis` / `wallet` / `ChainHealthItem`
+ *                    derive their KEYS and their ENUMS from the code.
+ *   - T-H-CONF-1   : the REAL 200 body validates against `HealthResponse` with
+ *                    ajv (0 `additionalProperties` errors).
+ *   - T-H-KEEP     : `degraded` stays in the body and stays the summary of
+ *                    `details.degraded` (AC-4 forbids removing it).
+ *   - T-O-DRIFT-3  : the endpoint description describes the snapshot mechanism
+ *                    instead of denying the probe.
  *
  * Testing strategy: the route has no Redis / chain dependencies, so we do not
  * need the ioredis mock or the chainRegistry reset machinery used in
@@ -42,6 +55,17 @@ import type { X402ErrorCode } from '../../core/types.js';
 import { asChainId } from '../../core/types.js';
 import { SPL_TOKEN_TRANSFER_FINALIZED } from '../../chains/types.js';
 import type { SettlementAdapter } from '../../chains/types.js';
+import {
+  CHAIN_HEALTH_FIELDS,
+  CHAIN_HEALTH_OPTIONAL_FIELDS,
+  CHAIN_HEALTH_REQUIRED_FIELDS,
+  HEALTH_DETAIL_FIELDS,
+  HEALTH_DETAIL_REDIS_FIELDS,
+  HEALTH_DETAIL_WALLET_FIELDS,
+  HEALTH_RESPONSE_FIELDS,
+  compileHealthResponseValidator,
+  loadOpenApiSpec,
+} from '../helpers/health-shape.js';
 
 // ─── core/audit.js mock (WFAC-33 W4) ───────────────────────────────────────
 vi.mock('../../core/audit.js', () => {
@@ -422,29 +446,133 @@ describe('GET /openapi.json', () => {
 
   // ─── AC-11 ───────────────────────────────────────────────────────────────
 
-  it('T-O11 / AC-11: /health 200 response schema has exact fields status/version/uptime/timestamp', () => {
+  // ⚠️ WKH-344 — ESTE TEST TAMBIÉN SE COMPARABA CONSIGO MISMO, Y BLOQUEABA SU PROPIO ARREGLO.
+  //
+  // Su lista de claves estaba escrita a mano acá adentro (`['status', 'timestamp', 'uptime',
+  // 'version']`), así que el spec podía declarar 4 campos mientras la ruta emitía 6 y este
+  // test seguía verde. Medido en fc5be87 con js-yaml + ajv 8 sobre el 200 real: `valid?
+  // false`, dos errores `additionalProperties` (`degraded`, `details`) — o sea que TODO 200
+  // de producción violaba su propio contrato publicado, con este test en verde. Y al
+  // documentar los dos campos que faltaban, ESTE test se puso rojo: el guard bloqueaba el
+  // arreglo que debía exigir.
+  //
+  // Ahora las tres partes se comparan contra un testigo REAL (`app.inject`) y contra la tabla
+  // de `../helpers/health-shape.ts`, que `npm run typecheck` ata al tipo `HealthResponse`.
+  it('T-O11 / AC-2: HealthResponse deriva sus claves del código real (testigo + tabla exhaustiva), no de una lista escrita acá', async () => {
     const healthPath = spec.paths['/health'] as Record<string, Record<string, unknown>>;
-    const getOp = healthPath.get! as Record<string, unknown>;
-    const responses = getOp.responses as Record<string, Record<string, unknown>>;
-    const ok = responses['200']!;
-    const content = ok.content as Record<string, Record<string, unknown>>;
-    const jsonContent = content['application/json']!;
-    const schemaRef = (jsonContent.schema as Record<string, unknown>).$ref as string;
-
-    // Resolve the $ref to the actual HealthResponse component.
+    const responses = healthPath.get!.responses as Record<string, Record<string, unknown>>;
+    const content = responses['200']!.content as Record<string, Record<string, unknown>>;
+    const schemaRef = (content['application/json']!.schema as Record<string, unknown>).$ref;
     expect(schemaRef).toBe('#/components/schemas/HealthResponse');
+
     const healthSchema = spec.components.schemas.HealthResponse!;
-
-    const required = healthSchema.required as string[];
-    expect([...required].sort()).toEqual(['status', 'timestamp', 'uptime', 'version']);
-
     const props = healthSchema.properties as Record<string, Record<string, unknown>>;
-    // status must be a literal const "ok" (CD-4 — JSON Schema 2020-12 const).
-    expect(props.status!.const).toBe('ok');
-    expect(props.version!.type).toBe('string');
-    expect(props.uptime!.type).toBe('number');
-    expect(props.timestamp!.type).toBe('string');
+    const required = healthSchema.required as string[];
+
+    const res = await app.inject({ method: 'GET', url: '/health' });
+    expect(res.statusCode).toBe(200);
+    const witness = JSON.parse(res.body) as Record<string, unknown>;
+    const emitted = Object.keys(witness).sort();
+
+    // (1) todo lo EMITIDO está declarado — la dirección que estaba rota.
+    expect(Object.keys(props).sort()).toEqual(emitted);
+    // (2) todo lo `required` se emite.
+    expect([...required].sort()).toEqual(emitted);
+    // (3) y la tabla atada por tsc coincide con las dos.
+    expect([...HEALTH_RESPONSE_FIELDS].sort()).toEqual(emitted);
+    expect(healthSchema.additionalProperties).toBe(false);
+
+    // controles anti-tautología: los dos campos de ESTA HU, en las tres partes.
+    for (const f of ['degraded', 'details'] as const) {
+      expect(emitted).toContain(f);
+      expect(required).toContain(f);
+      expect(Object.keys(props)).toContain(f);
+    }
+
+    // el `type` de cada escalar se DERIVA del typeof del testigo (patrón T-O6).
+    expect(props.status!.const).toBe(witness.status);
+    expect(props.version!.type).toBe(typeof witness.version);
+    expect(props.uptime!.type).toBe(typeof witness.uptime);
+    expect(props.timestamp!.type).toBe(typeof witness.timestamp);
     expect(props.timestamp!.format).toBe('date-time');
+    expect(props.degraded!.type).toBe(typeof witness.degraded);
+    expect(props.details!.$ref).toBe('#/components/schemas/HealthDetail');
+  });
+
+  // ─── WKH-344 ─────────────────────────────────────────────────────────────
+
+  it('T-O11-DETAIL / AC-3: HealthDetail, redis, wallet y ChainHealthItem derivan del código (claves Y enums)', async () => {
+    const { REDIS_HEALTH_STATUSES, CHAIN_RPC_STATUSES, PROBE_FAILURE_KINDS } =
+      await import('../../core/health-status.js');
+
+    const detail = spec.components.schemas.HealthDetail!;
+    const dProps = detail.properties as Record<string, Record<string, unknown>>;
+    expect(Object.keys(dProps).sort()).toEqual([...HEALTH_DETAIL_FIELDS].sort());
+    expect([...(detail.required as string[])].sort()).toEqual([...HEALTH_DETAIL_FIELDS].sort());
+    expect(detail.additionalProperties).toBe(false);
+
+    // redis / wallet: inline en TS, inline en el schema.
+    const redis = dProps.redis!;
+    expect(Object.keys(redis.properties as object).sort()).toEqual(
+      [...HEALTH_DETAIL_REDIS_FIELDS].sort(),
+    );
+    expect(redis.additionalProperties).toBe(false);
+    const wallet = dProps.wallet!;
+    expect(Object.keys(wallet.properties as object).sort()).toEqual(
+      [...HEALTH_DETAIL_WALLET_FIELDS].sort(),
+    );
+    expect(wallet.additionalProperties).toBe(false);
+
+    const item = spec.components.schemas.ChainHealthItem!;
+    const iProps = item.properties as Record<string, Record<string, unknown>>;
+    expect(Object.keys(iProps).sort()).toEqual([...CHAIN_HEALTH_FIELDS].sort());
+    // `required` del schema === las claves NO opcionales del tipo. Ata las dos nociones.
+    expect([...(item.required as string[])].sort()).toEqual(
+      [...CHAIN_HEALTH_REQUIRED_FIELDS].sort(),
+    );
+    expect(item.additionalProperties).toBe(false);
+    for (const f of CHAIN_HEALTH_OPTIONAL_FIELDS) {
+      expect(item.required as string[]).not.toContain(f); // el bug con el signo invertido
+      expect(Object.keys(iProps)).toContain(f);
+    }
+    expect(dProps.chains!.type).toBe('array');
+    expect((dProps.chains!.items as Record<string, unknown>).$ref).toBe(
+      '#/components/schemas/ChainHealthItem',
+    );
+
+    // Los TRES enums salen de las tuplas de runtime, no de una copia (CD-15).
+    const enumOf = (s: Record<string, unknown>): string[] => [...(s.enum as string[])].sort();
+    expect(enumOf((redis.properties as Record<string, Record<string, unknown>>).status!)).toEqual(
+      [...REDIS_HEALTH_STATUSES].sort(),
+    );
+    expect(enumOf(iProps.rpc!)).toEqual([...CHAIN_RPC_STATUSES].sort());
+    expect(enumOf(iProps.lastFailureKind!)).toEqual([...PROBE_FAILURE_KINDS].sort());
+    // controles anti-vacío de los enums.
+    expect(REDIS_HEALTH_STATUSES.length).toBe(3);
+    expect((iProps.rpc!.enum as string[]).length).toBe(CHAIN_RPC_STATUSES.length);
+    expect(enumOf(iProps.rpc!)).toContain('unreachable');
+  });
+
+  it('T-H-CONF-1 / AC-1: el 200 real de /health valida contra HealthResponse con ajv (0 additionalProperties)', async () => {
+    const res = await app.inject({ method: 'GET', url: '/health' });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body) as Record<string, unknown>;
+
+    const validate = compileHealthResponseValidator(loadOpenApiSpec());
+    const ok = validate(body);
+    expect(validate.errors ?? []).toEqual([]); // primero los errores: el mensaje es el que sirve
+    expect(ok).toBe(true);
+
+    // control anti-vacío: no está validando `{}`.
+    expect(Object.keys(body).length).toBe(HEALTH_RESPONSE_FIELDS.length);
+    expect(Object.keys(body)).toContain('details');
+  });
+
+  it('T-H-KEEP / AC-4: `degraded` sigue en el cuerpo y es el resumen de details.degraded', async () => {
+    const res = await app.inject({ method: 'GET', url: '/health' });
+    const body = JSON.parse(res.body) as { degraded: unknown; details: { degraded: unknown } };
+    expect(typeof body.degraded).toBe('boolean');
+    expect(body.degraded).toBe(body.details.degraded); // src/routes/health.ts:56
   });
 
   // ─── WFAC-33 W4 — audit hook exclusion ────────────────────────────────
@@ -524,6 +652,30 @@ describe('GET /openapi.json', () => {
     for (const description of [endpointDescription, fieldDescription, unionDescription]) {
       expect(description).not.toMatch(/\b(send|sends|sending|submit|submits)\b/i);
     }
+  });
+
+  // ─── WKH-344 — la descripción publicada de GET /health ────────────────────
+
+  it('T-O-DRIFT-3 / AC-8: la descripción de GET /health describe el mecanismo del snapshot, sin negar el sondeo ni prometer que es por request', async () => {
+    // La frase vieja ("alive — does NOT probe Redis, RPC, or downstream dependencies") era
+    // falsa: se sondea RPC y se hace un PING real a Redis. Pero invertirla ("sí sondea") es
+    // el error simétrico y también falso: el sondeo corre en un refresco de fondo que la
+    // request no awaitea. Este guard exige las DOS mitades a la vez.
+    const { SNAPSHOT_TTL_MS } = await import('../../core/health-status.js');
+    const desc = (spec.paths['/health']!.get as { description?: string }).description;
+    expect(typeof desc).toBe('string');
+    // la afirmación falsa que esta HU saca.
+    expect(desc).not.toMatch(/does\s+not\s+probe/i);
+    // y el error simétrico: tiene que quedar claro que es de fondo y no awaiteado.
+    expect(desc).toMatch(/background/i);
+    expect(desc).toMatch(/never awaits/i);
+    // El número sale de la constante de PRODUCCIÓN, no de una copia en el yaml: sin este
+    // lazo, el mutante de una línea `SNAPSHOT_TTL_MS = 30000` dejaría la frase publicada
+    // falsa sin poner nada rojo.
+    expect(desc).toContain(`${SNAPSHOT_TTL_MS} ms`);
+    expect(desc).toMatch(/probedAt/);
+    // CD-9: sin imperativos al integrador.
+    expect(desc).not.toMatch(/\b(send|submit|set|pass)\b/i);
   });
 });
 
