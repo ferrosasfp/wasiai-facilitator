@@ -61,8 +61,16 @@ import { isRedisConfigured, isRedisReachable } from './idempotency.js';
 /** Per-chain RPC probe timeout (ms). Kept short so a refresh never lingers. */
 const RPC_PROBE_TIMEOUT_MS = 1500;
 
-/** How long a cached snapshot is served before a background refresh is kicked. */
-const SNAPSHOT_TTL_MS = 5000;
+/**
+ * How long a cached snapshot is served before a background refresh is kicked.
+ *
+ * EXPORTED (WKH-344) because the published `description` of `GET /health` states this
+ * staleness bound in milliseconds, and a number copied into prose drifts in silence:
+ * `T-O-DRIFT-3` compares the text against THIS constant, so the one-line mutant
+ * `SNAPSHOT_TTL_MS = 30000` turns that test red instead of leaving a false sentence
+ * published. Nothing in `src/` reads it through the export.
+ */
+export const SNAPSHOT_TTL_MS = 5000;
 
 /**
  * Consecutive TRANSIENT probe failures tolerated before a chain is reported
@@ -71,8 +79,17 @@ const SNAPSHOT_TTL_MS = 5000;
  */
 const TRANSIENT_FAILURE_THRESHOLD = 2;
 
-/** Failure classification of a probe rejection (see module DESIGN note). */
-type ProbeFailureKind = 'transient' | 'connection';
+/**
+ * Failure classification of a probe rejection (see module DESIGN note).
+ *
+ * Runtime tuple, not a bare union: `doc/openapi.yaml` publishes these values as an
+ * `enum` and had no way to derive them, so it repeated them by hand and could drift in
+ * silence. `T-O11-DETAIL` compares the published enum against THIS array. Same shape as
+ * `DEDICATED_ROUTE_IDS` in `src/core/supported.ts:149-155`, and same one-line mutant that
+ * reopens the drift: writing the union out by hand again instead of deriving it.
+ */
+export const PROBE_FAILURE_KINDS = ['transient', 'connection'] as const;
+export type ProbeFailureKind = (typeof PROBE_FAILURE_KINDS)[number];
 
 /**
  * Errors that mean "the RPC is there but did not answer THIS time": rate limits
@@ -83,12 +100,21 @@ type ProbeFailureKind = 'transient' | 'connection';
 const TRANSIENT_PROBE_ERROR_RE =
   /\b429\b|too many requests|rate limit|rate-limit|timeout|timed out|ETIMEDOUT|EAI_AGAIN|ECONNRESET|socket hang up|\b50[234]\b/i;
 
+/**
+ * 'ok' = RPC reachable (or a transient failure still tolerated); 'unreachable' = probe failed.
+ *
+ * Runtime tuple for the same reason as `PROBE_FAILURE_KINDS`: `ChainHealthItem.rpc` is
+ * published as an `enum` in `doc/openapi.yaml` and `T-O11-DETAIL` derives it from here.
+ */
+export const CHAIN_RPC_STATUSES = ['ok', 'unreachable'] as const;
+export type ChainRpcStatus = (typeof CHAIN_RPC_STATUSES)[number];
+
 export interface ChainHealth {
   readonly chainId: number;
   readonly name: string;
   readonly network: string;
   /** 'ok' = RPC reachable; 'unreachable' = probe failed/timed out. */
-  readonly rpc: 'ok' | 'unreachable';
+  readonly rpc: ChainRpcStatus;
   /**
    * ADDITIVE (optional — omitted entirely on a clean probe, so the healthy
    * response stays byte-identical to the pre-fix shape): consecutive failed
@@ -100,6 +126,15 @@ export interface ChainHealth {
   readonly lastFailureKind?: ProbeFailureKind;
 }
 
+/**
+ * 'ok' (PING succeeded), 'unreachable' (PING failed), or 'disabled' (no REDIS_URL).
+ *
+ * Runtime tuple for the same reason as `PROBE_FAILURE_KINDS`: `HealthDetail.redis.status`
+ * is published as an `enum` in `doc/openapi.yaml` and `T-O11-DETAIL` derives it from here.
+ */
+export const REDIS_HEALTH_STATUSES = ['ok', 'unreachable', 'disabled'] as const;
+export type RedisHealthStatus = (typeof REDIS_HEALTH_STATUSES)[number];
+
 export interface HealthStatusDetail {
   /** Overall: true when ANY tracked dependency is not in its healthy state. */
   readonly degraded: boolean;
@@ -107,7 +142,7 @@ export interface HealthStatusDetail {
     /** Whether a REDIS_URL is configured (false in test/in-memory mode). */
     readonly configured: boolean;
     /** 'ok' (PING succeeded), 'unreachable' (PING failed), or 'disabled'. */
-    readonly status: 'ok' | 'unreachable' | 'disabled';
+    readonly status: RedisHealthStatus;
   };
   readonly wallet: {
     /** Operator signing key present in env (NEVER the value). */
@@ -205,7 +240,7 @@ async function probeAll(): Promise<HealthStatusDetail> {
     Promise.all(adapters.map((meta) => probeChain(meta))),
   ]);
 
-  const redisStatus: 'ok' | 'unreachable' | 'disabled' = !redisConfigured
+  const redisStatus: RedisHealthStatus = !redisConfigured
     ? 'disabled'
     : redisOk
       ? 'ok'
