@@ -14,8 +14,11 @@
  *     `ChainMetadata.supportedMethods` (field added by WKH-204) and only falls
  *     back here when that field is absent. Live case: `SolanaAdapter` declares
  *     `spl-token-transfer-finalized` (WKH-323) and never reaches this default.
+ *   - DedicatedRouteId: the three opt-in Solana transport routes that are NOT
+ *     chain adapters and therefore never appeared in `chains`/`methods`.
  *   - getSupportedResponse(): pure function that maps `chainRegistry.listAdapters()`
- *     to the response shape at request time (DT-3, live snapshot).
+ *     to the response shape at request time (DT-3, live snapshot), plus the
+ *     dedicated-route ids handed in BY PARAMETER (see the block on the type).
  *
  * Boundaries (OWNERS.md row `src/core/`, DT-4):
  *   - MAY import: `../chains/registry.js` (via registry singleton, allowed
@@ -111,9 +114,71 @@ export interface ChainSupportedItem {
   readonly breakerStateAbsentReason?: BreakerStateAbsentReason;
 }
 
+/**
+ * WKH-342 — id de una ruta de transporte DEDICADA: las tres rutas Solana opt-in que
+ * `app.ts` registra bajo su propio gate (`app.ts:411` sponsor, `:416` release,
+ * `:422` payout) y que, al no ser adaptadores, nunca aparecieron en `chains` ni en
+ * `methods` (está dicho arriba, en el bloque de `BreakerStateAbsentReason`).
+ *
+ * El id es el par método+path tal cual lo ve un cliente HTTP, no un alias nuestro:
+ * `'POST /solana/payout'` corresponde al `app.post('/solana/payout', …)` de
+ * `routes/solana-payout.ts:259`. Si alguien cambia el path de la ruta y no este
+ * literal, `T-A1` se pone rojo (deriva el valor del router vivo con `hasRoute`, no
+ * de esta lista).
+ *
+ * ⚠️ Lo que este cambio NO es: no es un filtro y no saca ningún string de la
+ * respuesta. `/supported` no anunciaba estas rutas de ninguna forma —el único método
+ * de la entrada Solana es `spl-token-transfer-finalized` (`chains/solana-adapter.ts`),
+ * que es el riel testigo de `/verify`+`/settle` y sí existe—, así que acá no había
+ * nada que corregir: hay un campo nuevo donde antes no había información.
+ *
+ * ⚠️ CR MNR-1 — POR QUÉ ESTO ES UN ARRAY EN RUNTIME Y EL TIPO SE DERIVA DE ÉL.
+ *
+ * Antes esto era un union de literales y nada más, o sea que sólo existía en tiempo de
+ * compilación. Consecuencia MEDIDA: agregar un cuarto miembro dejaba
+ * `routes.openapi.test.ts` en **14 passed** y `tsc` en **0**, mientras `ajv` rechazaba el
+ * cuerpo real contra el `enum` de `doc/openapi.yaml` — el spec no tenía de dónde derivar
+ * la lista, así que la repetía a mano y divergía en silencio. Es el mismo defecto que
+ * BLQ-BAJO-2, un nivel más abajo: no en el eje de las CLAVES, en el de los VALORES.
+ *
+ * Con la tupla `as const` hay UN solo lugar donde se agregan ids, el tipo sale de ella
+ * (`(typeof …)[number]`) y `T-O6` compara el `enum` del yaml contra ESTE array. Mutante
+ * de una línea que restaura la divergencia: volver a escribir el union a mano en vez de
+ * derivarlo de la tupla.
+ */
+export const DEDICATED_ROUTE_IDS = [
+  'POST /solana/payout',
+  'POST /solana/sponsor',
+  'POST /solana/escrow/release',
+] as const;
+
+export type DedicatedRouteId = (typeof DEDICATED_ROUTE_IDS)[number];
+
 export interface SupportedResponse {
   readonly chains: readonly ChainSupportedItem[];
   readonly methods: readonly string[];
+  /**
+   * WKH-342 — las rutas de `DedicatedRouteId` que ESTA instancia tiene registradas
+   * ahora mismo. Siempre presente y siempre un array (posiblemente vacío) en toda
+   * respuesta servida por esta versión.
+   *
+   * LOS TRES DESENLACES que un consumidor puede leer, y son tres, no dos:
+   *   - campo ausente del JSON  ⟹ **NO SÉ**. Este facilitator es anterior a WKH-342,
+   *     o algo en el medio reescribió la respuesta. NO significa "no tiene la ruta".
+   *   - presente y CONTIENE el id ⟹ la ruta está registrada: un POST a ese path no va
+   *     a caer en el 404 por defecto de Fastify.
+   *   - presente y NO contiene el id ⟹ la ruta NO está registrada. Un `[]` es esta
+   *     respuesta, no una ausencia: dice "ninguna de las tres".
+   *
+   * Por eso el discriminante del lado del consumidor tiene que ser
+   * `Array.isArray(body.dedicatedRoutes)` y nunca truthiness ni `.length`: `[]` es
+   * falsy y `undefined` también, y son desenlaces opuestos.
+   *
+   * Lo que el campo NO dice: nada sobre si la ruta va a AUTORIZAR la llamada. Un
+   * `'POST /solana/payout'` presente y un 403 por tope diario conviven sin
+   * contradicción; esto es existencia del transporte, no permiso.
+   */
+  readonly dedicatedRoutes: readonly DedicatedRouteId[];
 }
 
 /**
@@ -129,10 +194,25 @@ export interface SupportedResponse {
  *   zero registered adapters this naturally evaluates to `[]`, satisfying AC-9
  *   (`{ chains: [], methods: [] }`).
  *
+ * - `dedicatedRoutes`: copia del argumento, en su orden. NO se deriva del registry:
+ *   estas rutas no son adaptadores y su registro depende de un gate que vive en
+ *   `infra/solana-payout-operator.ts` — y este módulo tiene PROHIBIDO importar
+ *   `infra/*` (ver "Boundaries" arriba). De ahí que la señal entre por parámetro.
+ *
+ * ⚠️ El parámetro es REQUERIDO a propósito, sin default. Un `= []` haría que un
+ * llamador que se olvide de pasarlo publique "ninguna de las tres rutas existe",
+ * que es una AFIRMACIÓN NEGATIVA, y el consumidor la leería como definitiva (§ el
+ * bloque de `SupportedResponse.dedicatedRoutes`). Requerido convierte ese olvido en
+ * un error de compilación. `T-A4` lo fija; la parte de tipos sólo la evalúa
+ * `npm run typecheck:tests`, porque el `exclude` de `tsconfig.json` deja afuera todo
+ * archivo `.test.ts`.
+ *
  * Zero-adapter edge case (AC-9): `adapters = []` => `chains = []` =>
  * `flatMap(...)` yields `[]` => `methods = []`.
  */
-export function getSupportedResponse(): SupportedResponse {
+export function getSupportedResponse(
+  dedicatedRoutes: readonly DedicatedRouteId[],
+): SupportedResponse {
   const adapters: readonly ChainMetadata[] = chainRegistry.listAdapters();
   const chains: readonly ChainSupportedItem[] = adapters.map((meta) => {
     // WFAC-41 (DT-7, CD-NEW-CB-SUPPORTED-DUCKTYPE) — ducktype lookup of
@@ -189,5 +269,9 @@ export function getSupportedResponse(): SupportedResponse {
     };
   });
   const methods: readonly string[] = Array.from(new Set(chains.flatMap((c) => c.methods)));
-  return { chains, methods };
+  // Copia, no alias: el llamador arma el array por request (`routes/supported.ts`), y
+  // un alias haría que una mutación posterior del suyo cambiara una respuesta ya
+  // devuelta. La copia mantiene la pureza declarada arriba (mismo argumento => misma
+  // respuesta, verificado por T-A4).
+  return { chains, methods, dedicatedRoutes: [...dedicatedRoutes] };
 }
