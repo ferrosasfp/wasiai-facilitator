@@ -73,6 +73,16 @@ Chain adapters are opt-in. Kite Ozone testnet registers by default; every other 
 | Solana devnet | `solana:devnet` | SPL USDC | Off | Verify-only, wallet broadcasts | Runs on devnet |
 | Solana mainnet | `solana:mainnet` | SPL USDC | Off | Verify-only, wallet broadcasts | Adapter exists, ships disabled |
 
+⚠️ **That `Default` column describes the shipped defaults, not the reference deployment, and on
+2026-08-11 the two disagreed on one row.** The `curl .../supported` this README offers above returns
+`eip155:43114` — Avalanche **C-Chain mainnet**, not Fuji — registered, with `rpc: ok` and its breaker
+`CLOSED`. So `AVALANCHE_MAINNET_ENABLED=true` is set in that deployment while the table below says
+"Adapter exists, ships disabled". Both statements are true of different things, and a reader who runs
+the documented command sees a real-money network where the table says disabled. **This paragraph is a
+dated reading, not a property**: re-run the command rather than trusting it. What was *not* measured
+that day, and what decides whether it matters: whether the operator wallet holds AVAX on 43114, and
+whether the real-destination gate rejects a settle there.
+
 A mainnet should only be enabled after the matching testnet has been validated and, for EVM, after the operator wallet holds that chain's native gas. Solana needs no operator gas for `/settle`, since it does not broadcast; the sponsorship path does need a funded fee-payer.
 
 The Solana fee-payer sponsorship and the escrow release path are under active construction against devnet. Each is registered only when its flag is on and its key parses, so on a default deployment neither is present.
@@ -144,7 +154,7 @@ Everything is configured through environment variables. `.env.example` documents
 | `OPERATOR_PRIVATE_KEY` | Signer that submits EVM settlements and pays gas |
 | `FACILITATOR_API_KEYS` | Comma-separated caller keys, required in production, sent as `Authorization: Bearer <key>` |
 | `<CHAIN>_RPC_URL` / `<CHAIN>_ENABLED` | Per-chain RPC endpoint and opt-in flag |
-| `REDIS_URL` | Rate limits, idempotency and the daily settle cap |
+| `REDIS_URL` | Rate limits, idempotency and the spending caps. **What breaks when it is unreachable is not uniform, and the direction is per rail** — see the table below |
 | `CORS_ALLOWED_ORIGINS` | Comma-separated allow-list. Set an explicit list in production |
 | `METRICS_TOKEN` | Gates `GET /metrics`. Unset makes the endpoint fail closed |
 | `SETTLE_CAP_*`, `CB_*`, `RATE_LIMIT_*` | Daily settle cap, circuit breaker and rate-limit tuning |
@@ -153,6 +163,39 @@ Everything is configured through environment variables. `.env.example` documents
 | `SOLANA_ESCROW_RELEASE_ENABLED`, `SOLANA_ESCROW_PROGRAM_ID`, `SOLANA_ESCROW_RELEASE_*` | Escrow release path |
 
 Private keys, operator addresses and secrets belong in the deployment environment, never in code and never in this repo.
+
+### What a Redis outage does, per rail
+
+Redis is best-effort for this service, but "best-effort" resolves in **opposite directions**
+depending on the rail, and that asymmetry is deliberate. Measured 2026-08-11 by reading each
+module rather than trusting the comment above it:
+
+| Mechanism | Store | With Redis unreachable |
+|---|---|---|
+| Solana signature dedup (`infra/solana-dedup.ts`) | **Supabase**, `UNIQUE(signature)` | Unaffected. Does not use Redis at all |
+| Solana sponsor cap (`core/solana-sponsor-cap.ts`) | Redis | **Fails CLOSED** (CD-6) → route returns 429 |
+| Solana payout cap (`core/solana-payout-cap.ts`) | Redis | **Fails CLOSED** → rejects |
+| EVM inflight settle lock (`core/idempotency.ts`) | Redis | Fails open (CD-7). Safe because the EIP-3009 on-chain nonce is the real backstop |
+| EVM amount cap (`core/settle-cap.ts`, #1) | none | Fails CLOSED |
+| EVM daily cap (`core/settle-cap.ts`, #2) | Redis | **Fails OPEN by default**; a caller may opt into `failMode: 'closed'` (WFAC-53) |
+
+Two things follow, and the second is the one that costs a debugging session.
+
+**The replay question has a durable answer on both rails, and they are different answers.** On
+EVM it is the on-chain nonce: a second `transferWithAuthorization` with the same nonce reverts.
+On Solana there is no such backstop, because the facilitator only verifies a transaction the
+wallet already sent, so replay protection is a Postgres `UNIQUE(signature)` constraint that
+does not depend on Redis and fails closed on any error. `infra/solana-dedup.ts` says so at the
+top of the file. Do not read the CD-7 fail-open comment in `idempotency.ts` as covering
+Solana: it is scoped to the EVM inflight lock and its safety argument is the EVM nonce.
+
+⚠️ **And because the Solana caps fail closed, a Redis outage does not leak money, it stops the
+sponsored deposit.** `POST /methods/solana-sponsor` starts returning 429 while Redis is down.
+On 2026-08-11 this was observed live: `/health` reported `degraded: true` with
+`redis: unreachable`, and about twenty minutes later the same probe reported `degraded: false`
+with `redis: ok`, so it flaps rather than staying down. Nothing surfaces that to the person
+using the app; the only signal is a walkthrough that fails at the deposit. `GET /health` is
+the place to look first when a sponsored deposit rejects for no apparent reason.
 
 ## Security
 
