@@ -16,6 +16,7 @@ import path from 'node:path';
 import { describe, it, expect } from 'vitest';
 import { escrowIdl } from './escrow-idl.js';
 import { canonicalSha256 } from './canonical-hash.js';
+import { DEPOSIT_POSITIONAL_ACCOUNTS } from '../methods/solana-sponsor/deposit-shape.js';
 
 // Pinneada y verificada en F2 sobre los 3 IDL reales (todos canonicalizan igual, address DR5G).
 // HU-SOL-20/R2a: re-pinneada tras R1 (EscrowIndex + register_escrow/deregister_escrow). `EscrowState`
@@ -36,7 +37,20 @@ import { canonicalSha256 } from './canonical-hash.js';
 // cuentas y args; EscrowStatus sigue con 3 variantes, así que el decode de la cuenta es idéntico.
 // Este repo firma `release` y lee `EscrowState`: ninguno de los dos cambió de forma.
 // Anterior: 4bcc34a997396d360ab996ea5bb1015ffdd8a1d357d3f4b4cffcbfe8ea98d12b.
-const ESCROW_IDL_SHA256 = 'bfbdfe5aedd55d68e6dda4663b5d26daada815c99db03df34a1601fe4a4d3922';
+// RE-PIN 2026-08-10 (WKH-343) — el `deposit` suma una NOVENA cuenta, `beneficiary_ata`, al final de
+// la lista (índice 8), no-writable y no-signer. Diff medido instrucción por instrucción contra el IDL
+// nuevo, ignorando `docs`: `deposit` es la ÚNICA que cambió; `close`, `refund`, `release`,
+// `register_escrow` y `deregister_escrow` quedan idénticas, y los bloques `accounts`, `types` y
+// `errors` y el `address` tampoco se movieron. Ningún discriminador cambió (los 6 los asertea el test
+// R2a de acá abajo). Este repo firma `release` y lee `EscrowState`: `release` sigue con sus 9 cuentas,
+// `beneficiary_ata` en el índice 6 y writable — la forma que `release-shape.ts` tiene pinneada — y el
+// layout de `EscrowState` es el mismo, así que el decode de la cuenta no se mueve.
+// El CR-1 del `deposit` acepta la cuenta nueva por diseño, sin tocarlo: compara
+// `keys.length < DEPOSIT_POSITIONAL_ACCOUNTS` (cr1.ts:220) y exige que las cuentas extra sean
+// no-signer y no-writable (cr1.ts:286) — que es exactamente lo que `beneficiary_ata` es. Esa
+// propiedad la asertea T-DEP9 acá abajo, para que no dependa sólo de este hash.
+// Anterior: bfbdfe5aedd55d68e6dda4663b5d26daada815c99db03df34a1601fe4a4d3922.
+const ESCROW_IDL_SHA256 = 'd295b7c74ff9a2ac758e24cc9e7d32d3c09d5943e1b137ef67f4f2692993c70e';
 
 describe('WKH-227 AC-2/AC-3 · escrow IDL canonical hash lock', () => {
   it('AC-2: el IDL vendoreado canonicaliza al hash pinneado', () => {
@@ -85,6 +99,42 @@ describe('WKH-227 AC-2/AC-3 · escrow IDL canonical hash lock', () => {
     expect(ixs.find((i) => i.name === 'close')?.discriminator).toEqual([
       98, 165, 201, 177, 108, 65, 206, 96,
     ]);
+  });
+
+  // T-DEP9 (WKH-343) — la propiedad de la que depende CR-1, aserteada aparte del hash.
+  //
+  // Por qué NO alcanza con el hash pinneado: el re-pin es el flujo normal cuando el programa cambia
+  // de verdad, y al re-pinnear el hash vuelve a verde por construcción. Medido el 2026-08-10: con
+  // `beneficiary_ata` flipeada a writable Y el hash re-pinneado, la suite entera queda VERDE en un
+  // árbol sin el sibling (que es como corre la CI, ci.yml:22 clona sólo este repo). O sea que sin
+  // este test la propiedad no la mira nadie donde corre la automatización.
+  //
+  // Qué propiedad es: CR-1 acepta el `deposit` con cuentas de más sólo si son no-signer y
+  // no-writable (`cr1.ts:286`), porque las trata como `remaining accounts` después de las
+  // `DEPOSIT_POSITIONAL_ACCOUNTS` posicionales (`cr1.ts:220`). Si el programa agregara una cuenta
+  // extra WRITABLE, CR-1 rechazaría todo depósito legítimo y el corte se vería recién en runtime.
+  // Este test lo pone en rojo al re-vendorizar, que es cuando todavía es barato.
+  it('T-DEP9: las cuentas del `deposit` más allá de las posicionales son no-signer y no-writable', () => {
+    const deposit = escrowIdl.instructions.find((i) => i.name === 'deposit');
+    const accounts = deposit?.accounts as
+      | ReadonlyArray<{ name: string; writable?: boolean; signer?: boolean }>
+      | undefined;
+
+    // 8 posicionales + `beneficiary_ata`. El 9 es literal a propósito: si el IDL suma otra cuenta,
+    // este test tiene que obligar a mirarla, no adaptarse solo.
+    expect(accounts).toHaveLength(9);
+    expect(accounts?.[8]?.name).toBe('beneficiary_ata');
+
+    // El corte lo da la constante que CR-1 usa de verdad, no un 8 escrito de nuevo acá.
+    const extras = (accounts ?? []).slice(DEPOSIT_POSITIONAL_ACCOUNTS);
+    expect(extras.map((a) => a.name)).toEqual(['beneficiary_ata']);
+    for (const a of extras) {
+      expect({ name: a.name, writable: a.writable === true, signer: a.signer === true }).toEqual({
+        name: a.name,
+        writable: false,
+        signer: false,
+      });
+    }
   });
 
   const SIBLING = path.resolve(process.cwd(), '../solana-programs/target/idl/escrow.json');

@@ -1,6 +1,12 @@
 {
   "extends": "./tsconfig.json",
-  "compilerOptions": { "noEmit": true },
-  "include": ["src/**/*"],
+  // `rootDir` se abre a la raíz para poder incluir `scripts/`: el build real
+  // (tsconfig.json) sigue emitiendo SÓLO desde `src`, acá no se emite nada.
+  "compilerOptions": { "noEmit": true, "rootDir": "." },
+  // `scripts/**/*.ts` entra a propósito: si no, NADIE lo typechequea. `npm run lint`
+  // es `eslint src/` y vitest no lo carga, así que un script de ops con un error de
+  // tipos podría vivir ahí para siempre. Mismo motivo por el que los `*.test.ts`
+  // están acá y no en el tsconfig del build.
+  "include": ["src/**/*", "scripts/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }

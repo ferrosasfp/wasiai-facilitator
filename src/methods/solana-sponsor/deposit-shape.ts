@@ -23,7 +23,7 @@ export { ESCROW_PROGRAM_ID_DEFAULT } from '../../chains/escrow-program-id.js';
 
 /**
  * Anchor discriminator of the `deposit` instruction — first 8 bytes of `ix.data`
- * (pinned from escrow-idl.ts:83). CR-1 compares these bytes exactly.
+ * (pinned from escrow-idl.ts:197). CR-1 compares these bytes exactly.
  */
 export const DEPOSIT_DISCRIMINATOR: readonly number[] = [242, 35, 198, 137, 82, 225, 242, 182];
 
@@ -40,7 +40,7 @@ export const SYSTEM_PROGRAM_ID = '11111111111111111111111111111111';
 
 /**
  * Number of positional accounts in the `deposit` ix (before the `reference`
- * remaining account). Order (escrow-idl.ts:84-143):
+ * remaining account). Order (escrow-idl.ts:198-340):
  *   0 sender (writable, signer)
  *   1 mint
  *   2 escrow_state (writable, pda)
@@ -68,7 +68,7 @@ export const DEPOSIT_ACCOUNT_INDEX = {
 /**
  * SDD 037 / W0 — byte layout of the `deposit` instruction DATA.
  *
- * Pinned from the arg order declared in `src/chains/escrow-idl.ts:264-287` and
+ * Pinned from the arg order declared in `src/chains/escrow-idl.ts:341-364` and
  * CONFIRMED against bytes produced by `BorshInstructionCoder(escrowIdl).encode`
  * in `src/__tests__/unit/solana-sponsor.amount-offset.test.ts` (T-OFF1). The
  * evidence note is `doc/sdd/037-sponsor-pop-ed25519/w0-amount-offset.md`.
@@ -113,7 +113,7 @@ export const AUTHORITY_LEN = 32;
  * HU-SOL-20 / R3 — pinned shape of the ONLY 2nd business instruction CR-1 accepts:
  * `register_escrow` of the SAME escrow program. Pinned from the IDL produced by
  * `anchor build` in solana-programs (HU-SOL-20/R1) and re-vendored here by R2a
- * (`src/chains/escrow-idl.ts:365`), NEVER from a literal in a doc.
+ * (`src/chains/escrow-idl.ts:520`), NEVER from a literal in a doc.
  *
  * Read back from the built artifact on 2026-07-28:
  *   discriminator [200,17,194,170,224,144,127,166]

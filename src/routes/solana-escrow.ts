@@ -87,7 +87,7 @@ type ReleaseErrorCode =
   | 'RELEASE_BROADCAST_FAILED'
   /**
    * El plazo del escrow venció: on-chain `release` sólo entra con `now < deadline`
-   * (escrow-idl.ts:518), y pasado ese instante el programa devuelve
+   * (escrow-idl.ts:594), y pasado ese instante el programa devuelve
    * `ReleaseWindowClosed` (6008). NO es transitorio y NO se arregla reintentando:
    * ese escrow ya sólo puede terminar en `refund`. Por eso NO comparte código con
    * `RELEASE_REJECTED`, que es el cajón de las causas reintentables/ambiguas.
@@ -346,7 +346,7 @@ export const solanaEscrowReleaseRoute: FastifyPluginAsync = async (app) => {
       // autorización real sigue siendo la del programa on-chain.
 
       // 4b-1 — el plazo. On-chain `release` sólo entra con `now < deadline`
-      // (escrow-idl.ts:518: "`release` sólo entra con `now < deadline` y `refund` sólo
+      // (escrow-idl.ts:594: "`release` sólo entra con `now < deadline` y `refund` sólo
       // con `now >= deadline`").
       //
       // ⚠️ El reloj es EL NUESTRO, no el del cluster (`Clock::unix_timestamp`). Los dos
@@ -374,7 +374,7 @@ export const solanaEscrowReleaseRoute: FastifyPluginAsync = async (app) => {
       }
 
       // 4b-2 — la authority. El programa la valida con `has_one = authority`
-      // (escrow-idl.ts:511) contra la que quedó grabada en el `EscrowState` al depositar.
+      // (escrow-idl.ts:588) contra la que quedó grabada en el `EscrowState` al depositar.
       // Si no es la nuestra, la tx se rechaza con `ConstraintHasOne` (2001) SIEMPRE.
       // Se compara contra la MISMA pubkey con la que se arma la tx (Step 6) y con la que
       // se co-firma (Step 7): el Step 3 ya resolvió la Keypair, así que acá no tira.

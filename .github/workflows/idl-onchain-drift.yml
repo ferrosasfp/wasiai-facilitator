@@ -1,0 +1,80 @@
+# WKH-343 — ¿el IDL publicado on-chain sigue siendo el que este repo tiene vendoreado?
+#
+# POR QUÉ NO ESTÁ EN EL JOB DE QA (el de ci.yml, que corre por commit):
+# lo que este control mira es una propiedad del MUNDO, no del commit. La cadena envejece
+# sola: el veredicto cambia cuando alguien republica el IDL o despliega otro binario, sin
+# que nadie toque una línea de este repo. Colgarlo del `push`/`pull_request` tiene los dos
+# defectos juntos:
+#   - bloquearía un PR que no tiene nada que ver con la deriva, que es como estos controles
+#     terminan borrados;
+#   - y NO detectaría nada durante una semana sin commits, que es justo cuando la deriva
+#     pasa desapercibida.
+# Por eso corre por reloj. `ci.yml` no se tocó.
+#
+# LOS TRES DESENLACES (el script los distingue; ver src/chains/escrow-idl-onchain.ts):
+#   exit 0  MATCH                        → verde.
+#   exit 1  MISMATCH/ABSENT/UNDECODABLE  → ROJO DURO. La cadena contestó y no coincide.
+#                                          No hay bandera para apagar esto.
+#   exit 2  UNREACHABLE                  → NO se pudo preguntar. NO es verde y NO es rojo:
+#                                          queda como `::warning` con el motivo escrito.
+#
+# El exit 2 no tumba el job A PROPÓSITO: un rojo por un hipo de devnet entrena a la gente a
+# ignorar este workflow, y un control ignorado es peor que no tenerlo. Pero tampoco pasa en
+# silencio: deja anotación y resumen, así que "no pude preguntar" nunca se lee como "está OK".
+
+name: IDL on-chain drift
+
+on:
+  schedule:
+    # Diario 06:15 UTC. La hora exacta no importa; que corra sin que nadie commitee, sí.
+    - cron: '15 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    name: escrow IDL — vendoreado vs publicado on-chain
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check on-chain IDL
+        env:
+          # Sólo hace un `getAccountInfo` de lectura sobre una cuenta pública. Si hay un RPC
+          # propio configurado se usa ese; si no, el endpoint público de devnet.
+          SOLANA_RPC_URL: ${{ vars.SOLANA_RPC_URL || 'https://api.devnet.solana.com' }}
+        run: |
+          set +e
+          # 2>&1: el motivo de MISMATCH/UNREACHABLE se imprime por stderr. Sin esto el
+          # resumen del job mostraria un veredicto sin la razon, que es medio dato.
+          npm run --silent ops:check-idl-onchain 2>&1 | tee /tmp/idl-drift.txt
+          code=${PIPESTATUS[0]}
+          set -e
+          {
+            echo "## escrow IDL on-chain drift"
+            echo ""
+            echo '```'
+            cat /tmp/idl-drift.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$code" = "2" ]; then
+            echo "::warning title=IDL on-chain drift NO verificado::No se pudo preguntar a la cadena (exit 2). Esto NO afirma que el IDL este bien: no se lo consulto."
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "> No se pudo preguntar a la cadena. El estado del IDL on-chain quedo SIN VERIFICAR." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          exit "$code"

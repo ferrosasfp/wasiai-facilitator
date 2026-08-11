@@ -20,6 +20,7 @@
     "test:coverage": "vitest run --coverage",
     "security:audit": "npm audit --audit-level=high",
     "ops:check-gas": "node scripts/check-operator-gas.mjs",
+    "ops:check-idl-onchain": "tsx scripts/check-idl-onchain.ts",
     "qa": "npm run typecheck && npm run typecheck:tests && npm run lint && npm run format:check && npm run test"
   },
   "dependencies": {
