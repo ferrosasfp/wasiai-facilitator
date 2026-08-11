@@ -108,11 +108,11 @@ export const escrowIdl = {
         {
           name: 'sender_ata',
           docs: [
-            'Destino del barrido. Cuenta NUEVA en esta instrucción: los consumidores que hoy arman el',
-            '`close` con la lista vieja tienen que agregarla. No existe orden de despliegue seguro entre',
-            'programa y cliente para este cambio (ver README, "Deploying"): las dos combinaciones cruzadas',
-            'fallan. Hoy ningún consumidor construye `close`, así que es una restricción hacia adelante y',
-            'no un corte en vivo.',
+            'Destino del barrido: `close` manda acá TODO `vault.amount`, sin cota superior, y recién',
+            'entonces cierra el vault. Es OBLIGATORIA y tiene que ser la ATA del `sender` para el `mint`',
+            'del escrow; omitirla revierte. Cambiar esta lista no tiene orden de despliegue seguro entre',
+            'programa y cliente: las dos combinaciones cruzadas fallan, así que van juntos. Quién arma hoy',
+            'esta instrucción es un hecho de los repos consumidores y se documenta allá, no acá.',
           ],
           writable: true,
           pda: {

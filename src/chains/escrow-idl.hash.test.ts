@@ -50,7 +50,7 @@ import { DEPOSIT_POSITIONAL_ACCOUNTS } from '../methods/solana-sponsor/deposit-s
 // no-signer y no-writable (cr1.ts:286) — que es exactamente lo que `beneficiary_ata` es. Esa
 // propiedad la asertea T-DEP9 acá abajo, para que no dependa sólo de este hash.
 // Anterior: bfbdfe5aedd55d68e6dda4663b5d26daada815c99db03df34a1601fe4a4d3922.
-const ESCROW_IDL_SHA256 = 'd295b7c74ff9a2ac758e24cc9e7d32d3c09d5943e1b137ef67f4f2692993c70e';
+const ESCROW_IDL_SHA256 = 'cc2761266dcf8335a17562129de040805f37f69cfe654f5be472045ba7bfcd51';
 
 describe('WKH-227 AC-2/AC-3 · escrow IDL canonical hash lock', () => {
   it('AC-2: el IDL vendoreado canonicaliza al hash pinneado', () => {
