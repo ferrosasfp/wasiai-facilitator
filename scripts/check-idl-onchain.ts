@@ -54,12 +54,42 @@ if (!rpcUrl) {
 
 const connection = new Connection(rpcUrl, 'confirmed');
 
+/**
+ * Reintentos: política de TRANSPORTE, a propósito acá y no en el clasificador, que se queda
+ * puro y testeable sin red.
+ *
+ * Por qué existen: el desenlace UNREACHABLE no bloquea (exit 2), así que cada hipo de devnet
+ * que llegue hasta él gasta una corrida del control sin decir nada. Reintentar acá hace que
+ * UNREACHABLE signifique "devnet no contesta hace 3 intentos", no "se perdió un paquete".
+ *
+ * ⚠️ Esto ACOTA el problema, no lo cierra: un UNREACHABLE PERSISTENTE (la env borrada, el
+ * endpoint dado de baja) sigue siendo exit 2 y sigue sin bloquear, y podría quedarse así
+ * días sin que nadie lo mire. Cerrarlo de verdad pide estado entre corridas — comparar
+ * contra la última verificación exitosa — y eso no está hecho. Queda dicho, no tapado.
+ *
+ * `null` (cuenta ausente) NO se reintenta: es una RESPUESTA de la cadena, no un fallo.
+ */
+const MAX_ATTEMPTS = 3;
+const BACKOFF_MS = 2000;
+
 const verdict = await checkEscrowIdlOnchain({
   programId,
   pinnedSha256: canonicalSha256(escrowIdl),
   getAccountInfo: async (address: PublicKey) => {
-    const info = await connection.getAccountInfo(address);
-    return info === null ? null : { data: info.data };
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        const info = await connection.getAccountInfo(address);
+        return info === null ? null : { data: info.data };
+      } catch (err) {
+        lastErr = err;
+        if (attempt < MAX_ATTEMPTS) {
+          console.error(`  intento ${attempt}/${MAX_ATTEMPTS} falló, reintentando…`);
+          await new Promise((r) => setTimeout(r, BACKOFF_MS * attempt));
+        }
+      }
+    }
+    throw lastErr;
   },
 });
 

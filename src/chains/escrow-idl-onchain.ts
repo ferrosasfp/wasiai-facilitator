@@ -18,10 +18,9 @@
  * Un guard cuyo veredicto cambia sin que el repo cambie es, por definición, un guard que
  * está mirando afuera. AC-2 no puede hacer eso ni queriendo: sus dos puntas se mueven juntas.
  *
- * ⚠️ LA CADENA ENVEJECE SOLA — y el corolario incómodo es que el verde de hoy no dice nada
- * del de mañana. El mismo día en que se escribió esto el veredicto cambió dos veces.
- * El veredicto puede cambiar sin que nadie
- * edite una línea (alguien republica el IDL, o despliega otro binario). Por eso NO vive
+ * ⚠️ LA CADENA ENVEJECE SOLA, y el corolario incómodo es que el verde de hoy no dice nada
+ * del de mañana: alguien republica el IDL o despliega otro binario, y el veredicto cambia
+ * sin que nadie edite una línea acá. Por eso NO vive
  * en la suite de vitest gateada por commit: vive en `scripts/check-idl-onchain.ts`, que
  * se corre aparte. Lo que sí está en la suite es la CLASIFICACIÓN de acá abajo, con
  * dobles y sin red, para que la lógica de tres desenlaces no se pudra en silencio.

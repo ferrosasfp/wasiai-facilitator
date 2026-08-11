@@ -137,9 +137,15 @@ describe('WKH-227 AC-2/AC-3 · escrow IDL canonical hash lock', () => {
     }
   });
 
+  // ⚠️ AC-3 NO es "la fuente de verdad", y llamarlo así fue parte del problema: compara
+  // contra OTRA COPIA en OTRO REPO, y se saltea entero cuando el sibling no está — que es
+  // como corre la CI (`ci.yml` clona sólo este repo). Un `SKIPPED` no es cobertura. Se deja
+  // porque en la máquina de quien re-vendoriza atrapa el error en el acto, pero el brazo que
+  // le pregunta al BINARIO DESPLEGADO es `scripts/check-idl-onchain.ts`, y corre por reloj
+  // en `.github/workflows/idl-onchain-drift.yml`, no acá.
   const SIBLING = path.resolve(process.cwd(), '../solana-programs/target/idl/escrow.json');
   (existsSync(SIBLING) ? it : it.skip)(
-    'AC-3: coincide con solana-programs (fuente de verdad)',
+    'AC-3 (best-effort, se SALTEA sin el repo hermano): coincide con la copia de solana-programs',
     () => {
       const idl: unknown = JSON.parse(readFileSync(SIBLING, 'utf8'));
       expect(canonicalSha256(idl)).toBe(ESCROW_IDL_SHA256);
