@@ -154,7 +154,7 @@ Everything is configured through environment variables. `.env.example` documents
 | `OPERATOR_PRIVATE_KEY` | Signer that submits EVM settlements and pays gas |
 | `FACILITATOR_API_KEYS` | Comma-separated caller keys, required in production, sent as `Authorization: Bearer <key>` |
 | `<CHAIN>_RPC_URL` / `<CHAIN>_ENABLED` | Per-chain RPC endpoint and opt-in flag |
-| `REDIS_URL` | Rate limits, idempotency and the spending caps. **What breaks when it is unreachable is not uniform, and the direction is per rail** — see the table below |
+| `REDIS_URL` | Rate limits, the "did we already handle this one?" checks, and the spending caps. **What breaks when it is unreachable is not the same everywhere, and each rail breaks in its own direction** — see the table below |
 | `CORS_ALLOWED_ORIGINS` | Comma-separated allow-list. Set an explicit list in production |
 | `METRICS_TOKEN` | Gates `GET /metrics`. Unset makes the endpoint fail closed |
 | `SETTLE_CAP_*`, `CB_*`, `RATE_LIMIT_*` | Daily settle cap, circuit breaker and rate-limit tuning |
@@ -193,9 +193,9 @@ Solana: it is scoped to the EVM inflight lock and its safety argument is the EVM
 sponsored deposit.** `POST /methods/solana-sponsor` starts returning 429 while Redis is down.
 On 2026-08-11 this was observed live: `/health` reported `degraded: true` with
 `redis: unreachable`, and about twenty minutes later the same probe reported `degraded: false`
-with `redis: ok`, so it flaps rather than staying down. Nothing surfaces that to the person
-using the app; the only signal is a walkthrough that fails at the deposit. `GET /health` is
-the place to look first when a sponsored deposit rejects for no apparent reason.
+with `redis: ok`, so it comes and goes rather than staying down. **Nobody using the app is told
+any of this**: the only sign is a run that fails at the deposit step. So when a sponsored deposit
+gets rejected for no obvious reason, check `GET /health` first.
 
 ## Security
 
