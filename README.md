@@ -73,15 +73,15 @@ Chain adapters are opt-in. Kite Ozone testnet registers by default; every other 
 | Solana devnet | `solana:devnet` | SPL USDC | Off | Verify-only, wallet broadcasts | Runs on devnet |
 | Solana mainnet | `solana:mainnet` | SPL USDC | Off | Verify-only, wallet broadcasts | Adapter exists, ships disabled |
 
-⚠️ **That `Default` column describes the shipped defaults, not the reference deployment, and on
-2026-08-11 the two disagreed on one row.** The `curl .../supported` this README offers above returns
-`eip155:43114` — Avalanche **C-Chain mainnet**, not Fuji — registered, with `rpc: ok` and its breaker
-`CLOSED`. So `AVALANCHE_MAINNET_ENABLED=true` is set in that deployment while the table below says
-"Adapter exists, ships disabled". Both statements are true of different things, and a reader who runs
-the documented command sees a real-money network where the table says disabled. **This paragraph is a
-dated reading, not a property**: re-run the command rather than trusting it. What was *not* measured
-that day, and what decides whether it matters: whether the operator wallet holds AVAX on 43114, and
-whether the real-destination gate rejects a settle there.
+⚠️ **The `Default` column describes the shipped defaults, not the reference deployment.** On
+2026-08-11 the two disagreed: the `curl .../supported` returned `eip155:43114` — Avalanche C-Chain
+mainnet, not Fuji — with `rpc: ok` and breaker `CLOSED`. That meant `AVALANCHE_MAINNET_ENABLED=true`
+was set while the table said "ships disabled". Both statements were true of different things.
+On 2026-08-14 the flag was disabled in production, and now `/supported` returns only Fuji (43113).
+The table and the deployment now align. **This paragraph is a dated reading, not a property**: re-run
+the command rather than trusting it. When Avalanche mainnet was enabled, this README did not measure
+whether the operator wallet held AVAX on 43114, or whether the destination gate would accept a settle
+there. Those facts decide whether disabling the flag matters.
 
 A mainnet should only be enabled after the matching testnet has been validated and, for EVM, after the operator wallet holds that chain's native gas. Solana needs no operator gas for `/settle`, since it does not broadcast; the sponsorship path does need a funded fee-payer.
 
