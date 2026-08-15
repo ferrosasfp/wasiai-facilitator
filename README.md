@@ -58,10 +58,17 @@ Adding a network means writing one adapter and registering it. Nothing in `core/
    kite.ts   avalanche.ts   base.ts              solana-adapter.ts
    (2368/2366) (43113/43114) (84532/8453)        (devnet/mainnet)
 
-   Side paths, Solana only, opt-in and off by default:
+   Side paths, Solana only, opt-in and off by default (three, not two):
      POST /solana/sponsor          fee-payer co-signs a validated tx and broadcasts
      POST /solana/escrow/release   release authority co-signs a validated release
+     POST /solana/payout           facilitator ORIGINATES a transfer from its own ATA
 ```
+
+The third one is not a variant of the other two. On `/settle` and on the first two side paths the
+facilitator is a **witness or a co-signer** of a payment somebody else originated. On
+`POST /solana/payout` it is the **treasurer**: it builds the transfer, signs it with its own key and
+spends from its own token account. That is why it is a dedicated route with its own key and its own
+caps, and never a mode of `/settle` — the head of `src/routes/solana-payout.ts` argues the point.
 
 ## Supported chains
 
@@ -92,9 +99,9 @@ property**: re-run the command rather than trusting it. When Avalanche mainnet w
 whether the operator wallet held AVAX on 43114, or whether the destination gate would accept a settle
 there. Those facts decide whether disabling the flag matters.
 
-A mainnet should only be enabled after the matching testnet has been validated and, for EVM, after the operator wallet holds that chain's native gas. Solana needs no operator gas for `/settle`, since it does not broadcast; the sponsorship path does need a funded fee-payer.
+A mainnet should only be enabled after the matching testnet has been validated and, for EVM, after the operator wallet holds that chain's native gas. Solana needs no operator gas for `/settle`, since it does not broadcast. The side paths do: sponsorship needs a funded fee-payer, and payout needs both SOL for fees and a token balance to spend, which it pre-checks read-only before it claims anything.
 
-The Solana fee-payer sponsorship and the escrow release path are under active construction against devnet. Each is registered only when its flag is on and its key parses, so on a default deployment neither is present.
+The Solana fee-payer sponsorship, the escrow release path and the payout path are under active construction against devnet. Each is registered only when its flag is on and its key parses, so on a default deployment none of the three is present. `POST /solana/payout` has one gate more than the other two: its key must also be a *different* key from the fee-payer's and the release authority's, and a collision turns the route off rather than merging the two powers (`src/infra/solana-payout-operator.ts`).
 
 ## API
 
@@ -110,14 +117,24 @@ x402 spec-compliant. `/verify` and `/settle` require a facilitator API key in pr
 | POST | `/settle` | Settle: broadcast on EVM, confirm and record on Solana | EVM only |
 | POST | `/solana/sponsor` | Co-sign a validated transaction as fee-payer and broadcast | Yes |
 | POST | `/solana/escrow/release` | Co-sign a validated escrow release and broadcast | Yes |
+| POST | `/solana/payout` | Originate an SPL transfer from the facilitator's own account | Yes |
 
-The last two are registered only when explicitly enabled.
+That is the whole surface: nine routes, and `src/routes/` registers no others. The last three are
+registered only when explicitly enabled, so on any given deployment a POST to them may 404 — which
+is the intended answer for "off", not a bug.
 
-Quick check against the live deployment:
+Rather than trust the list, ask the deployment. `/supported` publishes `dedicatedRoutes`, and that
+array is derived from the live router, not from a hand-kept constant:
 
 ```bash
 curl https://wasiai-facilitator-production.up.railway.app/supported
 ```
+
+Read on 2026-08-15 it returned `["POST /solana/sponsor","POST /solana/escrow/release"]` — so on the
+reference deployment sponsorship and escrow release are on and **payout is off**, which a probe
+confirms: `POST /solana/payout` there answers 404 while `POST /solana/sponsor` answers 401. Note the
+three outcomes, not two: the field *absent* means the facilitator is older than this feature and is
+not telling you anything, which is different from an empty array.
 
 ## Quick start
 
@@ -170,6 +187,7 @@ Everything is configured through environment variables. `.env.example` documents
 | `SOLANA_RPC_URL`, `SOLANA_USDC_MINT` | Register the Solana adapter. Both are required, otherwise it does not register |
 | `SOLANA_FEE_PAYER_SPONSOR_ENABLED`, `SOLANA_FEE_PAYER_PRIVATE_KEY`, `SOLANA_SPONSOR_*` | Fee-payer sponsorship: flag, key, per-transaction and daily caps |
 | `SOLANA_ESCROW_RELEASE_ENABLED`, `SOLANA_ESCROW_PROGRAM_ID`, `SOLANA_ESCROW_RELEASE_*` | Escrow release path |
+| `SOLANA_PAYOUT_ENABLED`, `SOLANA_PAYOUT_OPERATOR_SECRET_KEY`, `SOLANA_PAYOUT_*` | Payout path: flag, its own operator key (which must differ from the other two), per-payout and daily caps, funding floor, rate limit and claim lease. All eight are documented in `.env.example` |
 
 Private keys, operator addresses and secrets belong in the deployment environment, never in code and never in this repo.
 
@@ -216,7 +234,8 @@ The service signs transactions that move funds, so it is built to fail safe.
 - **Simulate before settle.** Every EVM transaction goes through `simulateContract` before it is submitted.
 - **Boot-time domain check.** Startup refuses to proceed if a locally computed EIP-712 domain separator drifts from the token's on-chain `DOMAIN_SEPARATOR()`.
 - **Double-spend defense.** An idempotency cache and an in-flight lock reduce double dispatch. On EVM the on-chain EIP-3009 nonce is the definitive guard: a replay with the same nonce reverts. On Solana the guard is a durable `UNIQUE(signature)` barrier, and it is fail-closed.
-- **The fee-payer never signs blind.** Sponsorship and escrow release both validate the exact instruction shape before the key touches the transaction, and both reject rather than sign when anything is off. The escrow beneficiary is always read from on-chain state, never from the request body.
+- **No key ever signs blind.** All three Solana signing paths — sponsorship, escrow release and payout — validate the exact instruction shape before the key touches the transaction, and all three reject rather than sign when anything is off. The escrow beneficiary is always read from on-chain state, never from the request body.
+- **Separated instruments.** The sponsorship fee-payer, the escrow release authority and the payout operator are three distinct keys, and the separation is enforced in code, not asked for in a comment: if two of them resolve to the same pubkey, the payout route does not register. The blast radius is the reason — the fee-payer holds cents of SOL and co-signs network cost, while the payout operator owns the account holding the settlement balance.
 - **Per-chain circuit breakers.** An RPC outage on one chain does not affect the others.
 - **Caps and limits.** A daily settle cap, per-transaction and per-day sponsorship caps, and rate limiting per IP before auth and per key after auth.
 - **Hardened defaults.** Helmet headers, CORS allow-list, token-gated metrics, and hex scrubbing in logs.
