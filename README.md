@@ -164,9 +164,10 @@ The server listens on port 3002 by default.
 ```bash
 npm test               # vitest, whole suite (the run prints the file/test counts)
 npm run test:coverage  # with coverage
-npm run typecheck      # tsc --noEmit
+npm run typecheck      # tsc --noEmit, src/ only
+npm run typecheck:tests # the test tsconfig, which is a SEPARATE program
 npm run lint           # eslint, zero warnings allowed
-npm run qa             # typecheck + lint + format check + tests
+npm run qa             # typecheck + typecheck:tests + lint + format check + tests
 ```
 
 Other scripts: `npm run build` (tsc), `npm start` (run the build), `npm run format`, `npm run security:audit` (`npm audit --audit-level=high`), `npm run ops:check-gas` (report the operator wallet balance on each enabled chain).
@@ -248,7 +249,7 @@ The threat model is written up in [`doc/architecture/SECURITY.md`](doc/architect
 - [`doc/architecture/CHAIN-ADAPTIVE.md`](doc/architecture/CHAIN-ADAPTIVE.md): the adapter and registry design, and how to add a network
 - [`doc/architecture/X402-CONFORMANCE.md`](doc/architecture/X402-CONFORMANCE.md): what the service implements from the x402 spec, and where it deviates on purpose
 - [`doc/architecture/SECURITY.md`](doc/architecture/SECURITY.md): threat model and mitigations
-- [`doc/openapi.yaml`](doc/openapi.yaml): the API contract
+- [`doc/openapi.yaml`](doc/openapi.yaml): the API contract, and what `GET /openapi.json` serves verbatim. It is OpenAPI 3.1 and covers **four** of the nine routes — `/verify`, `/settle`, `/supported`, `/health` — so it is the contract for the x402 surface, not a full route inventory. For that, use the table under [API](#api) or the live `dedicatedRoutes`
 - [`OWNERS.md`](OWNERS.md): module boundaries, which layer may import which
 
 ## Deployment
