@@ -82,9 +82,13 @@ Chain adapters are opt-in. Kite Ozone testnet registers by default; every other 
 2026-08-11 the two disagreed: the `curl .../supported` returned `eip155:43114` — Avalanche C-Chain
 mainnet, not Fuji — with `rpc: ok` and breaker `CLOSED`. That meant `AVALANCHE_MAINNET_ENABLED=true`
 was set while the table said "ships disabled". Both statements were true of different things.
-On 2026-08-14 the flag was disabled in production, and now `/supported` returns only Fuji (43113).
-The table and the deployment now align. **This paragraph is a dated reading, not a property**: re-run
-the command rather than trusting it. When Avalanche mainnet was enabled, this README did not measure
+On 2026-08-14 the flag was disabled in production. Read again on 2026-08-15, `43114` is gone and
+`/supported` returns **four** networks, none of them mainnet: `eip155:2368` Kite Testnet,
+`eip155:43113` Avalanche Fuji, `eip155:84532` Base Sepolia and `solana:devnet`. The claim that
+matters is "no mainnet is registered", and it is the one to re-check — an earlier version of this
+paragraph said `/supported` returned "only Fuji", which was never true of the response, only of the
+Avalanche pair. The table and the deployment now align. **This paragraph is a dated reading, not a
+property**: re-run the command rather than trusting it. When Avalanche mainnet was enabled, this README did not measure
 whether the operator wallet held AVAX on 43114, or whether the destination gate would accept a settle
 there. Those facts decide whether disabling the flag matters.
 
@@ -195,7 +199,10 @@ top of the file. Do not read the CD-7 fail-open comment in `idempotency.ts` as c
 Solana: it is scoped to the EVM inflight lock and its safety argument is the EVM nonce.
 
 ⚠️ **And because the Solana caps fail closed, a Redis outage does not leak money, it stops the
-sponsored deposit.** `POST /methods/solana-sponsor` starts returning 429 while Redis is down.
+sponsored deposit.** `POST /solana/sponsor` starts returning 429 while Redis is down, and
+`POST /solana/payout` does the same on the rail below it. (An earlier version of this line called
+the route `POST /methods/solana-sponsor`, which does not exist and answers 404 — the path in the
+API table above is the real one, and the two disagreed inside this same file.)
 On 2026-08-11 this was observed live: `/health` reported `degraded: true` with
 `redis: unreachable`, and about twenty minutes later the same probe reported `degraded: false`
 with `redis: ok`, so it comes and goes rather than staying down. **Nobody using the app is told
