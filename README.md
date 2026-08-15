@@ -10,7 +10,12 @@ The point of the service is that the caller does not need to know which chain it
 
 WasiAI is a neutral, open, multi-chain payment layer for the agent economy, LATAM-first. The agent economy tends to fragment into walled gardens; WasiAI is the neutral ground: open standards, settlement on each agent's own chain, no lock-in.
 
-This repo is one component of that layer, the settlement piece. It is infrastructure, not the whole layer and not an application. The gateway that routes and orchestrates agent-to-agent calls lives in [`wasiai-a2a-gateway`](https://github.com/ferrosasfp/wasiai-a2a-gateway) and consumes this facilitator to settle payments.
+This repo is one component of that layer, the settlement piece. It is infrastructure, not the whole layer and not an application. The gateway that routes and orchestrates agent-to-agent calls lives in [`wasiai-a2a`](https://github.com/ferrosasfp/wasiai-a2a) and consumes this facilitator to settle payments.
+
+⚠️ **If you were sent to `wasiai-a2a-gateway`, that is the wrong repo.** It still exists and still
+resolves, so nothing reports it as broken, but it was last pushed on 2026-07-03 and predates every
+Solana change described below. The live gateway is `wasiai-a2a` (last push 2026-08-15). The check is
+`gh api repos/<owner>/<repo> --jq .pushed_at` on both, not whether the link opens.
 
 ## The multi-chain part
 
@@ -226,7 +231,7 @@ The reference deployment runs as a persistent Node process on Railway. Build wit
 
 ## Ecosystem
 
-- [`wasiai-a2a-gateway`](https://github.com/ferrosasfp/wasiai-a2a-gateway): the neutral A2A payment gateway that consumes this facilitator
+- [`wasiai-a2a`](https://github.com/ferrosasfp/wasiai-a2a): the neutral A2A payment gateway that consumes this facilitator. It is the caller of `POST /solana/payout` (`src/adapters/solana/facilitator-settle.ts` on that side). The older `wasiai-a2a-gateway` repo is not it — see the warning under [Where this fits](#where-this-fits)
 - [WasiAI](https://wasiai.io): project landing
 
 ## License
