@@ -203,6 +203,29 @@ export const EnvSchema = z
       .enum(['true', 'false'])
       .default('false')
       .transform((v) => v === 'true'),
+    // WKH-357 / HU-064 — durable-nonce deposits (deep-link signing). OFF by
+    // default. Same enum-transform as its neighbour above and for the same reason
+    // (NOT z.coerce.boolean(), which would read 'false' as truthy), and OUTSIDE
+    // `.superRefine` so an unset config keeps the testnet-only boot byte-identical.
+    //
+    // WHAT `true` TURNS ON, exactly: CR-1 stops rejecting a tx whose ix 0 is an
+    // `AdvanceNonceAccount` and starts validating it against a pinned shape
+    // (Check 2n), Guard A skips that ix when locating the `deposit`, and the
+    // blockhash-freshness pre-checks are skipped for those txs (their blockhash is
+    // a nonce value, which `isBlockhashValid` correctly reports as not fresh).
+    //
+    // WHAT `true` DOES NOT DO: it does not widen any cap, does not carve any
+    // exception into Check 5 (the fee-payer still may not be referenced by ANY ix,
+    // nonce included), and does not make the flag ON path accept anything the
+    // pinned shape does not match — every deviation is a fail-closed reject.
+    //
+    // ⚠️ Turning this on ALONE changes nothing observable: nobody sends txs with a
+    // nonce until chaski-v3's deep-link path ships. See
+    // doc/deploy/wkh-357-durable-nonce.md for the ordering.
+    SOLANA_SPONSOR_DURABLE_NONCE_ENABLED: z
+      .enum(['true', 'false'])
+      .default('false')
+      .transform((v) => v === 'true'),
     // Whitelist programId for the `deposit` ix (CD-4). Public on-chain address.
     // Default derived from `escrowIdl.address` — the SINGLE source (CD-15).
     SOLANA_ESCROW_PROGRAM_ID: z.string().min(1).default(ESCROW_PROGRAM_ID_DEFAULT),

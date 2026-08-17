@@ -44,6 +44,8 @@ const CFG: Cr1Config = {
   usdcMint: '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU',
   // Compartido con el `deposit` (Check 4d). `validateReleaseForSponsor` NO lo lee.
   releaseAuthority: undefined,
+  // Compartido con el `deposit` (Check 2n, WKH-357). `validateReleaseForSponsor` NO lo lee.
+  durableNonceEnabled: false,
 };
 
 // Fixed identities shared between the on-chain `state` and the tx accounts.

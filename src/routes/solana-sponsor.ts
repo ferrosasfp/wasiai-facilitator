@@ -209,6 +209,9 @@ export const solanaSponsorRoute: FastifyPluginAsync = async (app) => {
     // La authority que el `deposit` graba en el escrow tiene que ser la nuestra, o ese
     // depósito nace irreleaseable (Check 4d). Ausente ⇒ check desarmado, avisado arriba.
     releaseAuthority,
+    // WKH-357 — ¿aceptamos un `nonceAdvance` en ix 0 (depósito por enlace)? `false`
+    // no desarma nada: rechaza con el veredicto de siempre (PROGRAM_NOT_WHITELISTED).
+    durableNonceEnabled: env.SOLANA_SPONSOR_DURABLE_NONCE_ENABLED,
   };
   const dailyCapLamports = BigInt(env.SOLANA_SPONSOR_DAILY_MAX_LAMPORTS);
   const maxFeeLamports = cr1cfg.maxFeeLamports;

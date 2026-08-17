@@ -37,7 +37,20 @@ import {
 } from './deposit-shape.js';
 
 /** Result type — identical to `SponsorTxValidator`'s return (CD-11). */
-export type Cr1Result = { ok: true; feeUpperBoundLamports: bigint } | { ok: false; reason: string };
+export type Cr1Result =
+  | {
+      ok: true;
+      feeUpperBoundLamports: bigint;
+      /**
+       * WKH-357 — present ONLY when Check 2n recognized and fully validated an
+       * `AdvanceNonceAccount` at ix 0 (which requires `cfg.durableNonceEnabled`).
+       * Absent on every other success, so the flag-OFF result object is
+       * byte-identical to the pre-WKH-357 one. `broadcast.ts` reads it to skip the
+       * blockhash-freshness probes, which cannot judge a nonce value.
+       */
+      durableNonce?: true;
+    }
+  | { ok: false; reason: string };
 
 /** Runtime-configurable bounds (from env; passed by the route). */
 export interface Cr1Config {
@@ -76,6 +89,28 @@ export interface Cr1Config {
    * `validateReleaseForSponsor` comparte este tipo y NO lo lee.
    */
   readonly releaseAuthority: string | undefined;
+  /**
+   * WKH-357 — ¿esta instancia acepta depósitos con `AdvanceNonceAccount` en ix 0?
+   * (`SOLANA_SPONSOR_DURABLE_NONCE_ENABLED`).
+   *
+   * ⚠️ QUÉ HACE `false`, dicho con precisión: **no desarma un check, RECHAZA**. Es el
+   * criterio de `usdcMint` (ausente ⇒ Check 4c rechaza) y NO el de `releaseAuthority`
+   * (ausente ⇒ el check se desarma), y los dos están contrastados arriba en este
+   * mismo tipo. Con `false`, una tx cuya ix 0 es un `nonceAdvance` cae por el camino
+   * de SIEMPRE: la `nonceAdvance` queda dentro de `businessIx`, es `businessIx[0]`, su
+   * programId es el System Program y no el escrow ⇒ `PROGRAM_NOT_WHITELISTED`. Ni una
+   * línea nueva se ejecuta y el veredicto es el de antes de esta HU (AC-8).
+   *
+   * ⚠️ Y NO ES OPCIONAL A PROPÓSITO. Es `boolean` requerido, no `boolean | undefined`,
+   * porque así el compilador lleva a quien lo agregue a **los 4** literales de
+   * `Cr1Config` que hay en el repo — incluidos los 2 que no son del `deposit`
+   * (`routes/solana-escrow.ts`, `__tests__/unit/cr1-release.test.ts`). Un campo
+   * opcional los habría dejado en `undefined` en silencio.
+   *
+   * `validateReleaseForSponsor` comparte este tipo y NO lo lee: un release nunca
+   * lleva `nonceAdvance` (lo arma el facilitator, no una billetera tras un salto).
+   */
+  readonly durableNonceEnabled: boolean;
 }
 
 /** Base network fee per signature (lamports) — the current Solana constant. */

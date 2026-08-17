@@ -195,6 +195,11 @@ export const solanaEscrowReleaseRoute: FastifyPluginAsync = async (app) => {
     // el `EscrowState` on-chain en el Step 4b de esta misma ruta. Va `undefined` para no
     // sugerir que acá hay un guard que no existe.
     releaseAuthority: undefined,
+    // Idem: campo compartido con el `deposit` (Check 2n de `validateDepositForSponsor`).
+    // `validateReleaseForSponsor` NO lo lee. Va `false` y NO la env a propósito: un
+    // release lo arma el facilitator y nunca lleva `nonceAdvance`, así que pasar la env
+    // acá sugeriría un camino de nonce en esta ruta que no existe.
+    durableNonceEnabled: false,
   };
 
   app.post(

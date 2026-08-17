@@ -57,12 +57,44 @@ export type SponsorErrorCode =
  * Injected structural validator (CD-11). Generic contract reused by every
  * sponsored instruction (deposit today, release in HU-SOL-13). Receives the
  * PARSED legacy transaction + the fee-payer pubkey; returns the derived fee
- * upper bound (checks 1-5 OK) or a reject reason. STABLE — do not change.
+ * upper bound (checks 1-5 OK) or a reject reason.
+ *
+ * ⚠️ THIS TYPE SAID "STABLE — do not change" AND WKH-357 CHANGED IT. What was
+ * added: the OPTIONAL `durableNonce?: true` on the success branch. Why that keeps
+ * the contract stable in the sense the old line meant:
+ *   - it is additive and optional, so the three implementers
+ *     (`validateDepositForSponsor`, `validateReleaseForSponsor`, `validatePayoutTx`)
+ *     keep type-checking WITHOUT a single edit — only CR-1 ever sets it;
+ *   - a validator that never sets it produces `undefined`, and every read site
+ *     treats `undefined` exactly as `false` (see `saltearFrescura` below), so the
+ *     existing behaviour is byte-identical;
+ *   - it carries no new authority: it does NOT say "sign this", it says "this tx's
+ *     blockhash is a durable-nonce value, so do not judge it for freshness".
+ * The precedent for widening this interface additively is `CosignOpts.onSigned`
+ * below, added by WKH-302 with the same "callers that do not pass it are
+ * unaffected" reasoning. What is still NOT allowed: changing the SHAPE of the
+ * existing two branches, or making a new field required.
  */
 export type SponsorTxValidator = (
   tx: Transaction,
   feePayerPubkey: PublicKey,
-) => { ok: true; feeUpperBoundLamports: bigint } | { ok: false; reason: string };
+) =>
+  | {
+      ok: true;
+      feeUpperBoundLamports: bigint;
+      /**
+       * Set by CR-1 ONLY when it recognized (and fully validated, Check 2n) an
+       * `AdvanceNonceAccount` as ix 0 and the durable-nonce flag is ON. `undefined`
+       * on every other path, including the flag-OFF path.
+       *
+       * ⛔ This is NOT a "trust me" bit: CR-1 already rejected the tx if the nonce
+       * ix deviated in any way. It exists because `broadcast.ts` must not parse
+       * instruction shapes (see the file header) — the decision is made in CR-1 and
+       * travels here as a boolean.
+       */
+      durableNonce?: true;
+    }
+  | { ok: false; reason: string };
 
 export interface CosignOpts {
   readonly feePayerKeypair: Keypair;
