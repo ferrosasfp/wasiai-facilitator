@@ -352,4 +352,45 @@ describe('cosignAndBroadcast primitive', () => {
     expect(r.ok).toBe(true);
     expect(released).toEqual([]);
   });
+
+  // ── WKH-357 / AC-5 — el salteo de frescura para una tx con nonce durable ────
+  //
+  // El validador que devuelve `durableNonce: true`. Ojo con lo que este doble NO
+  // prueba: acá el booleano se inyecta a mano, así que estos dos tests miden el
+  // COMPORTAMIENTO DE `broadcast.ts` dado el booleano, no que CR-1 lo produzca. Que
+  // CR-1 lo produzca (y sólo con la bandera prendida y la forma exacta) lo miden
+  // T-10..T-14 en `solana-sponsor.durable-nonce.test.ts`. Son dos afirmaciones
+  // distintas y ninguna cubre a la otra.
+  const nonceValidator: SponsorTxValidator = () => ({
+    ok: true,
+    feeUpperBoundLamports: 5000n,
+    durableNonce: true,
+  });
+
+  it('★ T-15 (AC-5): durableNonce → se co-firma y transmite aunque isBlockhashValid diga false, con 0 llamadas a la sonda', async () => {
+    // `false` es la respuesta CORRECTA del RPC para el valor de una cuenta de nonce:
+    // no está entre los ~150 blockhashes recientes. Sin el salteo, este `false`
+    // rechazaría todo depósito por enlace.
+    h.isBlockhashValidImpl.mockResolvedValue({ value: false });
+    const feePayerKp = Keypair.generate();
+    const tx = buildSignedTxBase64(feePayerKp, Keypair.generate());
+    const r = await cosignAndBroadcast(tx, { ...baseOpts(feePayerKp), validate: nonceValidator });
+    expect(r.ok).toBe(true);
+    expect(h.sendRawTransactionImpl).toHaveBeenCalledTimes(1);
+    // Lo que separa "salteamos la sonda" de "la sonda dijo algo que ignoramos":
+    // la sonda no se llama NI UNA VEZ.
+    expect(h.isBlockhashValidImpl).toHaveBeenCalledTimes(0);
+  });
+
+  it('★ T-16 (AC-5): SIN durableNonce, la sonda se sigue llamando el MISMO número de veces que antes de WKH-357', async () => {
+    // El número no está copiado de ningún documento: es el que produce el camino
+    // feliz de hoy (Step 5 pre-firma + la re-verificación al tope del 1er intento),
+    // y se afirma como igualdad exacta para que el salteo no pueda "filtrarse" al
+    // camino sin nonce sin ponerse rojo.
+    const feePayerKp = Keypair.generate();
+    const tx = buildSignedTxBase64(feePayerKp, Keypair.generate());
+    const r = await cosignAndBroadcast(tx, baseOpts(feePayerKp));
+    expect(r.ok).toBe(true);
+    expect(h.isBlockhashValidImpl).toHaveBeenCalledTimes(2);
+  });
 });

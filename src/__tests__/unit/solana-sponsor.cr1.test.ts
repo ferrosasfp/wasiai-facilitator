@@ -62,6 +62,9 @@ const CFG: Cr1Config = {
   maxFeeLamports: 100_000n,
   usdcMint: USDC_MINT_PK.toBase58(),
   releaseAuthority: undefined,
+  // WKH-357: apagada, que es el estado de produccion. Los vectores preexistentes de
+  // este archivo NO cambian de color por esto — y que no cambien ES la mitad de AC-8.
+  durableNonceEnabled: false,
 };
 
 /** La misma config, pero en una instancia que SI tiene la llave del release. */

@@ -34,15 +34,17 @@
  */
 
 import type { Transaction, TransactionInstruction } from '@solana/web3.js';
-import { ComputeBudgetProgram } from '@solana/web3.js';
+import { ComputeBudgetProgram, PublicKey } from '@solana/web3.js';
 import { utils } from '@coral-xyz/anchor';
 import {
+  ADVANCE_NONCE_DISCRIMINATOR,
   AMOUNT_OFFSET,
   DEPOSIT_ACCOUNT_INDEX,
   DEPOSIT_DATA_LEN,
   DEPOSIT_DISCRIMINATOR,
   REMITTANCE_ID_LEN,
   REMITTANCE_ID_OFFSET,
+  SYSTEM_PROGRAM_ID,
 } from './deposit-shape.js';
 
 export interface SponsorClaims {
@@ -84,22 +86,64 @@ function reject(reason: string, detail?: string): SponsorClaimsResult {
 }
 
 /**
- * Localiza la ix `deposit`. **Espeja** la regla de `cr1.ts:106-115`: el primer
- * instruction que no pertenece a ComputeBudget, por POSICIÓN, sin buscar por
- * discriminador. No la reemplaza ni la modifica (CR-1 sigue corriendo aparte).
+ * Localiza la ix `deposit`. **Espeja** la regla de Check 2 de `cr1.ts` (la línea
+ * `instructions.filter((ix) => !ix.programId.equals(computeBudgetPk))` y el
+ * `businessIx[0]` que le sigue): el primer instruction que no pertenece a
+ * ComputeBudget, por POSICIÓN, sin buscar por discriminador. No la reemplaza ni la
+ * modifica (CR-1 sigue corriendo aparte).
  *
  * Que las dos usen la misma regla no es una coincidencia que se pueda relajar:
  * si este módulo mirara otra ix que la que CR-1 autoriza, el mensaje se armaría
  * sobre una transferencia y la autorización se daría sobre otra.
+ *
+ * WKH-357: y por eso mismo, cuando CR-1 saltea la `nonceAdvance` (Check 2n, sólo con
+ * la bandera prendida), este módulo tiene que saltearla EN EL MISMO caso y con el
+ * MISMO criterio. `allowDurableNonce` es ese caso; con `false` (el default) la función
+ * es la de antes de esta HU, línea por línea.
+ *
+ * ⚠️ Lo que pasa con la bandera APAGADA y una tx con nonce, medido leyendo el orden de
+ * los checks de abajo: `findDepositIx` devuelve la `nonceAdvance`, cuyo `data` tiene 4
+ * bytes, y el primer check que la toca es `data.length < DEPOSIT_DATA_LEN` ⇒
+ * `SHORT_DEPOSIT_DATA`, NO `BAD_DISCRIMINATOR` (que está una línea después y nunca se
+ * evalúa). El 403 es el mismo; el marcador que ve el operador es ése. T-20 lo clava.
  */
-function findDepositIx(tx: Transaction): TransactionInstruction | undefined {
+function findDepositIx(
+  tx: Transaction,
+  allowDurableNonce: boolean,
+): TransactionInstruction | undefined {
   const computeBudgetPk = ComputeBudgetProgram.programId;
-  return tx.instructions.find((ix) => !ix.programId.equals(computeBudgetPk));
+  const candidatas = tx.instructions.filter((ix) => !ix.programId.equals(computeBudgetPk));
+  if (allowDurableNonce) {
+    const primera = candidatas[0];
+    // Se saltea SÓLO la ix 0 y SÓLO si se presenta como un `AdvanceNonceAccount`
+    // (System Program + discriminador `[4,0,0,0]`). La forma COMPLETA la exige CR-1
+    // (Check 2n, n1..n6) y rechaza la tx entera si algo no cuadra, así que este módulo
+    // no re-valida: sólo necesita mirar la misma ix que CR-1 va a autorizar.
+    if (primera !== undefined && esAdvanceNonce(primera)) {
+      return candidatas[1];
+    }
+  }
+  return candidatas[0];
 }
 
-export function extractSponsorClaims(tx: Transaction): SponsorClaimsResult {
+/**
+ * ¿La ix se presenta como un `AdvanceNonceAccount`? Sólo para SALTEARLA. Gemelo del
+ * `esAdvanceNonce` de `cr1.ts`, con las mismas constantes pinneadas de
+ * `deposit-shape.ts`; acá no se valida la forma (eso es de CR-1).
+ */
+function esAdvanceNonce(ix: TransactionInstruction): boolean {
+  if (!ix.programId.equals(new PublicKey(SYSTEM_PROGRAM_ID))) return false;
+  if (ix.data.length < ADVANCE_NONCE_DISCRIMINATOR.length) return false;
+  const disc = Buffer.from(ix.data.subarray(0, ADVANCE_NONCE_DISCRIMINATOR.length));
+  return disc.equals(Buffer.from([...ADVANCE_NONCE_DISCRIMINATOR]));
+}
+
+export function extractSponsorClaims(
+  tx: Transaction,
+  opts?: { readonly allowDurableNonce?: boolean },
+): SponsorClaimsResult {
   try {
-    const deposit = findDepositIx(tx);
+    const deposit = findDepositIx(tx, opts?.allowDurableNonce === true);
     if (deposit === undefined) return reject('NO_BUSINESS_IX');
 
     // ── Forma de la ix ──────────────────────────────────────────────────────

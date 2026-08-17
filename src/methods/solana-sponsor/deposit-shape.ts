@@ -136,3 +136,92 @@ export const REGISTER_ESCROW_ACCOUNT_INDEX = {
 export const REMITTANCE_ID_OFFSET = 8;
 export const REMITTANCE_ID_LEN = 16;
 export const REGISTER_ESCROW_DATA_LEN = REMITTANCE_ID_OFFSET + REMITTANCE_ID_LEN; // 24
+
+/**
+ * WKH-357 / HU-064 — pinned shape of the `AdvanceNonceAccount` System-Program ix that
+ * a DEEP-LINK deposit carries as its instruction 0 (durable nonce). Gated by
+ * `SOLANA_SPONSOR_DURABLE_NONCE_ENABLED`; with the flag OFF nothing below is read.
+ *
+ * These are NOT copied from a doc: MEASURED on 2026-08-17 against the
+ * `@solana/web3.js` in THIS repo's node_modules (^1.98.4) with
+ * `SystemProgram.nonceAdvance({noncePubkey, authorizedPubkey})`, which printed
+ *   data: [4,0,0,0] len: 4
+ *   keys: 0 signer=false writable=true | 1 signer=false writable=false | 2 signer=true writable=false
+ * The twin constants live in `chaski-v3/src/infrastructure/solana/nonce-duradero.ts`
+ * (CD-17), and the chaski side has the test that catches a web3.js bump moving them.
+ *
+ * ⚠️ WHY THIS IS PINNED BY BYTES AND NOT BY CALLING `SystemProgram.nonceAdvance`:
+ * same reason as `DEPOSIT_DISCRIMINATOR` (CD-12) — the validator compares what
+ * ARRIVED on the wire, and building a reference ix here to compare against would
+ * make the guard agree with whatever the library does after an upgrade.
+ */
+export const ADVANCE_NONCE_DISCRIMINATOR: readonly number[] = [4, 0, 0, 0];
+
+/**
+ * EXACT byte length of the `nonceAdvance` data. Compared with `===`, never `>=`.
+ *
+ * ⚠️ The concrete input that a `>=` would let through: a 5-byte data of
+ * `[4,0,0,0,99]` — a well-formed AdvanceNonceAccount discriminator with a trailing
+ * byte the System Program ignores today. `>=` accepts it, `===` rejects it, and the
+ * vector that measures the difference is the "data de 5 bytes" case of T-12.
+ */
+export const ADVANCE_NONCE_DATA_LEN = 4;
+
+/**
+ * The `nonceAdvance` carries EXACTLY these 3 accounts, in this order, and NO
+ * remaining ones.
+ *
+ * ⚠️ The concrete input that an off-by-one would let through: an ix with a 4th
+ * account appended. Since Check 5 sweeps every key of every ix, an extra account is
+ * not a drain by itself — but it is an account the tx can reference that the pinned
+ * shape never authorized, and `!== 3` is what keeps the shape closed. T-12 uses both
+ * a 2-account and a 4-account vector.
+ */
+export const ADVANCE_NONCE_POSITIONAL_ACCOUNTS = 3;
+
+/**
+ * Positional indices into the `nonceAdvance` account list, with the flags each one
+ * MUST carry (measured above):
+ *   0 NONCE               writable, NON-signer  — the nonce account itself
+ *   1 RECENT_BLOCKHASHES  readonly, NON-signer  === SYSVAR_RECENT_BLOCKHASHES_ID
+ *   2 AUTHORITY           SIGNER,   readonly    — must be the deposit's OWN sender
+ *
+ * ⚠️ The concrete input that a swapped NONCE/AUTHORITY index would let through: an ix
+ * whose keys[0] is the sender (signer) and keys[2] the nonce account. Reading the
+ * authority at index 0 would then compare the nonce account against the deposit
+ * sender and reject a legitimate tx; reading it at index 2 on a hand-built ix that
+ * puts a THIRD party's nonce at index 0 is exactly what n6 exists to catch.
+ */
+export const ADVANCE_NONCE_ACCOUNT_INDEX = {
+  NONCE: 0,
+  RECENT_BLOCKHASHES: 1,
+  AUTHORITY: 2,
+} as const;
+
+/**
+ * The recent-blockhashes sysvar the `nonceAdvance` reads (account index 1).
+ *
+ * ⚠️ IT IS THE DIGIT `1`, NOT THE LETTER `l` — "SysvarRecentB**1**ockHashes". Derived from
+ * `SYSVAR_RECENT_BLOCKHASHES_PUBKEY.toBase58()` on 2026-08-17, not typed by hand.
+ *
+ * ⛔ WHAT THE REAL CONTROLS ARE (AR MNR-2 + MNR-3). An earlier version of this docblock
+ * claimed a typo "throws inside `new PublicKey(...)` at module import". **It does not, and
+ * it cannot**: this is a `string` and THIS MODULE HAS NO IMPORTS AT ALL — `grep -n "new
+ * PublicKey" deposit-shape.ts` matches only the sentence you are reading. The two controls
+ * that do exist:
+ *
+ *   1. An `l` (a character base58 has no digit for) is caught at RUNTIME, not at import:
+ *      the `new PublicKey(SYSVAR_RECENT_BLOCKHASHES_ID)` lives inside n4 in `cr1.ts`, under
+ *      the module's top-level `try/catch`, so it degrades to a fail-closed
+ *      `CR1_UNEXPECTED_ERROR` on every deposit with a nonce. Fail-closed, but SILENT: no
+ *      typecheck and no import-time crash sees it.
+ *   2. A wrong-but-VALID base58 (`…1111` → `…1112`, which no exception catches) is caught
+ *      only by the test that compares this literal against `@solana/web3.js`'s own
+ *      `SYSVAR_RECENT_BLOCKHASHES_PUBKEY`, in `solana-sponsor.durable-nonce.test.ts`.
+ *      Before that test existed the mutant SURVIVED the whole suite, because every fixture
+ *      did `new PublicKey(SYSVAR_RECENT_BLOCKHASHES_ID)` and moved WITH the mutant.
+ *
+ * So: control 1 is a runtime degradation, control 2 is the test. Neither is "it throws at
+ * import", and control 2 is the only one that catches the dangerous case.
+ */
+export const SYSVAR_RECENT_BLOCKHASHES_ID = 'SysvarRecentB1ockHashes11111111111111111111';

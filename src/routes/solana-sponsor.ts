@@ -42,7 +42,7 @@
  * salió` (409/422/429 — probado que no se gastó) o `NO SÉ`
  * (`SPONSOR_BROADCAST_UNKNOWN`, 502). El tercero se decide por `CosignResult.sent`,
  * NO por el código del primitivo: `SPONSOR_BROADCAST_EXPIRED` se emite también desde
- * sondas POSTERIORES a un `sendRawTransaction` (broadcast.ts:300-312 y :348-360) y
+ * sondas POSTERIORES a un `sendRawTransaction` (broadcast.ts:372-388 y :425-440) y
  * ahí su `catch` significa "no pude preguntar", no "el blockhash venció". El detalle
  * está en el Step 11.
  *
@@ -197,6 +197,26 @@ export const solanaSponsorRoute: FastifyPluginAsync = async (app) => {
       'sponsorship: deposit-authority check ARMED against the configured release authority',
     );
   }
+  // WKH-357 — la bandera del nonce durable se ve en el arranque, en LAS DOS ramas, con
+  // el mismo criterio que el NOTICE de arriba: `warn` cuando está PRENDIDA (es una
+  // superficie de validación nueva, y quien opera tiene que poder verla sin buscarla) e
+  // `info` cuando está apagada, para que "no veo el aviso" signifique "está apagada" y
+  // no "no miré bien".
+  if (env.SOLANA_SPONSOR_DURABLE_NONCE_ENABLED) {
+    app.log.warn(
+      {
+        setting: 'SOLANA_SPONSOR_DURABLE_NONCE_ENABLED',
+        value: true,
+        check: 'CR1_DURABLE_NONCE',
+      },
+      'NOTICE: sponsored deposits with a durable-nonce `AdvanceNonceAccount` as instruction 0 are ACCEPTED on this instance (WKH-357). The nonce ix is validated against a pinned shape (CR-1 Check 2n) and its authority MUST be the deposit sender; Check 5 still forbids the fee-payer from being referenced by any instruction. Blockhash-freshness pre-checks are SKIPPED for those txs — the runtime is the authority on whether the nonce value is current.',
+    );
+  } else {
+    app.log.info(
+      { check: 'CR1_DURABLE_NONCE', value: false },
+      'sponsorship: durable-nonce deposits are REJECTED (flag off) — a tx with AdvanceNonceAccount at ix 0 falls through the pre-WKH-357 path and is rejected',
+    );
+  }
   const cr1cfg: Cr1Config = {
     escrowProgramId: env.SOLANA_ESCROW_PROGRAM_ID,
     maxComputeUnits: env.SOLANA_SPONSOR_MAX_COMPUTE_UNITS,
@@ -209,6 +229,12 @@ export const solanaSponsorRoute: FastifyPluginAsync = async (app) => {
     // La authority que el `deposit` graba en el escrow tiene que ser la nuestra, o ese
     // depósito nace irreleaseable (Check 4d). Ausente ⇒ check desarmado, avisado arriba.
     releaseAuthority,
+    // WKH-357 — ¿aceptamos un `nonceAdvance` en ix 0 (depósito por enlace)? `false` no
+    // desarma nada: rechaza con el veredicto de siempre, que son DOS enums según la forma
+    // (MEDIDO): `PROGRAM_NOT_WHITELISTED` sin `register_escrow`, y
+    // `NOT_EXACTLY_ONE_BUSINESS_IX` con él, porque Check 2 corta por cantidad antes de
+    // mirar el programId. Ver el docblock de `Cr1Config.durableNonceEnabled`.
+    durableNonceEnabled: env.SOLANA_SPONSOR_DURABLE_NONCE_ENABLED,
   };
   const dailyCapLamports = BigInt(env.SOLANA_SPONSOR_DAILY_MAX_LAMPORTS);
   const maxFeeLamports = cr1cfg.maxFeeLamports;
@@ -322,7 +348,14 @@ export const solanaSponsorRoute: FastifyPluginAsync = async (app) => {
       }
 
       // Step 3 — Guard A, parte 1: qué dice la tx de sí misma (shape + A2 + A3).
-      const claimsResult = extractSponsorClaims(parsedTx.tx);
+      //
+      // 🔴 WKH-357 / CD-13 — LA BANDERA VA A LOS DOS PUNTOS DE CABLEADO, no a uno.
+      // Guard A corre ACÁ y CR-1 corre adentro de `cosignAndBroadcast`, más abajo.
+      // Gatear sólo CR-1 dejaría a Guard A rechazando con 403 ANTES de que CR-1 pudiera
+      // aceptar: la feature no funcionaría y el log culparía al guard equivocado.
+      const claimsResult = extractSponsorClaims(parsedTx.tx, {
+        allowDurableNonce: env.SOLANA_SPONSOR_DURABLE_NONCE_ENABLED,
+      });
       if (!claimsResult.ok) {
         return failSenderProof(claimsResult.reason, claimsResult.detail);
       }
@@ -469,17 +502,17 @@ export const solanaSponsorRoute: FastifyPluginAsync = async (app) => {
       //
       // `CosignResult.sent` existe exactamente para esto y hasta acá esta ruta lo tiraba
       // a la basura. El flag se prende en los DOS resultados posibles de un
-      // `sendRawTransaction` (broadcast.ts:321 cuando devuelve, :331 cuando TIRA — un
+      // `sendRawTransaction` (broadcast.ts:396 cuando devuelve, :406 cuando TIRA — un
       // socket caído no prueba que el nodo no haya aceptado la tx), y de ahí viaja a los
-      // veredictos de las sondas de frescura POSTERIORES al envío (broadcast.ts:300-312
-      // dentro del bucle, :348-366 al agotarlo). El `catch` de esas sondas significa "no
-      // pude preguntar", no "el blockhash venció" — está escrito en broadcast.ts:113-118.
+      // veredictos de las sondas de frescura POSTERIORES al envío (broadcast.ts:372-388
+      // dentro del bucle, :425-440 al agotarlo). El `catch` de esas sondas significa "no
+      // pude preguntar", no "el blockhash venció" — está escrito en broadcast.ts:145-151.
       // Traducir eso a `409 / "Transaction blockhash expired"` afirmaba que no se gastó.
       //
       // ⚠️ QUÉ SE PORTÓ DEL EXEMPLAR Y QUÉ NO. Son dos exemplars y NO son intercambiables:
       // el payout (solana-payout.ts:555-598) resuelve la incógnita optimistamente porque
       // VERIFICA LA FIRMA que persistió (`verifyPayoutSignature`) y por eso puede contestar
-      // un 200 honesto; el release (solana-escrow.ts:509-556) NO lo hace, porque releer el
+      // un 200 honesto; el release (solana-escrow.ts:514-561) NO lo hace, porque releer el
       // estado `Released` probaría que el escrow se liberó y no que lo haya hecho NUESTRA
       // tx. Acá corresponde el SEGUNDO, y por un motivo más fuerte todavía: esta ruta no
       // tiene NADA que verificar. El primitivo sólo devuelve la firma cuando confirmó, así
@@ -542,7 +575,7 @@ export const solanaSponsorRoute: FastifyPluginAsync = async (app) => {
         case 'SPONSOR_DAILY_CAP':
           return fail('SPONSOR_DAILY_CAP', 429, 'Daily sponsorship cap reached', result.reason);
         case 'SPONSOR_BROADCAST_EXPIRED':
-          // Alcanzable SÓLO sin envío previo: la sonda PRE-firma (broadcast.ts:224-232),
+          // Alcanzable SÓLO sin envío previo: la sonda PRE-firma (broadcast.ts:279-290),
           // el blockhash ya vencido antes del primer send, o un `MISSING_BLOCKHASH`. Ahí
           // sí está probado que no se gastó nada y el 409 "rearmá y reintentá" es correcto.
           return fail(

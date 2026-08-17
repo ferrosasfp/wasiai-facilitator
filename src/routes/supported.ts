@@ -44,8 +44,8 @@ import type { DedicatedRouteId } from '../core/supported.js';
  * al path dé 404.
  *
  * El `method`/`url` de cada fila tiene que coincidir con el `app.post(...)` de la ruta
- * (`routes/solana-payout.ts:259`, `routes/solana-sponsor.ts:216`,
- * `routes/solana-escrow.ts:200`). Si divergen, `hasRoute` devuelve `false` para una
+ * (`routes/solana-payout.ts:259`, `routes/solana-sponsor.ts:242`,
+ * `routes/solana-escrow.ts:205`). Si divergen, `hasRoute` devuelve `false` para una
  * ruta que sí está registrada y `T-A1` se pone rojo.
  *
  * ⚠️ CR MNR-1 — ES UN `Record` SOBRE EL UNION, NO UN ARRAY, y eso es lo que lo hace

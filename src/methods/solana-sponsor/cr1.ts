@@ -18,8 +18,17 @@
  * Boundary: imports `@solana/web3.js` + `./deposit-shape.js` only.
  */
 
-import { ComputeBudgetProgram, PublicKey, type Transaction } from '@solana/web3.js';
 import {
+  ComputeBudgetProgram,
+  PublicKey,
+  type Transaction,
+  type TransactionInstruction,
+} from '@solana/web3.js';
+import {
+  ADVANCE_NONCE_ACCOUNT_INDEX,
+  ADVANCE_NONCE_DATA_LEN,
+  ADVANCE_NONCE_DISCRIMINATOR,
+  ADVANCE_NONCE_POSITIONAL_ACCOUNTS,
   ASSOCIATED_TOKEN_PROGRAM_ID,
   AUTHORITY_LEN,
   AUTHORITY_OFFSET,
@@ -33,11 +42,25 @@ import {
   REMITTANCE_ID_LEN,
   REMITTANCE_ID_OFFSET,
   SYSTEM_PROGRAM_ID,
+  SYSVAR_RECENT_BLOCKHASHES_ID,
   TOKEN_PROGRAM_ID,
 } from './deposit-shape.js';
 
 /** Result type — identical to `SponsorTxValidator`'s return (CD-11). */
-export type Cr1Result = { ok: true; feeUpperBoundLamports: bigint } | { ok: false; reason: string };
+export type Cr1Result =
+  | {
+      ok: true;
+      feeUpperBoundLamports: bigint;
+      /**
+       * WKH-357 — present ONLY when Check 2n recognized and fully validated an
+       * `AdvanceNonceAccount` at ix 0 (which requires `cfg.durableNonceEnabled`).
+       * Absent on every other success, so the flag-OFF result object is
+       * byte-identical to the pre-WKH-357 one. `broadcast.ts` reads it to skip the
+       * blockhash-freshness probes, which cannot judge a nonce value.
+       */
+      durableNonce?: true;
+    }
+  | { ok: false; reason: string };
 
 /** Runtime-configurable bounds (from env; passed by the route). */
 export interface Cr1Config {
@@ -76,6 +99,39 @@ export interface Cr1Config {
    * `validateReleaseForSponsor` comparte este tipo y NO lo lee.
    */
   readonly releaseAuthority: string | undefined;
+  /**
+   * WKH-357 — ¿esta instancia acepta depósitos con `AdvanceNonceAccount` en ix 0?
+   * (`SOLANA_SPONSOR_DURABLE_NONCE_ENABLED`).
+   *
+   * ⚠️ QUÉ HACE `false`, dicho con precisión: **no desarma un check, RECHAZA**. Es el
+   * criterio de `usdcMint` (ausente ⇒ Check 4c rechaza) y NO el de `releaseAuthority`
+   * (ausente ⇒ el check se desarma), y los dos están contrastados arriba en este
+   * mismo tipo. Con `false`, una tx cuya ix 0 es un `nonceAdvance` cae por el camino de
+   * SIEMPRE — la `nonceAdvance` queda dentro de `businessIx` y Check 2 la juzga —, y ni
+   * una línea nueva se ejecuta: el veredicto es el de antes de esta HU (AC-8).
+   *
+   * ⛔ CON QUÉ ENUM RECHAZA: **son DOS, según la forma, y chaski produce las dos** (lleva
+   * `register_escrow` o no según haya lugar en el índice on-chain, WKH-347). MEDIDO:
+   *   • `[nonceAdvance, CB, CB, deposit]`                  ⇒ `PROGRAM_NOT_WHITELISTED`
+   *     (`businessIx` = 2, `businessIx[0]` es la `nonceAdvance`, su programId es el System
+   *     Program y no el escrow)
+   *   • `[nonceAdvance, CB, CB, deposit, register_escrow]`  ⇒ `NOT_EXACTLY_ONE_BUSINESS_IX`
+   *     (`businessIx` = 3, y Check 2 corta por cantidad ANTES de mirar ningún programId)
+   * Una versión anterior de este comentario afirmaba `PROGRAM_NOT_WHITELISTED` sin
+   * condiciones, y quien opere grepeando ese marcador no lo encuentra la mitad de las
+   * veces. Los dos veredictos los mide T-20. Guard A, en cambio, **sí** da
+   * `SHORT_DEPOSIT_DATA` en los dos casos, y también está medido.
+   *
+   * ⚠️ Y NO ES OPCIONAL A PROPÓSITO. Es `boolean` requerido, no `boolean | undefined`,
+   * porque así el compilador lleva a quien lo agregue a **los 4** literales de
+   * `Cr1Config` que hay en el repo — incluidos los 2 que no son del `deposit`
+   * (`routes/solana-escrow.ts`, `__tests__/unit/cr1-release.test.ts`). Un campo
+   * opcional los habría dejado en `undefined` en silencio.
+   *
+   * `validateReleaseForSponsor` comparte este tipo y NO lo lee: un release nunca
+   * lleva `nonceAdvance` (lo arma el facilitator, no una billetera tras un salto).
+   */
+  readonly durableNonceEnabled: boolean;
 }
 
 /** Base network fee per signature (lamports) — the current Solana constant. */
@@ -110,6 +166,22 @@ function reject(reason: string): Cr1Result {
   return { ok: false, reason };
 }
 
+/**
+ * WKH-357 — ¿esta ix "se presenta como" un `AdvanceNonceAccount`? SÓLO para LOCALIZARLA
+ * (n1): programId del System Program + los 4 bytes del discriminador.
+ *
+ * ⛔ NO es el validador: devolver `true` acá no autoriza nada. La forma completa la
+ * exigen n2..n6 después, y cada desvío tiene su propio `reason`. La separación existe
+ * para que una `nonceAdvance` en la posición EQUIVOCADA se pueda rechazar por lo que es
+ * (`NONCE_IX_NOT_FIRST`) en vez de caer en un check ajeno con un marcador confuso.
+ */
+function esAdvanceNonce(ix: TransactionInstruction): boolean {
+  if (!ix.programId.equals(new PublicKey(SYSTEM_PROGRAM_ID))) return false;
+  if (ix.data.length < ADVANCE_NONCE_DISCRIMINATOR.length) return false;
+  const disc = Buffer.from(ix.data.subarray(0, ADVANCE_NONCE_DISCRIMINATOR.length));
+  return disc.equals(Buffer.from([...ADVANCE_NONCE_DISCRIMINATOR]));
+}
+
 function ceilDiv(a: bigint, b: bigint): bigint {
   return (a + b - 1n) / b;
 }
@@ -136,8 +208,154 @@ export function validateDepositForSponsor(
     const computeBudgetPk = ComputeBudgetProgram.programId;
 
     // ── Check 2: 1 or 2 business ix, escrow-whitelisted programId ────────────
-    const businessIx = instructions.filter((ix) => !ix.programId.equals(computeBudgetPk));
+    // ⛔ ESTAS DOS LÍNEAS NO CAMBIARON con WKH-357: son las de siempre, carácter por
+    // carácter. La separación de la `nonceAdvance` se hace DESPUÉS, en Check 2n, para
+    // que el camino de la bandera apagada no dependa de una expresión nueva (AC-8).
+    const businessIxTodas = instructions.filter((ix) => !ix.programId.equals(computeBudgetPk));
     const cbIx = instructions.filter((ix) => ix.programId.equals(computeBudgetPk));
+
+    // ── Check 2n (WKH-357): la `AdvanceNonceAccount` de un depósito por enlace ──
+    // TODO lo nuevo de esta HU vive adentro de este `if`, con el patrón de Check 4b:
+    // con `durableNonceEnabled: false` no se ejecuta ni una línea y `businessIx` es
+    // literalmente `businessIxTodas`, así que el árbol de decisión es el de antes.
+    //
+    // Con la bandera APAGADA y una tx con nonce: la `nonceAdvance` queda dentro de
+    // `businessIx` y Check 2 la juzga. Rechaza, no se desarma nada — pero el ENUM depende de
+    // la forma, y chaski produce las dos (MEDIDO, T-20 las mide):
+    //   sin `register_escrow`  ⇒ `PROGRAM_NOT_WHITELISTED`      (businessIx = 2, la
+    //                             `nonceAdvance` es businessIx[0] y no es del escrow)
+    //   con `register_escrow`  ⇒ `NOT_EXACTLY_ONE_BUSINESS_IX`  (businessIx = 3, el corte
+    //                             por cantidad es ANTES del programId — ver más abajo)
+    //
+    // Los 7 requisitos (n1..n7) son fail-closed: cualquier desvío rechaza SIN firmar.
+    // n7 es Check 5 y NO necesita una línea de código — ver el comentario de Check 5.
+    let nonceIx: TransactionInstruction | undefined;
+    let businessIx = businessIxTodas;
+    if (cfg.durableNonceEnabled) {
+      // n1 — la `nonceAdvance` va en posición 0 ABSOLUTA. Se BARRE la tx entera a
+      // propósito: una `nonceAdvance` en cualquier otro índice es un rechazo con causa
+      // PROPIA (`NONCE_IX_NOT_FIRST`) y no un "cae por otro check". El motivo es de
+      // diagnóstico y de forma: el runtime de Solana sólo trata la tx como durable-nonce
+      // si la ix 0 es el advance, así que una en posición 1 es una tx que avanza el
+      // nonce de alguien SIN que el nonce gobierne su vigencia.
+      const idxNonce = instructions.findIndex((ix) => esAdvanceNonce(ix));
+      if (idxNonce > 0) {
+        return reject('NONCE_IX_NOT_FIRST');
+      }
+      if (idxNonce === 0) {
+        const candidata = instructions[0];
+        if (candidata === undefined) {
+          return reject('NONCE_IX_NOT_FIRST');
+        }
+        // n2 — largo EXACTO (nunca `>=`) y discriminador byte a byte.
+        if (candidata.data.length !== ADVANCE_NONCE_DATA_LEN) {
+          return reject('NONCE_IX_BAD_DISCRIMINATOR');
+        }
+        const nonceDisc = Buffer.from(candidata.data.subarray(0, ADVANCE_NONCE_DATA_LEN));
+        if (!nonceDisc.equals(Buffer.from([...ADVANCE_NONCE_DISCRIMINATOR]))) {
+          return reject('NONCE_IX_BAD_DISCRIMINATOR');
+        }
+        // n3 — exactamente 3 cuentas, ni una más.
+        if (candidata.keys.length !== ADVANCE_NONCE_POSITIONAL_ACCOUNTS) {
+          return reject('NONCE_IX_ACCOUNTS_INVALID');
+        }
+        const nonceAcct = candidata.keys[ADVANCE_NONCE_ACCOUNT_INDEX.NONCE];
+        const sysvarAcct = candidata.keys[ADVANCE_NONCE_ACCOUNT_INDEX.RECENT_BLOCKHASHES];
+        const authorityAcct = candidata.keys[ADVANCE_NONCE_ACCOUNT_INDEX.AUTHORITY];
+        if (nonceAcct === undefined || sysvarAcct === undefined || authorityAcct === undefined) {
+          return reject('NONCE_IX_ACCOUNTS_INVALID');
+        }
+        // ⚠️ LEER ESTO ANTES DE AGREGAR UNA ASERCIÓN DE BANDERAS ACÁ (AR BLQ-ALTO-1).
+        // En un mensaje LEGACY de Solana `isSigner`/`isWritable` son propiedades **del
+        // mensaje** (header + orden de `accountKeys`), NO de cada instrucción. El camino de
+        // producción es serialize → `parseSponsorTx` → `Transaction.from`
+        // (`broadcast.ts:161-183`), y en ese round-trip la meta de cada pubkey **colapsa a
+        // la UNIÓN** sobre todas las ix. Entonces:
+        //   • una bandera de una cuenta que aparece SÓLO en la `nonceAdvance` sobrevive
+        //     intacta ⇒ se puede assertar (n5 y n4, abajo);
+        //   • una bandera de una cuenta que TAMBIÉN aparece en el `deposit` llega con la
+        //     unión ⇒ assertarla en negativo rechaza toda tx legítima (n6, abajo).
+        // Es la misma trampa que está explicada para `regEscrowState` en Check 4b, y allá
+        // salió el lado benigno. Acá salió el maligno: costó el 100% de los depósitos.
+        //
+        // n5 — la cuenta de nonce: writable y NO signer. Signer implicaría una 2ª
+        // firma que la billetera no puede dar (y que obligaría a persistir una clave).
+        //
+        // ✅ ESTA ASERCIÓN SÍ ES ALCANZABLE EN EL CABLE, y está MEDIDO: la cuenta de nonce
+        // es una pubkey que no aparece en ninguna otra ix (ni en el `deposit`, ni en el
+        // `register_escrow`, ni en el ComputeBudget), así que no hay unión que la mueva. Un
+        // fixture deformado a `isWritable: false` vuelve del round-trip con
+        // `writable=false` y esta línea lo rechaza. Lo mide T-30 (el caso canónico vuelve
+        // `signer=false writable=true`) + el vector "keys[0] NO writable" de T-12, que
+        // ahora cruza el cable porque `buildTx` lo hace por default.
+        //
+        // 🔴 Y el caso `nonceAcct === feePayer` NO llega a Check 5, llega acá: el fee-payer
+        // es `accountKeys[0]`, o sea signer y writable SIEMPRE, así que la unión le pone
+        // `isSigner: true` a la cuenta de nonce y este `if` la rechaza primero. Sigue
+        // fail-closed y sin firmar, sólo cambia el marcador (medido; T-14 lo dice).
+        if (nonceAcct.isSigner || !nonceAcct.isWritable) {
+          return reject('NONCE_IX_ACCOUNTS_INVALID');
+        }
+        // n4 — el sysvar exacto, readonly y no signer.
+        //
+        // ✅ TAMBIÉN ALCANZABLE EN EL CABLE, por el mismo criterio y también MEDIDO: el
+        // sysvar de recent-blockhashes no aparece en el `deposit` (sus 3 program ids son
+        // Token / ATA / System) ni en el `register_escrow`. Fixture deformado a
+        // `isWritable: true` ⇒ vuelve `writable=true` ⇒ rechaza. La pubkey, obviamente, no
+        // la toca ningún colapso.
+        if (
+          !sysvarAcct.pubkey.equals(new PublicKey(SYSVAR_RECENT_BLOCKHASHES_ID)) ||
+          sysvarAcct.isSigner ||
+          sysvarAcct.isWritable
+        ) {
+          return reject('NONCE_IX_ACCOUNTS_INVALID');
+        }
+        // n6 — la AUTHORITY es signer y es EL MISMO sender del `deposit`.
+        //
+        // 🔴 ÉSTE ES EL CORAZÓN (AC-4). Sin él, cualquiera podría hacer avanzar el nonce
+        // de un tercero dentro de una tx que el facilitator paga: un DoS gratis contra
+        // la cuenta de nonce de otra persona, que le invalida la tx que tenía firmada y
+        // en vuelo. El `deposit` se resuelve más abajo (Check 2), así que la comparación
+        // se hace ahí, donde `deposit.keys[0]` ya existe.
+        //
+        // ⛔ NO AGREGAR `|| authorityAcct.isWritable`. Estaba, y era un rechazo del 100% de
+        // los depósitos con nonce durable — la feature no podía funcionar nunca.
+        // MEDIDO sobre el fixture positivo, serializado y reconstruido como hace
+        // producción, con el resto del archivo intacto:
+        //     [2] AUTHORITY  ANTES signer=true writable=false
+        //                    DESPUÉS signer=true writable=TRUE   ← la unión
+        //     CR-1 en memoria    : ok durableNonce=true
+        //     CR-1 tras el cable : REJECT NONCE_IX_ACCOUNTS_INVALID
+        // El mecanismo es forzoso, no un accidente del fixture: Check 4 (más abajo, el
+        // `SENDER_FLAGS_INVALID`) EXIGE `sender.isSigner && sender.isWritable`, y la parte 2
+        // de n6 EXIGE `authority === sender`. Las tres condiciones juntas son
+        // insatisfacibles: pedir la authority no-writable es pedir que el sender no sea
+        // writable, que es justo lo contrario de lo que el `deposit` necesita para pagar la
+        // renta del escrow. Re-agregarla pone 9 tests en rojo (medido).
+        //
+        // Y no se pierde nada de seguridad al permitirla writable: la cuenta está clavada
+        // por la parte 2 de n6 a ser el sender de ESTE `deposit` — que ya firma la tx y ya
+        // es writable por el `deposit` mismo —, y Check 5 sigue garantizando que no es el
+        // fee-payer. "Writable" no le agrega ninguna capacidad que no tuviera.
+        //
+        // ⚠️ `isSigner` SÍ se sigue exigiendo, pero leelo como belt-and-braces y no como
+        // cobertura del cable: MEDIDO, un fixture con la authority `isSigner: false` vuelve
+        // del round-trip con `signer=true`, porque la authority es el sender y el `deposit`
+        // lo marca signer. En el cable esta mitad es inalcanzable igual que las dos ramas de
+        // `regSender` en Check 4b. Se conserva para un caller que le pase a CR-1 un
+        // `Transaction` en memoria (y porque un `AdvanceNonceAccount` cuya authority no
+        // firma es, en el protocolo, una ix inválida). T-32 mide las dos mitades.
+        if (!authorityAcct.isSigner) {
+          return reject('NONCE_IX_ACCOUNTS_INVALID');
+        }
+        nonceIx = candidata;
+        // Identidad de REFERENCIA, no re-comparación por forma: `Array.prototype.filter`
+        // preserva las referencias, así que `businessIxTodas[0]` ES el mismo objeto que
+        // `instructions[0]` (el System Program nunca es ComputeBudget). Comparar por
+        // identidad no puede confundir dos ix de forma idéntica en posiciones distintas.
+        businessIx = businessIxTodas.filter((ix) => ix !== nonceIx);
+      }
+    }
     // HU-SOL-20/R3: 1 (legacy form, byte-identical path) or 2 (`deposit` +
     // `register_escrow`, atomic) are allowed. 0 or >=3 keep rejecting with the
     // SAME enum (vectors T4a/T4b are untouched). Position 0 is ALWAYS the
@@ -170,7 +388,19 @@ export function validateDepositForSponsor(
     // actually charged) and turned `feeUpperBoundLamports` into a lower bound,
     // which in turn made the daily lamport cap under-count real spend. Mirroring
     // the runtime rule keeps the value a true upper bound for EVERY form.
-    let computeUnits = implicitComputeUnitLimit(businessIx.length);
+    //
+    // 🔴 WKH-357 — LA `nonceAdvance` SE CUENTA ACÁ, y no contarla reintroduce este mismo
+    // bug. `implicitComputeUnitLimit` espeja la regla del runtime: `200_000 × <ix que NO
+    // son ComputeBudget>`. La `nonceAdvance` NO es ComputeBudget, así que EL RUNTIME LA
+    // CUENTA. Si se la saca de `businessIx` (Check 2n) y esta línea queda igual, una tx
+    // `[nonceAdvance, deposit]` SIN `SetComputeUnitLimit` declararía 200.000 mientras el
+    // runtime cobra sobre 400.000 ⇒ `feeUpperBoundLamports` deja de ser cota SUPERIOR y
+    // el cap diario de lamports sub-cuenta el gasto real. Es exactamente AR-G4
+    // BLQ-MEDIO-1, el bug que los dos comentarios de arriba y abajo dan por arreglado.
+    // Con la bandera apagada `nonceIx` es SIEMPRE `undefined` ⇒ byte-idéntico. T-25 lo mide.
+    let computeUnits = implicitComputeUnitLimit(
+      businessIx.length + (nonceIx === undefined ? 0 : 1),
+    );
     let priceMicroLamports = 0n;
     let sawLimit = false;
     let sawPrice = false;
@@ -232,6 +462,26 @@ export function validateDepositForSponsor(
     }
     if (!sender.isSigner || !sender.isWritable) {
       return reject('SENDER_FLAGS_INVALID');
+    }
+
+    // ── Check 2n / n6 (parte 2, WKH-357): la authority del nonce ES el sender ──
+    // 🔴 EL CORAZÓN DE AC-4. Se resuelve acá y no arriba porque necesita el `sender` del
+    // `deposit`, que Check 4 recién destructuró. Sin esta comparación, una tx podría
+    // hacer avanzar la cuenta de nonce de UN TERCERO con el gas del facilitator: le
+    // invalida en el acto la transacción que esa persona tenía firmada y en vuelo, gratis
+    // y a repetición. El `deposit` sería legítimo y todos los demás checks pasarían.
+    //
+    // ⛔ Y NO se compara contra `feePayerPubkey` ni contra nada configurado: se compara
+    // contra el sender de ESTA tx. La authority del nonce NO PUEDE ser el fee-payer —
+    // Check 5 lo rechaza abajo (n7) — así que el sender es el único valor posible.
+    if (nonceIx !== undefined) {
+      const authorityAcct = nonceIx.keys[ADVANCE_NONCE_ACCOUNT_INDEX.AUTHORITY];
+      if (authorityAcct === undefined) {
+        return reject('NONCE_IX_ACCOUNTS_INVALID');
+      }
+      if (!authorityAcct.pubkey.equals(sender.pubkey)) {
+        return reject('NONCE_AUTHORITY_NOT_SENDER');
+      }
     }
     if (!tokenProgram.pubkey.equals(new PublicKey(TOKEN_PROGRAM_ID))) {
       return reject('TOKEN_PROGRAM_MISMATCH');
@@ -366,7 +616,7 @@ export function validateDepositForSponsor(
       // in a Solana LEGACY message, is-signer/is-writable are TRANSACTION-level
       // properties (message header + accountKeys ordering), NOT per-instruction ones.
       // The production path is serialize → `parseSponsorTx` → `Transaction.from`
-      // (broadcast.ts:96-118), and on that round-trip every meta of a given pubkey
+      // (broadcast.ts:161-183), and on that round-trip every meta of a given pubkey
       // collapses to the UNION over all instructions. `escrow_state` is legitimately
       // writable in the `deposit` (IDL: deposit.escrow_state.writable = true), so it
       // ALWAYS comes back writable in the 2nd ix too. Asserting non-writable here
@@ -429,6 +679,18 @@ export function validateDepositForSponsor(
     // If its pubkey shows up in ANY instruction's account list, it could be a
     // Transfer source / SPL authority / the deposit sender (rent-payer) — all of
     // which are drain vectors. Strongest fail-closed rule; subsumes T5/T6/T7.
+    //
+    // 🔴 WKH-357 / n7 — ESTE BUCLE NO CAMBIÓ Y NO TIENE EXCEPCIONES, y eso es el punto.
+    // Itera `instructions` (TODAS, la `nonceAdvance` incluida, que sigue en
+    // `tx.instructions`) y NO `businessIx`, así que la separación de Check 2n no lo
+    // debilita en nada: las 3 cuentas nuevas del nonce se barren igual. La consecuencia
+    // de diseño, que NO es negociable: **la authority del nonce no puede ser el
+    // fee-payer**, porque si lo fuera este check rechazaría la tx. Por eso la authority
+    // es el sender (n6) y por eso el facilitator NO puede ser dueño de las cuentas de
+    // nonce ni patrocinar su creación.
+    //
+    // ⛔ Si alguien cambia `instructions` por `businessIx` acá, una tx con nonce cuya
+    // authority sea el fee-payer pasaría. T-14 existe SÓLO para eso y se pone rojo.
     for (const ix of instructions) {
       for (const k of ix.keys) {
         if (k.pubkey.equals(feePayerPubkey)) {
@@ -445,6 +707,12 @@ export function validateDepositForSponsor(
       return reject('FEE_ABOVE_MAX');
     }
 
+    // WKH-357: el campo SÓLO va cuando Check 2n reconoció y validó la `nonceAdvance`.
+    // En cualquier otro caso el objeto es idéntico al de antes de esta HU (AC-8), sin
+    // la clave presente — no `durableNonce: false`, que sería un objeto distinto.
+    if (nonceIx !== undefined) {
+      return { ok: true, feeUpperBoundLamports, durableNonce: true };
+    }
     return { ok: true, feeUpperBoundLamports };
   } catch {
     // CD-3: any thrown exception → fail-closed reject (never propagate, never sign).

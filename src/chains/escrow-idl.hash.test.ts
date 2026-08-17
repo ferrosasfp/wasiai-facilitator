@@ -46,8 +46,8 @@ import { DEPOSIT_POSITIONAL_ACCOUNTS } from '../methods/solana-sponsor/deposit-s
 // `beneficiary_ata` en el índice 6 y writable — la forma que `release-shape.ts` tiene pinneada — y el
 // layout de `EscrowState` es el mismo, así que el decode de la cuenta no se mueve.
 // El CR-1 del `deposit` acepta la cuenta nueva por diseño, sin tocarlo: compara
-// `keys.length < DEPOSIT_POSITIONAL_ACCOUNTS` (cr1.ts:220) y exige que las cuentas extra sean
-// no-signer y no-writable (cr1.ts:286) — que es exactamente lo que `beneficiary_ata` es. Esa
+// `keys.length < DEPOSIT_POSITIONAL_ACCOUNTS` (cr1.ts:450) y exige que las cuentas extra sean
+// no-signer y no-writable (cr1.ts:536) — que es exactamente lo que `beneficiary_ata` es. Esa
 // propiedad la asertea T-DEP9 acá abajo, para que no dependa sólo de este hash.
 // Anterior: bfbdfe5aedd55d68e6dda4663b5d26daada815c99db03df34a1601fe4a4d3922.
 const ESCROW_IDL_SHA256 = 'cc2761266dcf8335a17562129de040805f37f69cfe654f5be472045ba7bfcd51';
@@ -110,8 +110,8 @@ describe('WKH-227 AC-2/AC-3 · escrow IDL canonical hash lock', () => {
   // este test la propiedad no la mira nadie donde corre la automatización.
   //
   // Qué propiedad es: CR-1 acepta el `deposit` con cuentas de más sólo si son no-signer y
-  // no-writable (`cr1.ts:286`), porque las trata como `remaining accounts` después de las
-  // `DEPOSIT_POSITIONAL_ACCOUNTS` posicionales (`cr1.ts:220`). Si el programa agregara una cuenta
+  // no-writable (`cr1.ts:536`), porque las trata como `remaining accounts` después de las
+  // `DEPOSIT_POSITIONAL_ACCOUNTS` posicionales (`cr1.ts:450`). Si el programa agregara una cuenta
   // extra WRITABLE, CR-1 rechazaría todo depósito legítimo y el corte se vería recién en runtime.
   // Este test lo pone en rojo al re-vendorizar, que es cuando todavía es barato.
   it('T-DEP9: las cuentas del `deposit` más allá de las posicionales son no-signer y no-writable', () => {

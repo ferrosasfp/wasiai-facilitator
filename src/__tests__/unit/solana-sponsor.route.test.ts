@@ -473,7 +473,7 @@ describe('POST /solana/sponsor', () => {
     // Aun así, el 403 solo NO alcanza para probar que A2 hace algo, y se midió:
     // borrando la línea `if (senderSig === null)` de `sponsor-claims.ts` este
     // request SIGUE dando 403, porque `bs58.encode(Buffer.from(null))` tira y lo
-    // absorbe el `catch` de `sponsor-claims.ts:110-116` con el mismo status y el
+    // absorbe el `catch` de `sponsor-claims.ts:183-189` con el mismo status y el
     // mismo `cosign`/`daily` sin invocar. Lo ÚNICO que cambia es el marcador:
     // `SENDER_SIGNATURE_NULL` pasa a `CLAIMS_EXTRACTION_FAILED:TypeError`. Por eso se
     // assertea el marcador — mismo recurso que T-A1, y §7.1 lo hace requisito

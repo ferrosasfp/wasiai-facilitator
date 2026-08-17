@@ -195,6 +195,11 @@ export const solanaEscrowReleaseRoute: FastifyPluginAsync = async (app) => {
     // el `EscrowState` on-chain en el Step 4b de esta misma ruta. Va `undefined` para no
     // sugerir que acá hay un guard que no existe.
     releaseAuthority: undefined,
+    // Idem: campo compartido con el `deposit` (Check 2n de `validateDepositForSponsor`).
+    // `validateReleaseForSponsor` NO lo lee. Va `false` y NO la env a propósito: un
+    // release lo arma el facilitator y nunca lleva `nonceAdvance`, así que pasar la env
+    // acá sugeriría un camino de nonce en esta ruta que no existe.
+    durableNonceEnabled: false,
   };
 
   app.post(
@@ -511,7 +516,7 @@ export const solanaEscrowReleaseRoute: FastifyPluginAsync = async (app) => {
       // `CosignResult.sent` existe exactamente para esto, y hasta acá esta ruta era la
       // que lo tiraba a la basura (el único consumidor era el payout).
       // `SPONSOR_BROADCAST_EXPIRED` se emite desde DOS sondas que corren DESPUÉS de un
-      // `sendRawTransaction` exitoso (broadcast.ts:300-312 y :348-360), y el `catch` de
+      // `sendRawTransaction` exitoso (broadcast.ts:372-388 y :425-440), y el `catch` de
       // esas sondas significa "no pude preguntar", no "el blockhash venció". Traducirlo
       // a `409 RELEASE_BROADCAST_EXPIRED / "Transaction blockhash expired"` afirmaba
       // "no salió, reintentá" sobre un escrow que podía estar ya liberado.
@@ -567,7 +572,7 @@ export const solanaEscrowReleaseRoute: FastifyPluginAsync = async (app) => {
             result.reason,
           );
         case 'SPONSOR_BROADCAST_EXPIRED':
-          // Alcanzable SÓLO sin envío previo (la sonda PRE-firma de broadcast.ts:224-232,
+          // Alcanzable SÓLO sin envío previo (la sonda PRE-firma de broadcast.ts:279-290,
           // o un blockhash ya vencido antes del primer send). Ahí sí está probado que
           // no se gastó nada, y el 409 "reintentá" es correcto.
           return fail(
