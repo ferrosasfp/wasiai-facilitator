@@ -26,7 +26,7 @@
  * dobles y sin red, para que la lógica de tres desenlaces no se pudra en silencio.
  *
  * CINCO veredictos, TRES desenlaces. La regla de la casa es que "no pude preguntar"
- * NO es "no pasó" (mismo criterio que `routes/solana-escrow.ts:509`, el Step 8 del
+ * NO es "no pasó" (mismo criterio que `routes/solana-escrow.ts:514`, el Step 8 del
  * release, que contesta 502 UNKNOWN en vez de mentir "no salió"):
  *
  *   MATCH        → coincide.                              exit 0

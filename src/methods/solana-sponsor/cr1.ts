@@ -106,10 +106,21 @@ export interface Cr1Config {
    * ⚠️ QUÉ HACE `false`, dicho con precisión: **no desarma un check, RECHAZA**. Es el
    * criterio de `usdcMint` (ausente ⇒ Check 4c rechaza) y NO el de `releaseAuthority`
    * (ausente ⇒ el check se desarma), y los dos están contrastados arriba en este
-   * mismo tipo. Con `false`, una tx cuya ix 0 es un `nonceAdvance` cae por el camino
-   * de SIEMPRE: la `nonceAdvance` queda dentro de `businessIx`, es `businessIx[0]`, su
-   * programId es el System Program y no el escrow ⇒ `PROGRAM_NOT_WHITELISTED`. Ni una
-   * línea nueva se ejecuta y el veredicto es el de antes de esta HU (AC-8).
+   * mismo tipo. Con `false`, una tx cuya ix 0 es un `nonceAdvance` cae por el camino de
+   * SIEMPRE — la `nonceAdvance` queda dentro de `businessIx` y Check 2 la juzga —, y ni
+   * una línea nueva se ejecuta: el veredicto es el de antes de esta HU (AC-8).
+   *
+   * ⛔ CON QUÉ ENUM RECHAZA: **son DOS, según la forma, y chaski produce las dos** (lleva
+   * `register_escrow` o no según haya lugar en el índice on-chain, WKH-347). MEDIDO:
+   *   • `[nonceAdvance, CB, CB, deposit]`                  ⇒ `PROGRAM_NOT_WHITELISTED`
+   *     (`businessIx` = 2, `businessIx[0]` es la `nonceAdvance`, su programId es el System
+   *     Program y no el escrow)
+   *   • `[nonceAdvance, CB, CB, deposit, register_escrow]`  ⇒ `NOT_EXACTLY_ONE_BUSINESS_IX`
+   *     (`businessIx` = 3, y Check 2 corta por cantidad ANTES de mirar ningún programId)
+   * Una versión anterior de este comentario afirmaba `PROGRAM_NOT_WHITELISTED` sin
+   * condiciones, y quien opere grepeando ese marcador no lo encuentra la mitad de las
+   * veces. Los dos veredictos los mide T-20. Guard A, en cambio, **sí** da
+   * `SHORT_DEPOSIT_DATA` en los dos casos, y también está medido.
    *
    * ⚠️ Y NO ES OPCIONAL A PROPÓSITO. Es `boolean` requerido, no `boolean | undefined`,
    * porque así el compilador lleva a quien lo agregue a **los 4** literales de
@@ -209,8 +220,12 @@ export function validateDepositForSponsor(
     // literalmente `businessIxTodas`, así que el árbol de decisión es el de antes.
     //
     // Con la bandera APAGADA y una tx con nonce: la `nonceAdvance` queda dentro de
-    // `businessIx`, es `businessIx[0]`, su programId es el System Program y no el
-    // escrow ⇒ `PROGRAM_NOT_WHITELISTED`. Rechaza, no se desarma nada (T-20 lo mide).
+    // `businessIx` y Check 2 la juzga. Rechaza, no se desarma nada — pero el ENUM depende de
+    // la forma, y chaski produce las dos (MEDIDO, T-20 las mide):
+    //   sin `register_escrow`  ⇒ `PROGRAM_NOT_WHITELISTED`      (businessIx = 2, la
+    //                             `nonceAdvance` es businessIx[0] y no es del escrow)
+    //   con `register_escrow`  ⇒ `NOT_EXACTLY_ONE_BUSINESS_IX`  (businessIx = 3, el corte
+    //                             por cantidad es ANTES del programId — ver más abajo)
     //
     // Los 7 requisitos (n1..n7) son fail-closed: cualquier desvío rechaza SIN firmar.
     // n7 es Check 5 y NO necesita una línea de código — ver el comentario de Check 5.
@@ -250,12 +265,44 @@ export function validateDepositForSponsor(
         if (nonceAcct === undefined || sysvarAcct === undefined || authorityAcct === undefined) {
           return reject('NONCE_IX_ACCOUNTS_INVALID');
         }
+        // ⚠️ LEER ESTO ANTES DE AGREGAR UNA ASERCIÓN DE BANDERAS ACÁ (AR BLQ-ALTO-1).
+        // En un mensaje LEGACY de Solana `isSigner`/`isWritable` son propiedades **del
+        // mensaje** (header + orden de `accountKeys`), NO de cada instrucción. El camino de
+        // producción es serialize → `parseSponsorTx` → `Transaction.from`
+        // (`broadcast.ts:161-183`), y en ese round-trip la meta de cada pubkey **colapsa a
+        // la UNIÓN** sobre todas las ix. Entonces:
+        //   • una bandera de una cuenta que aparece SÓLO en la `nonceAdvance` sobrevive
+        //     intacta ⇒ se puede assertar (n5 y n4, abajo);
+        //   • una bandera de una cuenta que TAMBIÉN aparece en el `deposit` llega con la
+        //     unión ⇒ assertarla en negativo rechaza toda tx legítima (n6, abajo).
+        // Es la misma trampa que está explicada para `regEscrowState` en Check 4b, y allá
+        // salió el lado benigno. Acá salió el maligno: costó el 100% de los depósitos.
+        //
         // n5 — la cuenta de nonce: writable y NO signer. Signer implicaría una 2ª
         // firma que la billetera no puede dar (y que obligaría a persistir una clave).
+        //
+        // ✅ ESTA ASERCIÓN SÍ ES ALCANZABLE EN EL CABLE, y está MEDIDO: la cuenta de nonce
+        // es una pubkey que no aparece en ninguna otra ix (ni en el `deposit`, ni en el
+        // `register_escrow`, ni en el ComputeBudget), así que no hay unión que la mueva. Un
+        // fixture deformado a `isWritable: false` vuelve del round-trip con
+        // `writable=false` y esta línea lo rechaza. Lo mide T-30 (el caso canónico vuelve
+        // `signer=false writable=true`) + el vector "keys[0] NO writable" de T-12, que
+        // ahora cruza el cable porque `buildTx` lo hace por default.
+        //
+        // 🔴 Y el caso `nonceAcct === feePayer` NO llega a Check 5, llega acá: el fee-payer
+        // es `accountKeys[0]`, o sea signer y writable SIEMPRE, así que la unión le pone
+        // `isSigner: true` a la cuenta de nonce y este `if` la rechaza primero. Sigue
+        // fail-closed y sin firmar, sólo cambia el marcador (medido; T-14 lo dice).
         if (nonceAcct.isSigner || !nonceAcct.isWritable) {
           return reject('NONCE_IX_ACCOUNTS_INVALID');
         }
         // n4 — el sysvar exacto, readonly y no signer.
+        //
+        // ✅ TAMBIÉN ALCANZABLE EN EL CABLE, por el mismo criterio y también MEDIDO: el
+        // sysvar de recent-blockhashes no aparece en el `deposit` (sus 3 program ids son
+        // Token / ATA / System) ni en el `register_escrow`. Fixture deformado a
+        // `isWritable: true` ⇒ vuelve `writable=true` ⇒ rechaza. La pubkey, obviamente, no
+        // la toca ningún colapso.
         if (
           !sysvarAcct.pubkey.equals(new PublicKey(SYSVAR_RECENT_BLOCKHASHES_ID)) ||
           sysvarAcct.isSigner ||
@@ -263,14 +310,42 @@ export function validateDepositForSponsor(
         ) {
           return reject('NONCE_IX_ACCOUNTS_INVALID');
         }
-        // n6 — la AUTHORITY es signer, no writable, y es EL MISMO sender del `deposit`.
+        // n6 — la AUTHORITY es signer y es EL MISMO sender del `deposit`.
         //
         // 🔴 ÉSTE ES EL CORAZÓN (AC-4). Sin él, cualquiera podría hacer avanzar el nonce
         // de un tercero dentro de una tx que el facilitator paga: un DoS gratis contra
         // la cuenta de nonce de otra persona, que le invalida la tx que tenía firmada y
         // en vuelo. El `deposit` se resuelve más abajo (Check 2), así que la comparación
         // se hace ahí, donde `deposit.keys[0]` ya existe.
-        if (!authorityAcct.isSigner || authorityAcct.isWritable) {
+        //
+        // ⛔ NO AGREGAR `|| authorityAcct.isWritable`. Estaba, y era un rechazo del 100% de
+        // los depósitos con nonce durable — la feature no podía funcionar nunca.
+        // MEDIDO sobre el fixture positivo, serializado y reconstruido como hace
+        // producción, con el resto del archivo intacto:
+        //     [2] AUTHORITY  ANTES signer=true writable=false
+        //                    DESPUÉS signer=true writable=TRUE   ← la unión
+        //     CR-1 en memoria    : ok durableNonce=true
+        //     CR-1 tras el cable : REJECT NONCE_IX_ACCOUNTS_INVALID
+        // El mecanismo es forzoso, no un accidente del fixture: Check 4 (más abajo, el
+        // `SENDER_FLAGS_INVALID`) EXIGE `sender.isSigner && sender.isWritable`, y la parte 2
+        // de n6 EXIGE `authority === sender`. Las tres condiciones juntas son
+        // insatisfacibles: pedir la authority no-writable es pedir que el sender no sea
+        // writable, que es justo lo contrario de lo que el `deposit` necesita para pagar la
+        // renta del escrow. Re-agregarla pone 9 tests en rojo (medido).
+        //
+        // Y no se pierde nada de seguridad al permitirla writable: la cuenta está clavada
+        // por la parte 2 de n6 a ser el sender de ESTE `deposit` — que ya firma la tx y ya
+        // es writable por el `deposit` mismo —, y Check 5 sigue garantizando que no es el
+        // fee-payer. "Writable" no le agrega ninguna capacidad que no tuviera.
+        //
+        // ⚠️ `isSigner` SÍ se sigue exigiendo, pero leelo como belt-and-braces y no como
+        // cobertura del cable: MEDIDO, un fixture con la authority `isSigner: false` vuelve
+        // del round-trip con `signer=true`, porque la authority es el sender y el `deposit`
+        // lo marca signer. En el cable esta mitad es inalcanzable igual que las dos ramas de
+        // `regSender` en Check 4b. Se conserva para un caller que le pase a CR-1 un
+        // `Transaction` en memoria (y porque un `AdvanceNonceAccount` cuya authority no
+        // firma es, en el protocolo, una ix inválida). T-32 mide las dos mitades.
+        if (!authorityAcct.isSigner) {
           return reject('NONCE_IX_ACCOUNTS_INVALID');
         }
         nonceIx = candidata;
@@ -541,7 +616,7 @@ export function validateDepositForSponsor(
       // in a Solana LEGACY message, is-signer/is-writable are TRANSACTION-level
       // properties (message header + accountKeys ordering), NOT per-instruction ones.
       // The production path is serialize → `parseSponsorTx` → `Transaction.from`
-      // (broadcast.ts:96-118), and on that round-trip every meta of a given pubkey
+      // (broadcast.ts:161-183), and on that round-trip every meta of a given pubkey
       // collapses to the UNION over all instructions. `escrow_state` is legitimately
       // writable in the `deposit` (IDL: deposit.escrow_state.writable = true), so it
       // ALWAYS comes back writable in the 2nd ix too. Asserting non-writable here

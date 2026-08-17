@@ -42,7 +42,7 @@
  * salió` (409/422/429 — probado que no se gastó) o `NO SÉ`
  * (`SPONSOR_BROADCAST_UNKNOWN`, 502). El tercero se decide por `CosignResult.sent`,
  * NO por el código del primitivo: `SPONSOR_BROADCAST_EXPIRED` se emite también desde
- * sondas POSTERIORES a un `sendRawTransaction` (broadcast.ts:300-312 y :348-360) y
+ * sondas POSTERIORES a un `sendRawTransaction` (broadcast.ts:372-388 y :425-440) y
  * ahí su `catch` significa "no pude preguntar", no "el blockhash venció". El detalle
  * está en el Step 11.
  *
@@ -229,8 +229,11 @@ export const solanaSponsorRoute: FastifyPluginAsync = async (app) => {
     // La authority que el `deposit` graba en el escrow tiene que ser la nuestra, o ese
     // depósito nace irreleaseable (Check 4d). Ausente ⇒ check desarmado, avisado arriba.
     releaseAuthority,
-    // WKH-357 — ¿aceptamos un `nonceAdvance` en ix 0 (depósito por enlace)? `false`
-    // no desarma nada: rechaza con el veredicto de siempre (PROGRAM_NOT_WHITELISTED).
+    // WKH-357 — ¿aceptamos un `nonceAdvance` en ix 0 (depósito por enlace)? `false` no
+    // desarma nada: rechaza con el veredicto de siempre, que son DOS enums según la forma
+    // (MEDIDO): `PROGRAM_NOT_WHITELISTED` sin `register_escrow`, y
+    // `NOT_EXACTLY_ONE_BUSINESS_IX` con él, porque Check 2 corta por cantidad antes de
+    // mirar el programId. Ver el docblock de `Cr1Config.durableNonceEnabled`.
     durableNonceEnabled: env.SOLANA_SPONSOR_DURABLE_NONCE_ENABLED,
   };
   const dailyCapLamports = BigInt(env.SOLANA_SPONSOR_DAILY_MAX_LAMPORTS);
@@ -499,17 +502,17 @@ export const solanaSponsorRoute: FastifyPluginAsync = async (app) => {
       //
       // `CosignResult.sent` existe exactamente para esto y hasta acá esta ruta lo tiraba
       // a la basura. El flag se prende en los DOS resultados posibles de un
-      // `sendRawTransaction` (broadcast.ts:321 cuando devuelve, :331 cuando TIRA — un
+      // `sendRawTransaction` (broadcast.ts:396 cuando devuelve, :406 cuando TIRA — un
       // socket caído no prueba que el nodo no haya aceptado la tx), y de ahí viaja a los
-      // veredictos de las sondas de frescura POSTERIORES al envío (broadcast.ts:300-312
-      // dentro del bucle, :348-366 al agotarlo). El `catch` de esas sondas significa "no
-      // pude preguntar", no "el blockhash venció" — está escrito en broadcast.ts:113-118.
+      // veredictos de las sondas de frescura POSTERIORES al envío (broadcast.ts:372-388
+      // dentro del bucle, :425-440 al agotarlo). El `catch` de esas sondas significa "no
+      // pude preguntar", no "el blockhash venció" — está escrito en broadcast.ts:145-151.
       // Traducir eso a `409 / "Transaction blockhash expired"` afirmaba que no se gastó.
       //
       // ⚠️ QUÉ SE PORTÓ DEL EXEMPLAR Y QUÉ NO. Son dos exemplars y NO son intercambiables:
       // el payout (solana-payout.ts:555-598) resuelve la incógnita optimistamente porque
       // VERIFICA LA FIRMA que persistió (`verifyPayoutSignature`) y por eso puede contestar
-      // un 200 honesto; el release (solana-escrow.ts:509-556) NO lo hace, porque releer el
+      // un 200 honesto; el release (solana-escrow.ts:514-561) NO lo hace, porque releer el
       // estado `Released` probaría que el escrow se liberó y no que lo haya hecho NUESTRA
       // tx. Acá corresponde el SEGUNDO, y por un motivo más fuerte todavía: esta ruta no
       // tiene NADA que verificar. El primitivo sólo devuelve la firma cuando confirmó, así
@@ -572,7 +575,7 @@ export const solanaSponsorRoute: FastifyPluginAsync = async (app) => {
         case 'SPONSOR_DAILY_CAP':
           return fail('SPONSOR_DAILY_CAP', 429, 'Daily sponsorship cap reached', result.reason);
         case 'SPONSOR_BROADCAST_EXPIRED':
-          // Alcanzable SÓLO sin envío previo: la sonda PRE-firma (broadcast.ts:224-232),
+          // Alcanzable SÓLO sin envío previo: la sonda PRE-firma (broadcast.ts:279-290),
           // el blockhash ya vencido antes del primer send, o un `MISSING_BLOCKHASH`. Ahí
           // sí está probado que no se gastó nada y el 409 "rearmá y reintentá" es correcto.
           return fail(

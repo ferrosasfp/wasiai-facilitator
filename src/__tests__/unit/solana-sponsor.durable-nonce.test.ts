@@ -18,6 +18,7 @@ import {
   Keypair,
   PublicKey,
   SystemProgram,
+  SYSVAR_RECENT_BLOCKHASHES_PUBKEY,
   Transaction,
   TransactionInstruction,
   type AccountMeta,
@@ -165,12 +166,37 @@ interface TxOpts {
   computeUnitPriceMicroLamports?: number | null;
   withRegister?: boolean;
   extraFirst?: TransactionInstruction;
+  /**
+   * ¿Pasar el fixture por el cable antes de devolverlo? **Default `true`**, y ése es el
+   * arreglo de AR BLQ-ALTO-1 al nivel del método (ver el docblock de `buildTx`).
+   *
+   * `false` SÓLO para los vectores cuya deformación el round-trip BORRA — la unión de
+   * metas la sobreescribe — y que por lo tanto son inalcanzables en el cable. Cada uso de
+   * `roundTrip: false` lleva al lado la medición de qué se borra y por qué el vector se
+   * conserva igual. Si no tiene ese comentario, está mal usado.
+   */
+  roundTrip?: boolean;
 }
 
 /**
  * La forma REAL del contrato de integración:
  *   [ nonceAdvance, SetComputeUnitLimit, SetComputeUnitPrice, deposit (, register_escrow) ]
  * con la `nonceAdvance` en posición 0 ABSOLUTA.
+ *
+ * 🔴 EL ROUND-TRIP ES EL DEFAULT, y no es cosmético (AR BLQ-ALTO-1). Producción NUNCA ve
+ * el objeto `Transaction` que se construye acá: ve `parseSponsorTx` → `Transaction.from`
+ * sobre los bytes (`broadcast.ts:161-183`). Y en un mensaje LEGACY `isSigner`/`isWritable`
+ * son propiedades **del mensaje** (header + orden de `accountKeys`), no de cada
+ * instrucción, así que en ese round-trip la meta de cada pubkey **colapsa a la UNIÓN**
+ * sobre todas las ix. MEDIDO sobre este mismo fixture: la authority del nonce entra
+ * `signer=true writable=false` y vuelve `signer=true writable=TRUE`.
+ *
+ * ⚠️ POR QUÉ ES DEFAULT Y NO UN OPT-IN. La primera versión de este archivo validaba los 24
+ * vectores en memoria y tenía UN test de round-trip (T-28) que no llamaba al validador. La
+ * suite entera quedó midiendo **una forma de transacción que no existe en el cable**, y con
+ * la bandera prendida CR-1 rechazaba el 100% de los depósitos con nonce sin que un solo
+ * test se pusiera rojo. Un opt-in habría dejado el default en el lado equivocado: el
+ * fixture que alguien agregue mañana tiene que cruzar el cable **sin acordarse**.
  */
 function buildTx(o: TxOpts): Transaction {
   const tx = new Transaction();
@@ -194,8 +220,58 @@ function buildTx(o: TxOpts): Transaction {
   if (o.withRegister === true) tx.add(buildRegisterEscrowIx(o.sender, escrowState));
   tx.feePayer = o.feePayer;
   tx.recentBlockhash = Keypair.generate().publicKey.toBase58();
-  return tx;
+  if (o.roundTrip === false) return tx;
+  return porElCable(tx);
 }
+
+/**
+ * El cable, en una función, para que los fixtures armados A MANO (T-13, y el caso inline de
+ * T-20) puedan cruzarlo igual que los de `buildTx`. `requireAllSignatures: false` porque el
+ * sender firma en la billetera del remitente y acá no hay claves privadas para la mayoría de
+ * los vectores; lo que el round-trip tiene que reproducir es el MENSAJE (y sus banderas), no
+ * las firmas.
+ */
+function porElCable(tx: Transaction): Transaction {
+  return Transaction.from(tx.serialize({ requireAllSignatures: false }));
+}
+
+describe('WKH-357 — las constantes pinneadas, contra una fuente que NO se mueve con ellas', () => {
+  // ⚠️ POR QUÉ ESTE `describe` EXISTE (AR MNR-2). El mutante
+  // `SYSVAR_RECENT_BLOCKHASHES_ID`: `…1111` → `…1112` (otra pubkey base58 válida) dejaba la
+  // suite ENTERA en verde. La causa es "guards que se comparan consigo mismos": el fixture
+  // hacía `new PublicKey(SYSVAR_RECENT_BLOCKHASHES_ID)`, o sea el validador y el vector se
+  // movían JUNTOS con el mutante. Si el valor estuviera mal de verdad, n4 rechazaría TODO
+  // depósito con nonce, fail-closed y en silencio.
+  //
+  // El arreglo no es cambiar la constante —sigue siendo un literal pinneado a propósito
+  // (CD-12: el validador compara contra bytes fijos, no contra lo que la librería devuelva
+  // después de un bump)— sino DARLE UNA SEGUNDA FUENTE al test. `@solana/web3.js` ya es
+  // dependencia y exporta el sysvar, y ese export NO se mueve con nuestro literal.
+  // El gemelo de este control en chaski es `nonce-duradero.test.ts`.
+  it('★ el sysvar de recent-blockhashes es EXACTAMENTE el de @solana/web3.js', () => {
+    expect(SYSVAR_RECENT_BLOCKHASHES_ID).toBe(SYSVAR_RECENT_BLOCKHASHES_PUBKEY.toBase58());
+  });
+
+  it('★ el discriminador de AdvanceNonceAccount es el que emite SystemProgram.nonceAdvance', () => {
+    // El mutante hermano (`[4,0,0,0]`→`[5,0,0,0]`) moría, pero por UN solo vector y de
+    // rebote (el `[4,0,0,0,99]` hardcodeado de T-12). Acá muere de frente y por su propio
+    // motivo, contra la fuente que de verdad decide qué byte espera el System Program.
+    const ref = SystemProgram.nonceAdvance({
+      noncePubkey: Keypair.generate().publicKey,
+      authorizedPubkey: Keypair.generate().publicKey,
+    });
+    expect([...ref.data]).toEqual([...ADVANCE_NONCE_DISCRIMINATOR]);
+    // Y la forma completa que n3/n5/n4 exigen, contra la ix que arma la librería.
+    expect(ref.keys).toHaveLength(3);
+    expect(ref.keys[1]?.pubkey.equals(SYSVAR_RECENT_BLOCKHASHES_PUBKEY)).toBe(true);
+    expect({ s: ref.keys[0]?.isSigner, w: ref.keys[0]?.isWritable }).toEqual({ s: false, w: true });
+    expect({ s: ref.keys[1]?.isSigner, w: ref.keys[1]?.isWritable }).toEqual({
+      s: false,
+      w: false,
+    });
+    expect(ref.keys[2]?.isSigner).toBe(true);
+  });
+});
 
 describe('WKH-357 — CR-1 Check 2n: la nonceAdvance del depósito por enlace', () => {
   const feePayer = Keypair.generate().publicKey;
@@ -288,16 +364,15 @@ describe('WKH-357 — CR-1 Check 2n: la nonceAdvance del depósito por enlace', 
       nonce: { nonceAccountWritable: false },
       reason: 'NONCE_IX_ACCOUNTS_INVALID',
     },
-    {
-      nombre: 'keys[2] (la authority) NO signer',
-      nonce: { authoritySigner: false },
-      reason: 'NONCE_IX_ACCOUNTS_INVALID',
-    },
-    {
-      nombre: 'keys[2] (la authority) writable',
-      nonce: { authorityWritable: true },
-      reason: 'NONCE_IX_ACCOUNTS_INVALID',
-    },
+    // ⛔ ACÁ HABÍA DOS VECTORES MÁS SOBRE LA AUTHORITY, y los dos se fueron de esta lista
+    // por AR BLQ-ALTO-1 — no por conveniencia, sino porque el round-trip **borra** la
+    // deformación que pretendían introducir. Están abajo, cada uno con su medición:
+    //   • 'keys[2] writable'   → ya NO es un rechazo (T-31): es la ÚNICA forma que existe
+    //                            en el cable, y exigir lo contrario tumbaba la feature.
+    //   • 'keys[2] NO signer'  → sigue siendo un rechazo pero SÓLO en memoria (T-32),
+    //                            porque en el cable la unión le devuelve el `signer`.
+    // Dejarlos en esta lista, que ahora cruza el cable, los volvía verdes por la razón
+    // equivocada: el n6 roto y el n6 arreglado rechazaban los dos con el MISMO enum.
   ];
 
   for (const v of negativos) {
@@ -310,6 +385,52 @@ describe('WKH-357 — CR-1 Check 2n: la nonceAdvance del depósito por enlace', 
       if (!r.ok) expect(r.reason).toBe(v.reason);
     });
   }
+
+  // ── T-31 / T-32 — las dos banderas de la AUTHORITY, con la medición del cable ──
+  it('★★ T-31 (AR BLQ-ALTO-1): la authority WRITABLE se ACEPTA, porque es la única forma que llega por el cable', () => {
+    // Éste es el vector que la HU tenía invertido. Se construye la deformación A MANO
+    // (`authorityWritable: true`) Y ADEMÁS se mide que el fixture canónico llega igual:
+    // la deformación es indistinguible del caso legítimo una vez que el mensaje se
+    // recompila, así que "rechazar la authority writable" era "rechazar todo".
+    const sender = Keypair.generate().publicKey;
+    const deformada = buildTx({ feePayer, sender, nonce: { authorityWritable: true } });
+    const canonica = buildTx({ feePayer, sender });
+    const authDef = deformada.instructions[0]?.keys[2];
+    const authCan = canonica.instructions[0]?.keys[2];
+    // La premisa medida: tras el cable las DOS son signer=true writable=true.
+    expect({ s: authDef?.isSigner, w: authDef?.isWritable }).toEqual({ s: true, w: true });
+    expect({ s: authCan?.isSigner, w: authCan?.isWritable }).toEqual({ s: true, w: true });
+    // ⇒ el veredicto tiene que ser el mismo, y tiene que ser ACEPTAR.
+    const rDef = validateDepositForSponsor(deformada, feePayer, CFG_ON);
+    const rCan = validateDepositForSponsor(canonica, feePayer, CFG_ON);
+    expect(rDef.ok).toBe(true);
+    expect(rCan.ok).toBe(true);
+    if (rDef.ok) expect(rDef.durableNonce).toBe(true);
+  });
+
+  it('T-32: la authority NO signer rechaza en MEMORIA, y en el cable el vector es inalcanzable (medido)', () => {
+    // `roundTrip: false` porque la deformación no sobrevive: la authority ES el sender y el
+    // `deposit` lo marca signer, así que la unión de metas le devuelve el `isSigner`. Se
+    // mide LAS DOS COSAS para que quede escrito y no inferido, y para que la mitad
+    // `!authorityAcct.isSigner` de n6 no se lea como cobertura del camino de producción.
+    const sender = Keypair.generate().publicKey;
+    const enMemoria = buildTx({
+      feePayer,
+      sender,
+      nonce: { authoritySigner: false },
+      roundTrip: false,
+    });
+    expect(enMemoria.instructions[0]?.keys[2]?.isSigner).toBe(false);
+    const rMem = validateDepositForSponsor(enMemoria, feePayer, CFG_ON);
+    expect(rMem.ok).toBe(false);
+    if (!rMem.ok) expect(rMem.reason).toBe('NONCE_IX_ACCOUNTS_INVALID');
+
+    // Y el mismo fixture tras el cable: la deformación desapareció ⇒ pasa. Fail-closed
+    // igual, porque no hay nada que cerrar: la tx es la legítima.
+    const porElCable = buildTx({ feePayer, sender, nonce: { authoritySigner: false } });
+    expect(porElCable.instructions[0]?.keys[2]?.isSigner).toBe(true);
+    expect(validateDepositForSponsor(porElCable, feePayer, CFG_ON).ok).toBe(true);
+  });
 
   it('★ T-12 (9º): la nonceAdvance en posición 1 (después del ComputeBudget) → NONCE_IX_NOT_FIRST', () => {
     // Importa que sea un rechazo con causa PROPIA: el runtime sólo trata la tx como
@@ -337,7 +458,9 @@ describe('WKH-357 — CR-1 Check 2n: la nonceAdvance del depósito por enlace', 
     tx.add(buildDepositIx(sender, escrowState));
     tx.feePayer = feePayer;
     tx.recentBlockhash = Keypair.generate().publicKey.toBase58();
-    const r = validateDepositForSponsor(tx, feePayer, CFG_ON);
+    // El fixture se arma a mano, así que el cable se pide EXPLÍCITAMENTE: `buildTx` no
+    // participa acá y su default no protege a este `it` (AR BLQ-ALTO-1).
+    const r = validateDepositForSponsor(porElCable(tx), feePayer, CFG_ON);
     expect(r.ok).toBe(false);
     // El `register_escrow` cae en `businessIx[0]`, pasa el whitelist de programId (es
     // del mismo escrow) y muere en el discriminador. Lo que importa es que NO se
@@ -352,8 +475,24 @@ describe('WKH-357 — CR-1 Check 2n: la nonceAdvance del depósito por enlace', 
     // `businessIx` en vez de `instructions`, esta tx PASARÍA. Y pasa n1..n6 completos
     // (la cuenta de nonce es writable non-signer, la authority es el sender), así que
     // lo único que la rechaza es Check 5.
+    //
+    // ⚠️ `roundTrip: false`, Y ES LA EXCEPCIÓN QUE MÁS IMPORTA DECLARAR (AR BLQ-ALTO-1).
+    // El fee-payer es `accountKeys[0]` del mensaje, o sea signer y writable SIEMPRE, así
+    // que tras `Transaction.from` la cuenta de nonce vuelve con `isSigner: true` y **n5 la
+    // rechaza antes de que Check 5 la vea**. MEDIDO, mismo fixture:
+    //     cuenta de nonce (== feePayer) tras el cable: signer=true writable=true
+    //     tras el cable : REJECT NONCE_IX_ACCOUNTS_INVALID
+    //     en memoria    : REJECT FEE_PAYER_REFERENCED_IN_INSTRUCTION
+    // Las dos son fail-closed y ninguna firma, pero el vector que aísla EL BUCLE de Check 5
+    // sólo existe en memoria. Se conserva así a propósito: es el único que muere si alguien
+    // cambia `instructions` por `businessIx`, y ese mutante es el que hay que matar.
+    //
+    // ⇒ Consecuencia que conviene tener escrita: en el cable, "el fee-payer referenciado
+    // SÓLO en la nonceAdvance" es INALCANZABLE. keys[0] lo caza n5 (siempre signer),
+    // keys[1] es el sysvar pinneado, y keys[2] tiene que ser el sender — y entonces el
+    // fee-payer está también en el `deposit`, que es el caso de T-14b.
     const sender = Keypair.generate().publicKey;
-    const tx = buildTx({ feePayer, sender, nonce: { nonceAccount: feePayer } });
+    const tx = buildTx({ feePayer, sender, nonce: { nonceAccount: feePayer }, roundTrip: false });
     const referenciasAlFeePayer = tx.instructions.filter((ix) =>
       ix.keys.some((k) => k.pubkey.equals(feePayer)),
     );
@@ -364,6 +503,14 @@ describe('WKH-357 — CR-1 Check 2n: la nonceAdvance del depósito por enlace', 
     const r = validateDepositForSponsor(tx, feePayer, CFG_ON);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe('FEE_PAYER_REFERENCED_IN_INSTRUCTION');
+
+    // Y el MISMO fixture tras el cable: sigue rechazando, con el marcador de n5. Se
+    // assertea para que el día que esto cambie, el test lo diga en vez de callarse.
+    const porElCable = buildTx({ feePayer, sender, nonce: { nonceAccount: feePayer } });
+    expect(porElCable.instructions[0]?.keys[0]?.isSigner).toBe(true);
+    const rCable = validateDepositForSponsor(porElCable, feePayer, CFG_ON);
+    expect(rCable.ok).toBe(false);
+    if (!rCable.ok) expect(rCable.reason).toBe('NONCE_IX_ACCOUNTS_INVALID');
   });
 
   it('T-14b: el fee-payer como authority del nonce (y sender) → también rechaza', () => {
@@ -441,6 +588,37 @@ describe('WKH-357 — CR-1 Check 2n: la nonceAdvance del depósito por enlace', 
       if (!r.ok) expect(r.reason).toBe('PROGRAM_NOT_WHITELISTED');
     });
 
+    it('★ y con register_escrow el enum es OTRO: NOT_EXACTLY_ONE_BUSINESS_IX (AR MNR-1)', () => {
+      // 🔴 EL PUNTO DE ESTE VECTOR ES QUE SON DOS MARCADORES, NO UNO. Tres comentarios del
+      // repo (el docblock de `Cr1Config.durableNonceEnabled`, el de Check 2n y el de
+      // `routes/solana-sponsor.ts`) afirmaban `PROGRAM_NOT_WHITELISTED` **sin condiciones**,
+      // y chaski produce las DOS formas según haya lugar en el índice on-chain (WKH-347).
+      // Con `register_escrow` presente, `businessIxTodas` es 3 y Check 2 corta por CANTIDAD
+      // antes de mirar un solo programId. Quien opere grepeando el marcador equivocado no
+      // encuentra la mitad de sus rechazos.
+      const sender = Keypair.generate().publicKey;
+      const tx = buildTx({ feePayer, sender, withRegister: true });
+      const r = validateDepositForSponsor(tx, feePayer, CFG_OFF);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.reason).toBe('NOT_EXACTLY_ONE_BUSINESS_IX');
+    });
+
+    it('Guard A sí da SHORT_DEPOSIT_DATA en las DOS formas (el contraste de AR MNR-1)', () => {
+      // El asimétrico es CR-1, no Guard A: `extractSponsorClaims` mira el largo de la data
+      // de la ix 0 antes que cualquier otra cosa, y la `nonceAdvance` tiene 4 bytes en las
+      // dos formas. Se mide para que la afirmación del `doc/deploy` quede respaldada.
+      const sender = Keypair.generate().publicKey;
+      for (const withRegister of [false, true]) {
+        const r = extractSponsorClaims(buildTx({ feePayer, sender, withRegister }));
+        expect(r.ok).toBe(false);
+        if (!r.ok)
+          expect({ withRegister, reason: r.reason }).toEqual({
+            withRegister,
+            reason: 'SHORT_DEPOSIT_DATA',
+          });
+      }
+    });
+
     it('una tx SIN nonce da EXACTAMENTE el mismo {ok, reason} con la bandera prendida y apagada', () => {
       // El diferencial que importa: la bandera no puede cambiar el veredicto de ninguna
       // tx que no lleve nonce. Se barren el caso feliz y 4 formas negativas.
@@ -481,7 +659,7 @@ describe('WKH-357 — CR-1 Check 2n: la nonceAdvance del depósito por enlace', 
             t.add(buildDepositIx(sender, escrowState));
             t.feePayer = feePayer;
             t.recentBlockhash = Keypair.generate().publicKey.toBase58();
-            return t;
+            return porElCable(t);
           })(),
         },
       ];
@@ -554,6 +732,59 @@ describe('WKH-357 — CR-1 Check 2n: la nonceAdvance del depósito por enlace', 
     expect(recibida.verifySignatures(true)).toBe(true);
     // Y el `recentBlockhash` que viaja es el valor del nonce, intacto.
     expect(recibida.recentBlockhash).toBe(tx.recentBlockhash);
+  });
+
+  // ── T-30 — EL CONTROL QUE CIERRA LA CLASE (AR BLQ-ALTO-1) ─────────────────
+  it('★★ T-30: el fixture POSITIVO, serializado y reconstruido con Transaction.from, sigue dando ok', () => {
+    // 🔴 ÉSTE es el `it` que faltaba, y su ausencia dejó pasar un rechazo del 100% de los
+    // depósitos con nonce. Es el ÚNICO test de este archivo que mide lo que llega por el
+    // CABLE en vez de un objeto `Transaction` construido en memoria, y el único que no se
+    // puede satisfacer eligiendo las banderas del fixture: `Transaction.from` las
+    // recalcula desde el mensaje.
+    //
+    // ⚠️ NO alcanza con que `buildTx` haga el round-trip por default (que lo hace, ver su
+    // docblock): eso protege a los 24 vectores pero es una propiedad del HELPER, y quien
+    // agregue un fixture a mano —como los de T-13 y T-14, que arman el `Transaction`
+    // directo— la pierde sin que nada avise. Este `it` la assertea de punta a punta y
+    // ADEMÁS deja escritas las banderas medidas antes y después, que es el dato que
+    // explica por qué n6 no puede exigir `!isWritable`.
+    const senderKp = Keypair.generate();
+    const feePayerKp = Keypair.generate();
+    const fp = feePayerKp.publicKey;
+    const enMemoria = buildTx({ feePayer: fp, sender: senderKp.publicKey, roundTrip: false });
+
+    // La premisa, medida sobre el fixture: la authority llega NO-writable en memoria.
+    const authAntes = enMemoria.instructions[0]?.keys[2];
+    expect(authAntes?.pubkey.equals(senderKp.publicKey)).toBe(true);
+    expect(authAntes?.isSigner).toBe(true);
+    expect(authAntes?.isWritable).toBe(false);
+
+    enMemoria.partialSign(senderKp);
+    const recibida = Transaction.from(enMemoria.serialize({ requireAllSignatures: false }));
+
+    // 🔴 EL COLAPSO, medido: en un mensaje legacy las banderas son del MENSAJE, no de la
+    // ix, así que la meta de cada pubkey se une sobre todas las instrucciones. El sender
+    // es signer+writable en el `deposit` (Check 4 lo EXIGE: `SENDER_FLAGS_INVALID` en
+    // `cr1.ts`) y la authority ES el sender (n6 parte 2: `NONCE_AUTHORITY_NOT_SENDER`)
+    // ⇒ la authority vuelve WRITABLE, siempre. Se citan por ENUM y no por línea a
+    // propósito: `cr1.ts` se mueve con cada HU y este repo no tiene candado de citas.
+    const authDespues = recibida.instructions[0]?.keys[2];
+    expect(authDespues?.isSigner).toBe(true);
+    expect(authDespues?.isWritable).toBe(true);
+
+    // Y con esa forma —la única que existe en el cable— CR-1 tiene que ACEPTAR.
+    const r = validateDepositForSponsor(recibida, fp, CFG_ON);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.durableNonce).toBe(true);
+
+    // Las otras dos cuentas del nonce NO colapsan, y por eso n5/n4 sí pueden assertar
+    // banderas: aparecen SÓLO en la `nonceAdvance`, así que no hay unión que las mueva.
+    const nonceAcct = recibida.instructions[0]?.keys[0];
+    const sysvarAcct = recibida.instructions[0]?.keys[1];
+    expect(nonceAcct?.isSigner).toBe(false);
+    expect(nonceAcct?.isWritable).toBe(true);
+    expect(sysvarAcct?.isSigner).toBe(false);
+    expect(sysvarAcct?.isWritable).toBe(false);
   });
 
   // ── T-29 — por qué la detección NO puede preguntarle a `nonceInfo` ────────

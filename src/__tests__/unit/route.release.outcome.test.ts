@@ -3,7 +3,7 @@
  *
  * `salió` / `no salió` / `NO SÉ`. El tercero existe porque los otros dos mienten en
  * su caso: `SPONSOR_BROADCAST_EXPIRED` se emite también desde sondas que corren
- * DESPUÉS de un `sendRawTransaction` exitoso (broadcast.ts:300-312 y :348-360), y el
+ * DESPUÉS de un `sendRawTransaction` exitoso (broadcast.ts:372-388 y :425-440), y el
  * `catch` de esas sondas significa "no pude preguntar", no "el blockhash venció".
  * `CosignResult.sent` es lo único que los separa, y esta ruta lo descartaba.
  *
@@ -268,7 +268,7 @@ describe('POST /solana/escrow/release — salió / no salió / no sé', () => {
 
   // ── 2. NO SALIÓ ────────────────────────────────────────────────────────────
   it('★ no salió: EXPIRED SIN envío previo (`sent` ausente) → 409 RELEASE_BROADCAST_EXPIRED', async () => {
-    // Éste es el expirado PRE-firma (broadcast.ts:224-232): probado que no se gastó.
+    // Éste es el expirado PRE-firma (broadcast.ts:279-290): probado que no se gastó.
     const out = await run({
       ok: false,
       code: 'SPONSOR_BROADCAST_EXPIRED',

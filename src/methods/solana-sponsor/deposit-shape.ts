@@ -201,9 +201,27 @@ export const ADVANCE_NONCE_ACCOUNT_INDEX = {
 /**
  * The recent-blockhashes sysvar the `nonceAdvance` reads (account index 1).
  *
- * ⚠️ IT IS THE DIGIT `1`, NOT THE LETTER `l` — "SysvarRecentB**1**ockHashes". base58
- * has no `l`, so a typo here does not produce a wrong-but-valid pubkey: it throws
- * inside `new PublicKey(...)` at module import. Derived from
+ * ⚠️ IT IS THE DIGIT `1`, NOT THE LETTER `l` — "SysvarRecentB**1**ockHashes". Derived from
  * `SYSVAR_RECENT_BLOCKHASHES_PUBKEY.toBase58()` on 2026-08-17, not typed by hand.
+ *
+ * ⛔ WHAT THE REAL CONTROLS ARE (AR MNR-2 + MNR-3). An earlier version of this docblock
+ * claimed a typo "throws inside `new PublicKey(...)` at module import". **It does not, and
+ * it cannot**: this is a `string` and THIS MODULE HAS NO IMPORTS AT ALL — `grep -n "new
+ * PublicKey" deposit-shape.ts` matches only the sentence you are reading. The two controls
+ * that do exist:
+ *
+ *   1. An `l` (a character base58 has no digit for) is caught at RUNTIME, not at import:
+ *      the `new PublicKey(SYSVAR_RECENT_BLOCKHASHES_ID)` lives inside n4 in `cr1.ts`, under
+ *      the module's top-level `try/catch`, so it degrades to a fail-closed
+ *      `CR1_UNEXPECTED_ERROR` on every deposit with a nonce. Fail-closed, but SILENT: no
+ *      typecheck and no import-time crash sees it.
+ *   2. A wrong-but-VALID base58 (`…1111` → `…1112`, which no exception catches) is caught
+ *      only by the test that compares this literal against `@solana/web3.js`'s own
+ *      `SYSVAR_RECENT_BLOCKHASHES_PUBKEY`, in `solana-sponsor.durable-nonce.test.ts`.
+ *      Before that test existed the mutant SURVIVED the whole suite, because every fixture
+ *      did `new PublicKey(SYSVAR_RECENT_BLOCKHASHES_ID)` and moved WITH the mutant.
+ *
+ * So: control 1 is a runtime degradation, control 2 is the test. Neither is "it throws at
+ * import", and control 2 is the only one that catches the dangerous case.
  */
 export const SYSVAR_RECENT_BLOCKHASHES_ID = 'SysvarRecentB1ockHashes11111111111111111111';

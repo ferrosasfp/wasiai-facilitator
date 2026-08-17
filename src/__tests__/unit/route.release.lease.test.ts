@@ -9,7 +9,7 @@
  *
  * `cosignAndBroadcast` sí es un doble, y emula UNA cláusula del primitivo real: si el
  * caller pasó `onSigned` y éste devuelve `{ ok:false }`, NO transmite y resuelve
- * `SPONSOR_PERSIST_FAILED` (broadcast.ts:241-250). Esa cláusula es lo que convierte la
+ * `SPONSOR_PERSIST_FAILED` (broadcast.ts:299-308). Esa cláusula es lo que convierte la
  * cerca en un no-broadcast, y el doble la respeta en vez de asumirla. Que el primitivo
  * real la cumpla ya lo cubre solana-sponsor.broadcast.test.ts.
  *
