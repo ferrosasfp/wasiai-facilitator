@@ -601,4 +601,45 @@ describe('parseEnv', () => {
     const allWrites = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
     expect(allWrites).toContain('OPERATOR_MIN_BALANCE_WEI');
   });
+
+  // ── WKH-357 / T-21 (AC-8) — la bandera del nonce durable ────────────────────
+  describe('T-21: SOLANA_SPONSOR_DURABLE_NONCE_ENABLED', () => {
+    it('ausente ⇒ apagada (el default es lo que corre en producción)', () => {
+      const result = parseEnv({ NODE_ENV: 'test' });
+      expect(result.SOLANA_SPONSOR_DURABLE_NONCE_ENABLED).toBe(false);
+    });
+
+    it("'false' ⇒ apagada, y 'true' ⇒ prendida", () => {
+      expect(
+        parseEnv({ NODE_ENV: 'test', SOLANA_SPONSOR_DURABLE_NONCE_ENABLED: 'false' })
+          .SOLANA_SPONSOR_DURABLE_NONCE_ENABLED,
+      ).toBe(false);
+      expect(
+        parseEnv({ NODE_ENV: 'test', SOLANA_SPONSOR_DURABLE_NONCE_ENABLED: 'true' })
+          .SOLANA_SPONSOR_DURABLE_NONCE_ENABLED,
+      ).toBe(true);
+    });
+
+    // ⚠️ EL DESENLACE REAL, no un `false` silencioso. `z.enum(['true','false'])` RECHAZA
+    // `''`, `'FALSE'` y `'0'` en el parseo del schema, así que lo que produce cada uno de
+    // esos tres no es "la bandera queda apagada": es que la app NO ARRANCA (exit 1). Los
+    // dos desenlaces son seguros —ninguno deja la bandera prendida por accidente— pero
+    // son DISTINTOS, y assertar un `false` acá sería afirmar algo que no pasa.
+    for (const valor of ['', 'FALSE', '0', 'yes']) {
+      it(`'${valor}' ⇒ error de validación de env (exit 1), NO un false silencioso`, () => {
+        const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((_code?: number) => {
+          throw new Error('__exit__');
+        }) as never);
+        const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+        expect(() =>
+          parseEnv({ NODE_ENV: 'test', SOLANA_SPONSOR_DURABLE_NONCE_ENABLED: valor }),
+        ).toThrow('__exit__');
+
+        expect(exitSpy).toHaveBeenCalledWith(1);
+        const allWrites = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+        expect(allWrites).toContain('SOLANA_SPONSOR_DURABLE_NONCE_ENABLED');
+      });
+    }
+  });
 });

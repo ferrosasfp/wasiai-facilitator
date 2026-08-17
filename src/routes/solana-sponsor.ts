@@ -197,6 +197,26 @@ export const solanaSponsorRoute: FastifyPluginAsync = async (app) => {
       'sponsorship: deposit-authority check ARMED against the configured release authority',
     );
   }
+  // WKH-357 — la bandera del nonce durable se ve en el arranque, en LAS DOS ramas, con
+  // el mismo criterio que el NOTICE de arriba: `warn` cuando está PRENDIDA (es una
+  // superficie de validación nueva, y quien opera tiene que poder verla sin buscarla) e
+  // `info` cuando está apagada, para que "no veo el aviso" signifique "está apagada" y
+  // no "no miré bien".
+  if (env.SOLANA_SPONSOR_DURABLE_NONCE_ENABLED) {
+    app.log.warn(
+      {
+        setting: 'SOLANA_SPONSOR_DURABLE_NONCE_ENABLED',
+        value: true,
+        check: 'CR1_DURABLE_NONCE',
+      },
+      'NOTICE: sponsored deposits with a durable-nonce `AdvanceNonceAccount` as instruction 0 are ACCEPTED on this instance (WKH-357). The nonce ix is validated against a pinned shape (CR-1 Check 2n) and its authority MUST be the deposit sender; Check 5 still forbids the fee-payer from being referenced by any instruction. Blockhash-freshness pre-checks are SKIPPED for those txs — the runtime is the authority on whether the nonce value is current.',
+    );
+  } else {
+    app.log.info(
+      { check: 'CR1_DURABLE_NONCE', value: false },
+      'sponsorship: durable-nonce deposits are REJECTED (flag off) — a tx with AdvanceNonceAccount at ix 0 falls through the pre-WKH-357 path and is rejected',
+    );
+  }
   const cr1cfg: Cr1Config = {
     escrowProgramId: env.SOLANA_ESCROW_PROGRAM_ID,
     maxComputeUnits: env.SOLANA_SPONSOR_MAX_COMPUTE_UNITS,
@@ -325,7 +345,14 @@ export const solanaSponsorRoute: FastifyPluginAsync = async (app) => {
       }
 
       // Step 3 — Guard A, parte 1: qué dice la tx de sí misma (shape + A2 + A3).
-      const claimsResult = extractSponsorClaims(parsedTx.tx);
+      //
+      // 🔴 WKH-357 / CD-13 — LA BANDERA VA A LOS DOS PUNTOS DE CABLEADO, no a uno.
+      // Guard A corre ACÁ y CR-1 corre adentro de `cosignAndBroadcast`, más abajo.
+      // Gatear sólo CR-1 dejaría a Guard A rechazando con 403 ANTES de que CR-1 pudiera
+      // aceptar: la feature no funcionaría y el log culparía al guard equivocado.
+      const claimsResult = extractSponsorClaims(parsedTx.tx, {
+        allowDurableNonce: env.SOLANA_SPONSOR_DURABLE_NONCE_ENABLED,
+      });
       if (!claimsResult.ok) {
         return failSenderProof(claimsResult.reason, claimsResult.detail);
       }
