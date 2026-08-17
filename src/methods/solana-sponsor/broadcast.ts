@@ -223,6 +223,29 @@ export async function cosignAndBroadcast(
     return { ok: false, code: 'SPONSOR_REJECTED', reason: v.reason };
   }
 
+  // WKH-357 — ¿saltear las sondas de frescura? SÓLO si el validador reconoció un
+  // durable nonce. `undefined` (todo validador que no lo setea, y CR-1 con la bandera
+  // apagada) ⇒ `false` ⇒ las 3 sondas corren exactamente como hoy.
+  //
+  // POR QUÉ HAY QUE SALTEARLAS Y NO ES UNA OPTIMIZACIÓN: el `recentBlockhash` de una
+  // tx con nonce durable NO es un blockhash reciente, es el valor guardado en la cuenta
+  // de nonce. `isBlockhashValid` contesta `false` para él — correctamente, porque no está
+  // entre los ~150 recientes — y ese `false` rechazaría TODO depósito con nonce.
+  //
+  // ⚠️ LA AUTORIDAD SOBRE SI EL NONCE SIRVE ES EL RUNTIME AL EJECUTAR, NO UNA SONDA
+  // PREVIA. El System Program compara el valor de la cuenta contra el `recentBlockhash`
+  // del mensaje y falla la tx entera si no coinciden, así que saltear esto no relaja
+  // ninguna garantía: mueve el veredicto al único lugar que puede darlo de verdad.
+  //
+  // ⛔ Y NO se convierte en un `ok:true` optimista: el veredicto lo siguen dando
+  // `sendRawTransaction` + `confirmTransaction`. Lo que se PIERDE es el diagnóstico
+  // `STALE_BLOCKHASH`; lo que lo reemplaza para acotar el bucle es el conteo de
+  // intentos (`attempts`), que ya existía. La contabilidad de `sent` / `mayHaveSpent`
+  // no se toca: al agotar los intentos con el salteo puesto se cae en
+  // `SPONSOR_BROADCAST_FAILED` + `sent`, que CONSERVA el débito. Ése es el lado
+  // conservador y es el correcto — no lo "arregles" para devolver los lamports.
+  const saltearFrescura = v.durableNonce === true;
+
   // Step 3 — fee upper bound must stay within the per-tx cap.
   if (v.feeUpperBoundLamports > opts.maxFeeLamports) {
     return { ok: false, code: 'SPONSOR_REJECTED', reason: 'FEE_ABOVE_MAX' };
@@ -252,15 +275,18 @@ export async function cosignAndBroadcast(
       }
 
       // Step 5 — blockhash fresh BEFORE signing (never sign a stale tx).
-      let fresh: boolean;
-      try {
-        fresh = await isBlockhashFresh(connection, blockhash);
-      } catch {
-        // RPC error on the freshness probe → fail-closed, never sign.
-        return { ok: false, code: 'SPONSOR_BROADCAST_EXPIRED', reason: 'BLOCKHASH_CHECK_FAILED' };
-      }
-      if (!fresh) {
-        return { ok: false, code: 'SPONSOR_BROADCAST_EXPIRED', reason: 'STALE_BLOCKHASH' };
+      // Salteado para una tx con nonce durable: ver `saltearFrescura` arriba.
+      if (!saltearFrescura) {
+        let fresh: boolean;
+        try {
+          fresh = await isBlockhashFresh(connection, blockhash);
+        } catch {
+          // RPC error on the freshness probe → fail-closed, never sign.
+          return { ok: false, code: 'SPONSOR_BROADCAST_EXPIRED', reason: 'BLOCKHASH_CHECK_FAILED' };
+        }
+        if (!fresh) {
+          return { ok: false, code: 'SPONSOR_BROADCAST_EXPIRED', reason: 'STALE_BLOCKHASH' };
+        }
       }
 
       // Step 6 — co-sign as fee-payer, then broadcast with bounded rebroadcast.
@@ -281,7 +307,13 @@ export async function cosignAndBroadcast(
         }
       }
       const raw = tx.serialize();
-      return broadcastWithRebroadcast(connection, raw, blockhash, opts.maxRebroadcasts);
+      return broadcastWithRebroadcast(
+        connection,
+        raw,
+        blockhash,
+        opts.maxRebroadcasts,
+        saltearFrescura,
+      );
     },
   );
 
@@ -315,12 +347,19 @@ export async function cosignAndBroadcast(
  * `maxRebroadcasts + 1` attempts. On exhaustion, distinguishes expiry (blockhash
  * no longer valid → SPONSOR_BROADCAST_EXPIRED) from a hard failure
  * (SPONSOR_BROADCAST_FAILED).
+ *
+ * WKH-357: `saltearFrescura` viaja como parámetro porque esta función es PRIVADA y
+ * tiene su propia firma — no recibe el `v` del validador, así que los 2 sitios de
+ * frescura que viven acá no se ven en el diff de `cosignAndBroadcast`. Con `true`, el
+ * bucle sigue acotado por `attempts` y la salida por agotamiento es
+ * `SPONSOR_BROADCAST_FAILED` + `sent`, que conserva el débito.
  */
 async function broadcastWithRebroadcast(
   connection: Connection,
   raw: Uint8Array,
   blockhash: string,
   maxRebroadcasts: number,
+  saltearFrescura: boolean,
 ): Promise<CosignResult> {
   const attempts = Math.max(1, maxRebroadcasts + 1);
   // AR BLQ-1: a partir del primer send exitoso, NINGÚN veredicto posterior puede
@@ -328,21 +367,24 @@ async function broadcastWithRebroadcast(
   let sent = false;
   for (let i = 0; i < attempts; i++) {
     // Re-check freshness at the top of each (re)broadcast — the blockhash may
-    // have expired between retries.
-    let fresh: boolean;
-    try {
-      fresh = await isBlockhashFresh(connection, blockhash);
-    } catch {
-      // "No pude preguntar" ≠ "venció". Si ya hubo envío, esto es una incógnita.
-      return {
-        ok: false,
-        code: 'SPONSOR_BROADCAST_EXPIRED',
-        reason: 'BLOCKHASH_CHECK_FAILED',
-        sent,
-      };
-    }
-    if (!fresh) {
-      return { ok: false, code: 'SPONSOR_BROADCAST_EXPIRED', reason: 'BLOCKHASH_EXPIRED', sent };
+    // have expired between retries. Salteado para nonce durable: un valor de nonce no
+    // "vence entre reintentos", se consume cuando la tx ejecuta.
+    if (!saltearFrescura) {
+      let fresh: boolean;
+      try {
+        fresh = await isBlockhashFresh(connection, blockhash);
+      } catch {
+        // "No pude preguntar" ≠ "venció". Si ya hubo envío, esto es una incógnita.
+        return {
+          ok: false,
+          code: 'SPONSOR_BROADCAST_EXPIRED',
+          reason: 'BLOCKHASH_CHECK_FAILED',
+          sent,
+        };
+      }
+      if (!fresh) {
+        return { ok: false, code: 'SPONSOR_BROADCAST_EXPIRED', reason: 'BLOCKHASH_EXPIRED', sent };
+      }
     }
 
     let signature: string;
@@ -378,19 +420,23 @@ async function broadcastWithRebroadcast(
   }
 
   // Exhausted retries. Expired blockhash → EXPIRED, otherwise a hard FAILED.
-  let stillFresh: boolean;
-  try {
-    stillFresh = await isBlockhashFresh(connection, blockhash);
-  } catch {
-    return {
-      ok: false,
-      code: 'SPONSOR_BROADCAST_EXPIRED',
-      reason: 'BLOCKHASH_CHECK_FAILED',
-      sent,
-    };
-  }
-  if (!stillFresh) {
-    return { ok: false, code: 'SPONSOR_BROADCAST_EXPIRED', reason: 'BLOCKHASH_EXPIRED', sent };
+  // Con nonce durable no hay expiración que distinguir, así que se cae derecho al
+  // FAILED de abajo, que lleva `sent` y por lo tanto CONSERVA el débito del cap.
+  if (!saltearFrescura) {
+    let stillFresh: boolean;
+    try {
+      stillFresh = await isBlockhashFresh(connection, blockhash);
+    } catch {
+      return {
+        ok: false,
+        code: 'SPONSOR_BROADCAST_EXPIRED',
+        reason: 'BLOCKHASH_CHECK_FAILED',
+        sent,
+      };
+    }
+    if (!stillFresh) {
+      return { ok: false, code: 'SPONSOR_BROADCAST_EXPIRED', reason: 'BLOCKHASH_EXPIRED', sent };
+    }
   }
   return {
     ok: false,
