@@ -150,6 +150,46 @@ export type CosignResult =
        * termina afirmando "no se gastó" sobre un pago real.
        */
       sent?: boolean;
+      /**
+       * WKH-367 — motivo del ÚLTIMO error OBSERVADO por el bucle, ≤160 chars. SÓLO
+       * diagnóstico: ninguna rama de decisión lo lee (CD-8), y NUNCA va al body de
+       * ninguna respuesta HTTP (CD-9) — sólo al log del operador.
+       *
+       * ⚠️ QUÉ NO ES: no es un veredicto (la tx pudo aterrizar igual) ni los logs de
+       * simulación (se usa `transactionError.message`, el motivo pelado). Tampoco es
+       * necesariamente la causa del `reason` que lo acompaña: `BLOCKHASH_EXPIRED` no
+       * tiene error propio y viaja con el último que sí hubo.
+       *
+       * ⚠️ EL INVARIANTE, que es lo que lo hace legible (AR BLQ-BAJO-1): ningún error
+       * observado se descarta, así que `detail` es SIEMPRE lo ÚLTIMO que salió mal en esta
+       * transmisión, nunca lo anteúltimo. Lo clava **T-3g**, que corre en los CUATRO sitios el
+       * mutante *"si el error nuevo no se puede narrowear, quedate con el anteúltimo"*; sin
+       * T-3g esto era prosa y el mutante pasaba la suite entera (CR MNR-CR-3).
+       *
+       * ⚠️ "OBSERVADO", NO "ATRAPADO" (CR MNR-CR-7): este renglón decía *"atrapado"*, y ése es
+       * el modelo mental que produjo el bug de BLQ-BAJO-1. El desenlace más informativo de
+       * todos — `confirmTransaction` que RESUELVE con `value.err !== null`, la tx aterrizada y
+       * revertida — **no pasa por ningún `catch`**, y por eso un barrido de `catch`es no podía
+       * encontrarlo; hoy se captura con el prefijo `CONFIRMED_WITH_ERR:` (T-3c/T-3d/T-3f).
+       *
+       * ⚠️ EL PRECIO DEL INVARIANTE, decidido y no accidental (CR MNR-CR-4): a ese
+       * `CONFIRMED_WITH_ERR:` lo PISA el error de transporte de un reintento posterior, que ya
+       * no podía cambiar nada (la red dedupea por firma). Se acepta: invertir la precedencia
+       * crearía una segunda regla ("algunos errores valen más") que contradice este mismo
+       * invariante, y la información no se pierde — `sentSignature` sobrevive y es el ancla
+       * para ir a mirar la cadena. **T-3h** lo pinnea para que revisarlo no sea silencioso.
+       */
+      detail?: string;
+      /**
+       * WKH-367 — la firma que un `sendRawTransaction` RETORNÓ antes de que el desenlace
+       * quedara incierto. SÓLO diagnóstico; NUNCA al body (CD-9), al log va `tx_signature`.
+       *
+       * ⚠️ NO se llama `signature` porque la rama `ok:true` ya usa ese nombre y ahí
+       * significa "confirmada"; esto significa apenas "un nodo aceptó estos bytes".
+       * Confundirlas es la atribución que el bloque del 502 de `routes/solana-sponsor.ts`
+       * argumenta que esa ruta NO puede sostener.
+       */
+      sentSignature?: string;
     };
 
 /**
@@ -342,6 +382,77 @@ export async function cosignAndBroadcast(
   return result;
 }
 
+/** Mismo tope y misma razón que el `DETAIL_MAX_LEN` de `sponsor-claims.ts`. */
+const BROADCAST_DETAIL_MAX_LEN = 160;
+
+/**
+ * WKH-367 — el motivo de un error de envío/confirmación, acotado. NUNCA tira (T-4b).
+ *
+ * Match ESTRUCTURAL, no `instanceof SendTransactionError`: los tests inyectan un
+ * `Connection` doble y la identidad de clase entre dos instancias del módulo es frágil.
+ * `transactionError` (getter público de @solana/web3.js 1.98.4) devuelve el motivo
+ * pelado; `e.message` NO sirve porque arranca con ~88 chars de firma base58 e incrusta
+ * los logs de simulación — truncarlo a 160 se come justo el motivo.
+ *
+ * ⛔ Nunca `String(e)`: sobre un no-Error deja `"undefined"` o `"[object Object]"` en el
+ * log, peor que no tener el campo — sin candidato ⇒ `undefined` ⇒ la clave se omite.
+ * ⛔ Nunca `.logs` ni `getLogs()` (el segundo hace RED).
+ */
+function narrowSendDetail(e: unknown): string | undefined {
+  try {
+    if (typeof e === 'object' && e !== null) {
+      const te = (e as { transactionError?: unknown }).transactionError;
+      if (typeof te === 'object' && te !== null) {
+        const m = (te as { message?: unknown }).message;
+        // AR MNR-3: si el error TIENE `transactionError` pero su `message` no es string,
+        // NO se cae al `e.message` de abajo. Ese texto arranca con ~88 chars de firma e
+        // incrusta los `Logs:` de simulación — exactamente lo que CD-11 prohíbe. Sin
+        // candidato limpio, ningún candidato: el campo se omite y nadie se confunde.
+        return typeof m === 'string' ? m.slice(0, BROADCAST_DETAIL_MAX_LEN) : undefined;
+      }
+    }
+    if (e instanceof Error) {
+      // `message` está tipado `string`, pero un objeto real puede traer cualquier cosa
+      // ahí: se re-mira en runtime antes de llamarle `.slice` (AR MNR-2).
+      const m: unknown = e.message;
+      if (typeof m === 'string') return m.slice(0, BROADCAST_DETAIL_MAX_LEN);
+    }
+  } catch {
+    // AR MNR-2: un `transactionError` implementado como getter que TIRA escapaba de acá.
+    // Este helper corre DENTRO de los `catch` del bucle, así que un throw suyo no se
+    // atrapa en ningún lado: se lleva puesto el 502 con todo su diagnóstico y lo
+    // convierte en un 500. "NUNCA tira" ahora es una propiedad, no una intención.
+  }
+  return undefined;
+}
+
+/**
+ * WKH-367 / AR BLQ-BAJO-1 — el motivo de una tx que ATERRIZÓ y REVIRTIÓ, acotado.
+ *
+ * `confirmTransaction` RESUELVE con `value.err !== null` en ese caso: no hay objeto de
+ * error, no hay `catch`, y el desenlace más informativo de todos era el único que el
+ * bucle tiraba a la basura. Sin esto, el `return` de agotamiento sale con el motivo de
+ * un intento ANTERIOR Y DISTINTO — el operador lee "el envío nunca pasó" sobre una tx
+ * que sí llegó a la cadena. Es la misatribución que esta HU existe para no cometer.
+ *
+ * El prefijo `CONFIRMED_WITH_ERR:` está para que ese `detail` no se confunda con el de
+ * un error de transporte: los dos viven en el mismo campo y significan cosas opuestas.
+ *
+ * NUNCA tira: `JSON.stringify` puede tirar (referencia circular, `BigInt`) o devolver
+ * `undefined` (una función), y los dos casos caen en `[unserializable]`. Un throw acá
+ * quedaría atrapado por el `catch` de confirmación y `detail` diría un motivo NUESTRO
+ * disfrazado de motivo de la cadena.
+ */
+function narrowConfirmedErr(err: unknown): string {
+  let body: string | undefined;
+  try {
+    body = typeof err === 'string' ? err : JSON.stringify(err);
+  } catch {
+    body = undefined;
+  }
+  return `CONFIRMED_WITH_ERR:${body ?? '[unserializable]'}`.slice(0, BROADCAST_DETAIL_MAX_LEN);
+}
+
 /**
  * Broadcast + confirm with bounded rebroadcast (AC-5). Up to
  * `maxRebroadcasts + 1` attempts. On exhaustion, distinguishes expiry (blockhash
@@ -365,6 +476,14 @@ async function broadcastWithRebroadcast(
   // AR BLQ-1: a partir del primer send exitoso, NINGÚN veredicto posterior puede
   // afirmar que no se gastó — la tx ya está en manos del cluster.
   let sent = false;
+  // WKH-367: se guarda el ÚLTIMO error/firma, no el primero — el motivo que importa es
+  // el del intento que terminó el camino, no el del que todavía tenía reintentos.
+  let lastDetail: string | undefined;
+  let lastSignature: string | undefined;
+  const diag = () => ({
+    ...(lastDetail === undefined ? {} : { detail: lastDetail }),
+    ...(lastSignature === undefined ? {} : { sentSignature: lastSignature }),
+  });
   for (let i = 0; i < attempts; i++) {
     // Re-check freshness at the top of each (re)broadcast — the blockhash may
     // have expired between retries. Salteado para nonce durable: un valor de nonce no
@@ -373,17 +492,27 @@ async function broadcastWithRebroadcast(
       let fresh: boolean;
       try {
         fresh = await isBlockhashFresh(connection, blockhash);
-      } catch {
+      } catch (e) {
         // "No pude preguntar" ≠ "venció". Si ya hubo envío, esto es una incógnita.
+        // WKH-367: sin capturar ACÁ, el `detail` de este return sería el del
+        // `sendRawTransaction` del intento ANTERIOR — misatribución (T-3b).
+        lastDetail = narrowSendDetail(e);
         return {
           ok: false,
           code: 'SPONSOR_BROADCAST_EXPIRED',
           reason: 'BLOCKHASH_CHECK_FAILED',
           sent,
+          ...diag(),
         };
       }
       if (!fresh) {
-        return { ok: false, code: 'SPONSOR_BROADCAST_EXPIRED', reason: 'BLOCKHASH_EXPIRED', sent };
+        return {
+          ok: false,
+          code: 'SPONSOR_BROADCAST_EXPIRED',
+          reason: 'BLOCKHASH_EXPIRED',
+          sent,
+          ...diag(),
+        };
       }
     }
 
@@ -394,7 +523,8 @@ async function broadcastWithRebroadcast(
         preflightCommitment: 'confirmed',
       });
       sent = true;
-    } catch {
+      lastSignature = signature;
+    } catch (e) {
       // R-1: un envío que TIRA también cuenta como "pudo haber salido". Un timeout
       // o un socket caído ocurren perfectamente DESPUÉS de que el nodo aceptó la tx
       // y la reenvió al cluster, así que el throw no prueba que no haya llegado.
@@ -404,6 +534,7 @@ async function broadcastWithRebroadcast(
       // bucle trataba el envío fallido como "puede haber llegado" y el flag como
       // "no llegó" — dos criterios opuestos en el mismo archivo.
       sent = true;
+      lastDetail = narrowSendDetail(e);
       continue; // transient send error → rebroadcast
     }
 
@@ -414,8 +545,13 @@ async function broadcastWithRebroadcast(
       if (conf.value.err === null || conf.value.err === undefined) {
         return { ok: true, signature };
       }
-    } catch {
+      // AR BLQ-BAJO-1: la tx aterrizó y falló ON-CHAIN. Va DENTRO del `try` a propósito:
+      // si el narrowing llegara a tirar, el `catch` de abajo lo absorbe y la función
+      // sigue sin poder propagar una excepción nueva (T-3e).
+      lastDetail = narrowConfirmedErr(conf.value.err);
+    } catch (e) {
       // confirmation error → retry
+      lastDetail = narrowSendDetail(e);
     }
   }
 
@@ -426,16 +562,24 @@ async function broadcastWithRebroadcast(
     let stillFresh: boolean;
     try {
       stillFresh = await isBlockhashFresh(connection, blockhash);
-    } catch {
+    } catch (e) {
+      lastDetail = narrowSendDetail(e);
       return {
         ok: false,
         code: 'SPONSOR_BROADCAST_EXPIRED',
         reason: 'BLOCKHASH_CHECK_FAILED',
         sent,
+        ...diag(),
       };
     }
     if (!stillFresh) {
-      return { ok: false, code: 'SPONSOR_BROADCAST_EXPIRED', reason: 'BLOCKHASH_EXPIRED', sent };
+      return {
+        ok: false,
+        code: 'SPONSOR_BROADCAST_EXPIRED',
+        reason: 'BLOCKHASH_EXPIRED',
+        sent,
+        ...diag(),
+      };
     }
   }
   return {
@@ -443,5 +587,6 @@ async function broadcastWithRebroadcast(
     code: 'SPONSOR_BROADCAST_FAILED',
     reason: 'UNCONFIRMED_AFTER_REBROADCASTS',
     sent,
+    ...diag(),
   };
 }

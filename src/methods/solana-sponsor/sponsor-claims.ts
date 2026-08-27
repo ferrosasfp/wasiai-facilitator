@@ -214,3 +214,53 @@ export function extractSponsorClaims(
     );
   }
 }
+
+/**
+ * WKH-367 — deriva el PDA `escrow_state` del depósito. PURA: sin red, sin env, sin
+ * keypairs. NUNCA tira, y devuelve `undefined` — con lo que el campo se OMITE del log en vez
+ * de salir como `null` o `"undefined"` — para todo `remittanceIdHash16` que no sea un
+ * `Buffer`/`Uint8Array` de exactamente `REMITTANCE_ID_LEN` bytes, y para todo base58 que no
+ * parsee (T-12c/T-12e). Los guards viven DENTRO del `try` justamente por eso.
+ *
+ * ⚠️ LA FRASE NOMBRA EL TIPO Y EL LARGO porque decía "cualquier entrada inválida" y eso era
+ * medible-falso (CR MNR-CR-1): el guard era `…length !== REMITTANCE_ID_LEN` a secas —
+ * duck-typing puro— y `{ length: 16 }` o `new Array(16).fill(0)` lo pasaban devolviendo una
+ * dirección EQUIVOCADA (T-12f). Se endureció, porque éste es el camino del dinero y el próximo
+ * caller le va a creer al rechazo. Lo que aun así NO puede rechazar: 16 bytes con el contenido
+ * equivocado derivan una PDA distinta y válida. **Pasale los bytes reales.**
+ *
+ * ⛔ NO participa de ninguna decisión de autorización (DT-5): es diagnóstico y nada
+ * más. En particular NO se cablea dentro de `extractSponsorClaims`, cuya guarda de
+ * cuentas decide un 403: meter `escrow_state` ahí movería una tx malformada de 3
+ * cuentas del rechazo 422 de CR-1 al 403 de claims, un cambio observable en una
+ * superficie de seguridad a cambio de un campo de diagnóstico.
+ *
+ * Semillas: `["escrow", sender, sha256(utf8(remittanceId))[0..16]]` — los 16 bytes de
+ * hash, NO el string del id (`chains/escrow-idl.ts:242-255` +
+ * `methods/solana-sponsor/deposit-shape.ts:78`). Derivar con el id crudo da OTRA
+ * dirección, y mirarla en la cadena produce un falso "el depósito no aterrizó".
+ */
+export function deriveEscrowStatePda(
+  senderB58: string,
+  remittanceIdHash16: Buffer,
+  programIdB58: string,
+): string | undefined {
+  try {
+    // AR MNR-2: los guards van DENTRO del `try`. Afuera, un `null`/`undefined` en el
+    // segundo argumento tiraba en el `.length` mismo — el único camino por el que esta
+    // función podía romper la promesa de su docblock, y encima antes de intentar nada.
+    //
+    // CR MNR-CR-1: el TIPO se mira ANTES que el largo. `isBuffer` ADEMÁS del `instanceof`
+    // porque un Buffer de otro realm falla el segundo. Se re-tipa a `unknown` a propósito: la
+    // firma promete `Buffer`, y el agujero eran los callers que no la respetan.
+    const bytes: unknown = remittanceIdHash16;
+    if (!Buffer.isBuffer(bytes) && !(bytes instanceof Uint8Array)) return undefined;
+    if (bytes.length !== REMITTANCE_ID_LEN) return undefined;
+    return PublicKey.findProgramAddressSync(
+      [Buffer.from('escrow', 'utf8'), new PublicKey(senderB58).toBuffer(), bytes],
+      new PublicKey(programIdB58),
+    )[0].toBase58();
+  } catch {
+    return undefined;
+  }
+}

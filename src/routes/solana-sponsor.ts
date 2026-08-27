@@ -55,10 +55,27 @@
  *   1. El valor que mueve el `deposit` es del PROPIO sender y va a un escrow, no a un
  *      tercero: sigue teniendo `release` y `refund` por delante.
  *   2. La incógnita es RESOLUBLE por cualquiera desde afuera, sin nada nuestro: el
- *      `escrow_state` es un PDA de semillas `["escrow", sender, remittance_id]`
- *      (`chains/escrow-idl.ts`), o sea que existe o no existe, y quien tenga esos dos
- *      datos lo mira en la cadena. Un payout, en cambio, sólo se puede reconciliar con
- *      la firma que el facilitator persistió.
+ *      `escrow_state` es un PDA de semillas
+ *      `["escrow", sender, sha256(utf8(remittanceId))[0..16]]` — la tercera semilla son
+ *      los 16 BYTES DE HASH que la ix recibe como arg, NO el string del `remittanceId`
+ *      (`chains/escrow-idl.ts:242-255` + `methods/solana-sponsor/deposit-shape.ts:78`).
+ *      O sea que existe o no existe, y quien tenga esos dos datos lo mira en la cadena.
+ *      ⚠️ Hasta WKH-367 este punto daba el `remittanceId` crudo como tercera semilla.
+ *      Derivar así da OTRA dirección: quien siguiera esa fórmula vería "no hay escrow" y
+ *      concluiría un falso "el depósito no aterrizó" — justo sobre la única pregunta que
+ *      este punto declara contestable desde afuera. (La fórmula vieja NO se reproduce
+ *      textualmente acá: T-12d verifica que ese literal no esté en este archivo.)
+ *      ⚠️ Y para NOSOTROS hay un atajo que NO forma parte de lo que este punto declara:
+ *      desde WKH-367 el `escrow_pda` sale ya derivado en el log del 502 de más abajo.
+ *      Eso le ahorra la cuenta al OPERADOR, no al tercero — el log no es accesible desde
+ *      afuera, así que quien esté afuera sigue resolviendo la incógnita con la fórmula de
+ *      arriba y nada nuestro, que es justamente lo que hace fuerte a este punto.
+ *      La fórmula de este párrafo
+ *      está clavada por T-12a (control positivo, reproduce la PDA de un vector fijo),
+ *      T-12b (control negativo, el id crudo da una dirección DISTINTA) y T-12d (guard
+ *      doc↔código) en `__tests__/unit/solana-sponsor.pda-derivation.test.ts`.
+ *      Un payout, en cambio, sólo se puede reconciliar con la firma que el facilitator
+ *      persistió.
  *   3. No puede volverse un doble cobro: el vault de ese escrow se crea con `init` y no
  *      con `init_if_needed` (está documentado en `chains/escrow-idl.ts`), y su dirección
  *      se deriva del `escrow_state`, o sea de ese mismo par (sender, remittance_id). Un
@@ -84,7 +101,10 @@ import { getFeePayerKeypair } from '../infra/solana-fee-payer.js';
 import { getReleaseAuthorityPubkey } from '../infra/solana-release-authority.js';
 import { cosignAndBroadcast, parseSponsorTx } from '../methods/solana-sponsor/broadcast.js';
 import { validateDepositForSponsor, type Cr1Config } from '../methods/solana-sponsor/cr1.js';
-import { extractSponsorClaims } from '../methods/solana-sponsor/sponsor-claims.js';
+import {
+  deriveEscrowStatePda,
+  extractSponsorClaims,
+} from '../methods/solana-sponsor/sponsor-claims.js';
 import {
   buildSponsorPopMessage,
   verifySponsorPopSignature,
@@ -528,6 +548,14 @@ export const solanaSponsorRoute: FastifyPluginAsync = async (app) => {
       // existe) — o sea que sale otra vez por este mismo camino. Quien puede cerrar la
       // incógnita es el que tiene el `remittance_id`: mirando si el `escrow_state` existe.
       if (result.sent === true) {
+        // WKH-367: la dirección que el operador tiene que mirar en la cadena, derivada
+        // acá y no a mano — la fórmula tiene una trampa (la tercera semilla es el hash,
+        // no el id) que ya produjo un falso "no aterrizó". `undefined` si algo no deriva.
+        const escrowPda = deriveEscrowStatePda(
+          claims.sender,
+          claims.remittanceIdHash16,
+          cr1cfg.escrowProgramId,
+        );
         // Log PROPIO: `fail()` escribe 'solana sponsor failed', y este desenlace no es un
         // fallo. Un log que lo llame fallo es la misma mentira corrida de superficie.
         app.log.error(
@@ -545,6 +573,15 @@ export const solanaSponsorRoute: FastifyPluginAsync = async (app) => {
             // la otra mitad es el `remittance_id`, que se queda del lado del cliente a
             // propósito. Acota a qué billetera mirar; no dice qué pasó.
             sender: claims.sender,
+            // WKH-367 — los tres campos de diagnóstico. Omisión condicional (el patrón
+            // de `guard` en el `fail()` de más arriba): ausente es ausente, nunca `null`
+            // ni la cadena "undefined". NINGUNO llega al body de abajo (CD-9), y ninguna
+            // rama de decisión los lee (CD-8). `tx_signature` NO se llama `signature`: ese
+            // nombre está en REDACT_FIELDS y además afirmaría una confirmación que esta
+            // ruta no tiene.
+            ...(escrowPda === undefined ? {} : { escrow_pda: escrowPda }),
+            ...(result.detail === undefined ? {} : { broadcast_detail: result.detail }),
+            ...(result.sentSignature === undefined ? {} : { tx_signature: result.sentSignature }),
           },
           'solana sponsor outcome UNKNOWN — transaction was broadcast, on-chain effect undetermined',
         );
