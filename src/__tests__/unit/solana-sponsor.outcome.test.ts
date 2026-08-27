@@ -40,7 +40,15 @@ const bs58 = utils.bytes.bs58;
 /** El resultado que el doble del primitivo devuelve. `sent` es el eje del test. */
 type CosignFake =
   | { ok: true; signature: string }
-  | { ok: false; code: string; reason: string; sent?: boolean };
+  | {
+      ok: false;
+      code: string;
+      reason: string;
+      sent?: boolean;
+      // WKH-367: los dos campos de diagnóstico que la ruta traduce a log.
+      detail?: string;
+      sentSignature?: string;
+    };
 
 const h = vi.hoisted(() => ({
   cosignResult: {
@@ -69,6 +77,21 @@ const MINT = new PublicKey(
   // eslint-disable-next-line no-secrets/no-secrets -- mint USDC devnet de Circle (base58 público), no es un secreto.
   '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU',
 );
+/**
+ * AR MNR-1 — el program id de este fixture es DISTINTO del default de `env.ts`.
+ *
+ * Con el default, `cr1cfg.escrowProgramId` y `ESCROW_PROGRAM_ID_DEFAULT` valen lo mismo y
+ * T-8 no puede distinguirlos: un mutante que hardcodee el default en la ruta pasa verde.
+ * Y no es hipotético — `chains/escrow-program-id.ts` documenta que el program id YA rotó,
+ * o sea que en prod el override está seteado: la regresión loguearía un `escrow_pda` que
+ * no existe en la cadena, el falso "no aterrizó" que esta HU existe para evitar.
+ *
+ * Se DERIVA de una frase (sha256) en vez de pegarse como literal: así no dispara
+ * `no-secrets` y quien revise lo puede regenerar sin creerme.
+ */
+const TEST_PROGRAM_ID = new PublicKey(
+  createHash('sha256').update('wkh367-outcome-program', 'utf8').digest(),
+).toBase58();
 const REMITTANCE_ID = 'rem_outcome_sponsor';
 const AMOUNT_MINOR = 10000000n;
 
@@ -97,7 +120,7 @@ function depositData(): Buffer {
 function validBody(): Record<string, unknown> {
   const senderKeypair = Keypair.generate();
   const ix = new TransactionInstruction({
-    programId: new PublicKey(ESCROW_PROGRAM_ID_DEFAULT),
+    programId: new PublicKey(TEST_PROGRAM_ID),
     keys: [
       { pubkey: senderKeypair.publicKey, isSigner: true, isWritable: true },
       { pubkey: MINT, isSigner: false, isWritable: false },
@@ -146,6 +169,7 @@ const ENV_KEYS = [
   'SOLANA_RPC_URL',
   'SOLANA_USDC_MINT',
   'SOLANA_SPONSOR_NETWORK_ID',
+  'SOLANA_ESCROW_PROGRAM_ID',
 ] as const;
 const savedEnv = new Map<string, string | undefined>();
 
@@ -169,6 +193,7 @@ function applySponsorEnv(): void {
   setEnv('SOLANA_RPC_URL', 'http://mock-rpc');
   setEnv('SOLANA_USDC_MINT', MINT.toBase58());
   setEnv('SOLANA_SPONSOR_NETWORK_ID', NETWORK_ID);
+  setEnv('SOLANA_ESCROW_PROGRAM_ID', TEST_PROGRAM_ID);
 }
 function restoreSponsorEnv(): void {
   for (const k of ENV_KEYS) {
@@ -225,9 +250,16 @@ interface Outcome {
   signature?: string;
   sender: string;
   log: string;
+  /** WKH-367 / T-9 — las claves REALES de `body.error`, para compararlas exhaustivamente. */
+  errorKeys?: readonly string[];
 }
 
-async function run(cosign: CosignFake): Promise<Outcome> {
+/**
+ * WKH-367 / T-10: `probe` escribe en el MISMO logger del app antes de cerrarlo. Existe
+ * para medir el redactor con la app real en vez de con un pino aparte, que mediría otra
+ * configuración. Opcional: los llamadores viejos quedan idénticos.
+ */
+async function run(cosign: CosignFake, probe?: (app: FastifyInstance) => void): Promise<Outcome> {
   h.cosignResult.current = cosign;
   const cap = new CaptureStream();
   const body = validBody();
@@ -242,6 +274,7 @@ async function run(cosign: CosignFake): Promise<Outcome> {
         payload: JSON.stringify(body),
       });
     });
+    if (probe !== undefined && app !== undefined) probe(app);
     const parsed = JSON.parse(res.body) as {
       signature?: string;
       error?: { code: string; message: string };
@@ -253,6 +286,7 @@ async function run(cosign: CosignFake): Promise<Outcome> {
       signature: parsed.signature,
       sender: String(body.sender),
       log: cap.text(),
+      errorKeys: parsed.error === undefined ? undefined : Object.keys(parsed.error),
     };
   } finally {
     if (app) await app.close();
@@ -410,5 +444,84 @@ describe('POST /solana/sponsor — salió / no salió / no sé', () => {
     // Y lo que NO se loguea: el `remittance_id`, que es la otra mitad de la semilla y
     // se queda del lado del cliente (AC-10 — nada del body al log).
     expect(out.log).not.toContain(REMITTANCE_ID);
+  });
+  // ══ WKH-367 — los tres campos de diagnóstico del 502 ════════════════════════
+
+  /** El resultado del primitivo que la ruta traduce en los tests de abajo. */
+  const NO_SE_CON_DIAG = {
+    ok: false as const,
+    code: 'SPONSOR_BROADCAST_EXPIRED',
+    reason: 'BLOCKHASH_CHECK_FAILED',
+    sent: true,
+    detail: 'custom program error: 0x1',
+    sentSignature: 'SIGtest',
+  };
+
+  it('★★ T-8 (AC-N1/N3/N4): el log del 502 lleva escrow_pda + broadcast_detail + tx_signature', async () => {
+    const out = await run(NO_SE_CON_DIAG);
+    expect(out.status).toBe(502);
+
+    // El fixture pone un `escrow_state` ALEATORIO en keys[2], así que el esperado NO se
+    // compara contra esa cuenta: se DERIVA acá con la misma fórmula que declara el IDL.
+    // Quien clava la fórmula contra un vector externo es T-12a, no este test.
+    const esperado = PublicKey.findProgramAddressSync(
+      [
+        Buffer.from('escrow', 'utf8'),
+        new PublicKey(out.sender).toBuffer(),
+        createHash('sha256').update(REMITTANCE_ID, 'utf8').digest().subarray(0, 16),
+      ],
+      new PublicKey(TEST_PROGRAM_ID),
+    )[0].toBase58();
+
+    // AR MNR-1: sin esto el test no sabría que está midiendo algo. Si el fixture volviera
+    // al default, la línea de abajo pasaría igual con la ruta hardcodeando el default.
+    expect(TEST_PROGRAM_ID).not.toBe(ESCROW_PROGRAM_ID_DEFAULT);
+    expect(out.log).toContain(`"escrow_pda":"${esperado}"`);
+    expect(out.log).toContain('"broadcast_detail":"custom program error: 0x1"');
+    expect(out.log).toContain('"tx_signature":"SIGtest"');
+  });
+
+  it('★ T-8b (AC-N4): sin `detail` ni `sentSignature`, las claves se OMITEN — no salen vacías', async () => {
+    const out = await run({
+      ok: false,
+      code: 'SPONSOR_BROADCAST_EXPIRED',
+      reason: 'BLOCKHASH_CHECK_FAILED',
+      sent: true,
+    });
+    expect(out.status).toBe(502);
+    expect(out.log).not.toContain('broadcast_detail');
+    expect(out.log).not.toContain('tx_signature');
+    // ...y el que SÍ se puede derivar siempre sigue estando, para que los dos `not` de
+    // arriba no estén midiendo que la ruta dejó de loguear.
+    expect(out.log).toContain('escrow_pda');
+  });
+
+  it('★ T-9 (CD-9/AC-N5): el body del 502 tiene EXACTAMENTE code + http + message', async () => {
+    const out = await run(NO_SE_CON_DIAG);
+    // Comparación de CLAVES, no `toMatchObject`: un campo de más pasaría desapercibido.
+    expect([...(out.errorKeys ?? [])].sort()).toEqual(['code', 'http', 'message']);
+    expect(out.message).not.toContain('custom program error');
+    expect(out.message).not.toContain('SIGtest');
+  });
+
+  it('★★ T-10 (DT-6/R-3): `tx_signature` sale con su VALOR, y `signature` sigue censurada', async () => {
+    const out = await run(NO_SE_CON_DIAG, (app) => {
+      app.log.error({ signature: 'SIGredactada', tx_signature: 'SIGvisible' }, 'probe');
+    });
+    // (a) el nombre nuevo pasa: `redact` hace match de clave EXACTA.
+    expect(out.log).toContain('"tx_signature":"SIGvisible"');
+    // (b) el control del control. Sin esta mitad, (a) pasaría también con el redactor
+    // APAGADO, y el test no estaría midiendo nada del redactor.
+    expect(out.log).toContain('"signature":"[Redacted]"');
+    expect(out.log).not.toContain('SIGredactada');
+  });
+
+  it('★ T-11 (CD-10): el log del 502 no lleva el `remittance_id`, ni su hash en hex, ni en base58', async () => {
+    const hash16 = createHash('sha256').update(REMITTANCE_ID, 'utf8').digest().subarray(0, 16);
+    const out = await run(NO_SE_CON_DIAG);
+    expect(out.status).toBe(502);
+    expect(out.log).not.toContain(REMITTANCE_ID);
+    expect(out.log).not.toContain(hash16.toString('hex'));
+    expect(out.log).not.toContain(bs58.encode(hash16));
   });
 });

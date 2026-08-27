@@ -57,6 +57,14 @@ const REDACT_FIELDS: readonly string[] = [
   'password',
   // x402 signature material (an EIP-3009 signature is not a secret per se, but
   // we avoid logging raw signatures as a defensive default — SECURITY.md:114).
+  //
+  // WKH-367: `redact` hace match de clave EXACTA (ver `buildRedactPaths` abajo), así que
+  // `tx_signature` — el txid de Solana que el 502 del patrocinio loguea — pasa SIN tocar
+  // mientras `signature` sigue censurado. Eso NO es esquivar al redactor: un txid es el
+  // identificador PÚBLICO de una transacción, el mismo criterio con el que SDD 037 dejó
+  // `popSignature` afuera de esta lista. ⛔ No agregar `tx_signature` acá, y ⛔ no sacar
+  // `signature`: las dos mitades de T-10 (`solana-sponsor.outcome.test.ts`) se ponen
+  // rojas, una por cada movida.
   'signature',
   'nonce',
   // Authorization headers (bearer FACILITATOR_API_KEY travels here).
