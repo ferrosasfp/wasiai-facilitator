@@ -1187,3 +1187,172 @@ function systemTransfer(from: PublicKey): TransactionInstruction {
     lamports: 1,
   });
 }
+
+// ── HU 071 · W0-P7 ──────────────────────────────────────────────────────────
+//
+// Mide CR-1 TAL COMO ESTA (cr1.ts es Scope OUT de esta ola): si rechaza el 100 % de la forma V2,
+// el facilitator tiene que desplegarse ANTES que el cliente, y ese es el motivo mecanico del orden
+// de DT-18.
+//
+// OJO con la forma: `buildDepositIx` de esta suite arma NUEVE keys (las 8 posicionales + el
+// `reference`). El cable real de hoy lleva DIEZ, porque el IDL declara `beneficiary_ata` como
+// novena cuenta (read-only, al final de la lista a proposito) y el cliente le agrega el
+// `reference` detras. Estos vectores usan la forma del CABLE, no la del fixture viejo.
+
+interface KeysDepositoOpts {
+  sender: PublicKey;
+  reference?: PublicKey;
+  /** La cuenta EXTRA de la forma V2, que va en el indice 9, entre beneficiary_ata y reference. */
+  indice9?: AccountMeta;
+}
+
+function keysDepositoCableReal(o: KeysDepositoOpts): AccountMeta[] {
+  const keys: AccountMeta[] = [
+    { pubkey: o.sender, isSigner: true, isWritable: true }, // 0 sender
+    { pubkey: USDC_MINT_PK, isSigner: false, isWritable: false }, // 1 mint
+    { pubkey: Keypair.generate().publicKey, isSigner: false, isWritable: true }, // 2 escrow_state
+    { pubkey: Keypair.generate().publicKey, isSigner: false, isWritable: true }, // 3 vault
+    { pubkey: Keypair.generate().publicKey, isSigner: false, isWritable: true }, // 4 sender_ata
+    { pubkey: TOKEN_PK, isSigner: false, isWritable: false }, // 5 token_program
+    { pubkey: ATA_PK, isSigner: false, isWritable: false }, // 6 associated_token_program
+    { pubkey: SYS_PK, isSigner: false, isWritable: false }, // 7 system_program
+    // 8 beneficiary_ata: la NOVENA declarada del IDL, read-only y no-signer.
+    { pubkey: Keypair.generate().publicKey, isSigner: false, isWritable: false },
+  ];
+  if (o.indice9 !== undefined) keys.push(o.indice9);
+  keys.push({
+    pubkey: o.reference ?? Keypair.generate().publicKey,
+    isSigner: false,
+    isWritable: false,
+  });
+  return keys;
+}
+
+function txDepositoCableReal(
+  feePayer: PublicKey,
+  o: KeysDepositoOpts,
+): { tx: Transaction; ix: TransactionInstruction } {
+  const ix = new TransactionInstruction({
+    programId: ESCROW_PK,
+    keys: keysDepositoCableReal(o),
+    data: depositData(),
+  });
+  const tx = new Transaction();
+  tx.add(ix);
+  tx.feePayer = feePayer;
+  tx.recentBlockhash = Keypair.generate().publicKey.toBase58();
+  return { tx, ix };
+}
+
+/** El motivo de un Cr1Result, imprimible: el resultado ok trae un BigInt y JSON.stringify muere. */
+function motivoDe(r: ReturnType<typeof validateDepositForSponsor>): string {
+  return r.ok ? '(aceptado)' : r.reason;
+}
+
+describe('HU 071 · W0-P7 — CR-1 de hoy contra la forma V2', () => {
+  const feePayer = Keypair.generate().publicKey;
+
+  it('W0-P7: CR-1 de hoy rechaza la forma V2 por las BANDERAS del indice 9, y la forma V1 de hoy la acepta', () => {
+    // 1. CONTROL POSITIVO: la forma V1 del cable de HOY. Sin esto, un rechazo universal (por
+    // cualquier motivo) se leeria como "rechaza la V2".
+    const v1 = txDepositoCableReal(feePayer, { sender: Keypair.generate().publicKey });
+    expect(v1.ix.keys.length, 'V1 = 9 declaradas + el reference').toBe(10);
+    const r1 = validateDepositForSponsor(v1.tx, feePayer, CFG);
+    // Sin JSON.stringify: `feeUpperBoundLamports` es un BigInt y lo hace explotar ANTES de
+    // evaluar la asercion, con lo que el rojo diria "Do not know how to serialize a BigInt" en
+    // vez del motivo real.
+    expect(r1.ok, `la forma V1 de hoy tiene que ser ACEPTADA; motivo: ${motivoDe(r1)}`).toBe(true);
+
+    // 2. VECTOR V2: una TERCERA pubkey en el indice 9, signer y writable, que es como viajaria el
+    // `rent_payer`. Ni el fee-payer ni el sender: con el fee-payer el rechazo vendria de Check 5 y
+    // se veria igual desde afuera.
+    const rentPayer = Keypair.generate().publicKey;
+    const v2 = txDepositoCableReal(feePayer, {
+      sender: Keypair.generate().publicKey,
+      indice9: { pubkey: rentPayer, isSigner: true, isWritable: true },
+    });
+    expect(v2.ix.keys.length, 'V2 = 11 keys').toBe(11);
+    const indice9 = v2.ix.keys[9];
+    expect(indice9 === undefined ? '(ausente)' : indice9.pubkey.toBase58()).toBe(
+      rentPayer.toBase58(),
+    );
+    const r2 = validateDepositForSponsor(v2.tx, feePayer, CFG);
+    expect(r2.ok, 'la forma V2 tiene que ser RECHAZADA por CR-1 de hoy').toBe(false);
+    if (!r2.ok) {
+      expect(r2.reason, 'y el motivo tiene que ser el de las BANDERAS').toBe(
+        'REMAINING_ACCOUNT_FLAGS_INVALID',
+      );
+    }
+
+    // 3. VECTOR DE DISCRIMINACION. Aca hay un resultado MEDIDO que corrige lo que suponia el
+    // story file. Con el fee-payer en el indice 9 (signer + writable) el rechazo NO viene de
+    // Check 5 sino de las MISMAS banderas: el chequeo de cr1.ts:536 corre ANTES que el bucle de
+    // Check 5 (cr1.ts:694-697), asi que domina. Se assertea lo que salio.
+    const v3 = txDepositoCableReal(feePayer, {
+      sender: Keypair.generate().publicKey,
+      indice9: { pubkey: feePayer, isSigner: true, isWritable: true },
+    });
+    const r3 = validateDepositForSponsor(v3.tx, feePayer, CFG);
+    expect(r3.ok, 'con el fee-payer adentro tambien se rechaza').toBe(false);
+    if (!r3.ok) {
+      expect(
+        r3.reason,
+        'MEDIDO: el chequeo de banderas corre antes que Check 5 y por eso lo tapa',
+      ).toBe('REMAINING_ACCOUNT_FLAGS_INVALID');
+    }
+
+    // 3b. Y el vector que SI aisla Check 5: el fee-payer adentro de la ix pero como cuenta
+    // read-only y no-signer (en el lugar del `reference`), donde el chequeo de banderas ya no lo
+    // ve. Sin este vector, "los dos caminos de rechazo son distintos" seria una afirmacion sin
+    // input que la pueda poner en rojo.
+    const v3b = txDepositoCableReal(feePayer, {
+      sender: Keypair.generate().publicKey,
+      reference: feePayer,
+    });
+    const r3b = validateDepositForSponsor(v3b.tx, feePayer, CFG);
+    expect(r3b.ok, 'el fee-payer referenciado se rechaza').toBe(false);
+    if (!r3b.ok && !r2.ok) {
+      expect(r3b.reason, 'y aca SI, por Check 5').toBe('FEE_PAYER_REFERENCED_IN_INSTRUCTION');
+      expect(r3b.reason, 'los dos caminos de rechazo NO son el mismo').not.toBe(r2.reason);
+    }
+
+    // 4a. CRUCE DE IX: la forma V2 acompanada de un register_escrow BIEN formado (4 keys). Lo que
+    // se mide aca es CUAL chequeo domina, porque el de las banderas del deposito vive antes en el
+    // archivo que los del segundo ix. Se assertea lo que salio, medido.
+    const par = buildAtomicPair();
+    const depV2 = new TransactionInstruction({
+      programId: ESCROW_PK,
+      keys: [
+        ...par.deposit.keys.slice(0, 8),
+        { pubkey: Keypair.generate().publicKey, isSigner: false, isWritable: false },
+        { pubkey: Keypair.generate().publicKey, isSigner: true, isWritable: true },
+        { pubkey: Keypair.generate().publicKey, isSigner: false, isWritable: false },
+      ],
+      data: par.deposit.data,
+    });
+    expect(depV2.keys.length, 'el deposito del par tambien es V2 (11 keys)').toBe(11);
+    const r4a = validateDepositForSponsor(atomicTx(feePayer, depV2, par.register), feePayer, CFG);
+    expect(r4a.ok, 'el par con deposito V2 se rechaza').toBe(false);
+    if (!r4a.ok) {
+      expect(r4a.reason, 'el chequeo del deposito corre ANTES que los del segundo ix').toBe(
+        'REMAINING_ACCOUNT_FLAGS_INVALID',
+      );
+    }
+
+    // 4b. Y la TERCERA via de rechazo, aislada: un deposito V1 (aceptable) con un register_escrow
+    // de largo equivocado. Independiente de las banderas.
+    const par2 = buildAtomicPair({ extraAccount: true });
+    expect(par2.register.keys.length, 'el register lleva un largo equivocado').toBe(5);
+    const r4b = validateDepositForSponsor(
+      atomicTx(feePayer, par2.deposit, par2.register),
+      feePayer,
+      CFG,
+    );
+    expect(r4b.ok, 'el register de largo equivocado se rechaza').toBe(false);
+    if (!r4b.ok) {
+      expect(r4b.reason, 'y por su propio motivo, no por las banderas').toBe(
+        'SECOND_IX_ACCOUNTS_INVALID',
+      );
+    }
+  });
+});
