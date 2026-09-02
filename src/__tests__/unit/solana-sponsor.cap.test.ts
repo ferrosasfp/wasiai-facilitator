@@ -155,3 +155,53 @@ describe('releaseSponsorDailyLamports (AR-MNR-1 — compensating decrement)', ()
     ).resolves.toBeUndefined();
   });
 });
+
+describe('HU 071 · W0-P8 — que ve, exactamente, el contador diario', () => {
+  /*
+   * La premisa: el contador diario incrementa SOLO por `feeLamports`, y lo unico que le llega
+   * desde la ruta es el `feeUpperBound` (routes/solana-sponsor.ts, callback `onFeeEstimated`). Si
+   * el alquiler que la HU 071 va a adelantar entrara por otro lado, el contador quedaria ciego a
+   * el. Este `it` no opina sobre eso: MIDE el termino y la clave, ejecutandolos.
+   *
+   * Lo que NO prueba: que nadie mas incremente esa clave. Eso vive en la ruta, y su mutante
+   * (M-P8) no tiene guard: ver el reporte de W0.
+   */
+  it('W0-P8: el contador diario incrementa EXACTAMENTE por feeLamports, y el release devuelve el MISMO termino', async () => {
+    const fee = 4_321n;
+    const cap = 1_000_000n;
+
+    // 1. El incremento es el termino EXACTO, ni un lamport mas.
+    mockClient.incrby.mockResolvedValue(Number(fee));
+    const r = await checkAndIncrSponsorDailyLamports(fee, cap, logger, 'keyW0P8');
+    expect(r.ok).toBe(true);
+    expect(mockClient.incrby).toHaveBeenCalledTimes(1);
+    const llamadaIncr = mockClient.incrby.mock.calls[0];
+    expect(llamadaIncr?.[1], 'el incremento es feeLamports, textual').toBe(fee.toString());
+
+    // 2. El release decrementa el MISMO termino sobre la MISMA clave. El docblock de
+    // `releaseSponsorDailyLamports` dice que la derivacion de la clave la espeja EXACTAMENTE;
+    // esto lo ejecuta en vez de citarlo.
+    await releaseSponsorDailyLamports(fee, cap, logger, 'keyW0P8');
+    expect(mockClient.decrby).toHaveBeenCalledTimes(1);
+    const llamadaDecr = mockClient.decrby.mock.calls[0];
+    expect(llamadaDecr?.[1], 'el decremento es el mismo termino').toBe(fee.toString());
+    expect(llamadaDecr?.[0], 'y sobre la MISMA clave').toBe(llamadaIncr?.[0]);
+
+    // 3. CONTROL POSITIVO: con fee = 0 el incremento es '0' y el release es no-op; y con el techo
+    // desactivado ninguna de las dos toca Redis. Sin esto, un mock que registrara cualquier cosa
+    // pasaria los pasos 1 y 2.
+    mockClient.incrby.mockReset();
+    mockClient.decrby.mockReset();
+    mockClient.incrby.mockResolvedValue(0);
+    await checkAndIncrSponsorDailyLamports(0n, cap, logger, 'keyW0P8');
+    expect(mockClient.incrby.mock.calls[0]?.[1], 'fee 0 incrementa en 0').toBe('0');
+    await releaseSponsorDailyLamports(0n, cap, logger, 'keyW0P8');
+    expect(mockClient.decrby, 'fee 0 no decrementa nada').not.toHaveBeenCalled();
+
+    mockClient.incrby.mockReset();
+    await checkAndIncrSponsorDailyLamports(fee, 0n, logger, 'keyW0P8');
+    expect(mockClient.incrby, 'con el techo desactivado no se toca Redis').not.toHaveBeenCalled();
+    await releaseSponsorDailyLamports(fee, 0n, logger, 'keyW0P8');
+    expect(mockClient.decrby, 'ni el release').not.toHaveBeenCalled();
+  });
+});
