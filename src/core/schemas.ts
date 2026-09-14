@@ -190,6 +190,55 @@ const SolanaRequestSchema = z
   })
   .strict();
 
+// ─── Casper · rama casper (4ª rama del union) ───────────────────────────────
+// Casper transporta claves públicas / account-hashes / contract-hashes (NO
+// 0x-hex EVM), igual que la rama Solana transporta base58. Los criterios son
+// LOS MISMOS que src/chains/casper-adapter.ts (CD-9 heredado de la rama
+// Solana): lo que pasa el Zod pasa el parse del adapter.
+const CasperPublicKeySchema = z
+  .string()
+  .regex(/^(01[0-9a-fA-F]{64}|02[0-9a-fA-F]{66})$/u, 'must be a casper public key');
+
+const CasperPayToSchema = z
+  .string()
+  .regex(
+    /^(01[0-9a-fA-F]{64}|02[0-9a-fA-F]{66}|account-hash-[0-9a-fA-F]{64})$/u,
+    'must be a casper public key or account hash',
+  );
+
+const CasperContractHashSchema = z
+  .string()
+  .regex(/^(hash-)?[0-9a-fA-F]{64}$/u, 'must be a casper contract hash');
+
+const CasperAcceptedSchema = z
+  .object({
+    scheme: z.literal('exact'),
+    network: z
+      .string()
+      .regex(/^casper:(casper|casper-test)$/u, 'network must be casper:<casper|casper-test>'),
+    amount: Uint256StringSchema, // motes (u512 ⊂ uint256 string) — reusa el primitivo
+    asset: CasperContractHashSchema, // wCSPR CEP-18 contract hash
+    payTo: CasperPayToSchema,
+    maxTimeoutSeconds: z.number().int().positive(),
+  })
+  .strict();
+
+const CasperPayloadSchema = z
+  .object({
+    signature: z.string().min(1),
+    authorization: z.object({ from: CasperPublicKeySchema }).passthrough(),
+  })
+  .passthrough();
+
+const CasperRequestSchema = z
+  .object({
+    x402Version: z.literal(2),
+    resource: ResourceSchema,
+    accepted: CasperAcceptedSchema,
+    payload: CasperPayloadSchema,
+  })
+  .strict();
+
 // The exported TYPE intentionally reflects ONLY the two EVM branches — it is
 // BYTE-IDENTICAL to the pre-HU-SOL-9 inferred type. The Solana runtime path
 // early-returns in core/{verify,settle}.ts (namespace dispatch) BEFORE any
@@ -217,6 +266,7 @@ export const VerifyRequestSchema = z.union([
   Eip3009RequestSchema,
   NonEip3009RequestSchema,
   SolanaRequestSchema,
+  CasperRequestSchema,
 ]) as unknown as z.ZodType<VerifyRequest, z.ZodTypeDef, unknown>;
 
 // ─── WFAC-21 extension ──────────────────────────────────────────────────

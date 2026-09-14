@@ -19,6 +19,7 @@ import { kiteTestnetAdapter, kiteMainnetAdapter } from './kite.js';
 import { avalancheFujiAdapter, avalancheMainnetAdapter } from './avalanche.js';
 import { baseSepoliaAdapter, baseMainnetAdapter } from './base.js';
 import { solanaAdapter } from './solana-adapter.js';
+import { casperMainnetAdapter, casperTestnetAdapter } from './casper-adapter.js';
 
 chainRegistry.register(kiteTestnetAdapter);
 // Optional adapters — registered only when fully configured.
@@ -43,3 +44,9 @@ if (baseMainnetAdapter !== null) chainRegistry.register(baseMainnetAdapter);
 // SOLANA_RPC_URL + SOLANA_USDC_MINT are set (the factory returns null otherwise),
 // so the EVM suite is byte-identical when Solana is unconfigured (AC-6).
 if (solanaAdapter !== null) chainRegistry.register(solanaAdapter);
+// Casper (verify/settle delegated to the Casper x402 facilitator, non-EVM).
+// Opt-in-off, same gate as Solana: registered only when CASPER_<NET>_ENABLED=true
+// AND CASPER_<NET>_WCSPR_CONTRACT_HASH is set (the factory returns null otherwise),
+// so deployments that do not configure Casper boot byte-identically.
+if (casperMainnetAdapter !== null) chainRegistry.register(casperMainnetAdapter);
+if (casperTestnetAdapter !== null) chainRegistry.register(casperTestnetAdapter);
